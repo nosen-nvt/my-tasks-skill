@@ -46,20 +46,6 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 2. `tasks/{datasource_id}.json` を読み込み
 3. `tasks` 配列から `remote_id` が一致するエントリを取得
 
-## ステータス管理ポリシー
-
-**Source of Truth = データソース側**
-
-- タスクのステータスはデータソース（JIRA、Microsoft To Do 等）が正
-- タスク管理リポジトリ側でステータスを独自に変更してはならない
-- ステータスを変更したい場合:
-  1. `datasources/{datasource_id}.json` の `operations` に記載されたコマンドを実行してデータソース側を更新
-  2. その後「タスク最新化」操作でリポジトリに反映
-
-**例外**: 消失タスク
-- データソースから取得できなくなったタスク（完了・削除等により JSONL に出現しなくなったもの）
-- `status` を `done` に変更して作業ログとして残す
-
 ## git 操作ポリシー
 
 リポジトリへの変更を伴うすべての操作完了後に自動で以下を実行する:
@@ -77,11 +63,10 @@ git push
 |------|-------------|
 | タスク最新化 | `sync: update tasks from all datasources` |
 | 日次ゴール設定 | `daily: set goals for 2026-02-18` |
-| 日次ふりかえり | `daily: review for 2026-02-18` |
 | データソース追加 | `feat: add datasource jira` |
 | プロジェクト追加 | `feat: add project ubs-mgmt-tool` |
 | マイルストーン追加 | `feat: add milestone v1-release to ubs-mgmt-tool` |
-| タスク操作 | `task: update status of jira/UBS-101 to done` |
+| タスク操作 | `task: operate on jira/UBS-101` |
 | リポジトリ初期化 | `init: initialize my-tasks repository` |
 
 git は手軽な分散DBとして利用しており、コミット粒度を細かく意識する必要はない。

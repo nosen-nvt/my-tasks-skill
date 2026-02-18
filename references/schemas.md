@@ -73,7 +73,6 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 |---|---|---|---|
 | `remote_id` | string | Yes | データソース内でのタスク一意識別子 |
 | `title` | string | Yes | タスクタイトル |
-| `status` | string | Yes | `pending`, `in_progress`, `done` のいずれか |
 | `due_date` | string\|null | No | 期日（YYYY-MM-DD形式）、なければ `null` |
 | `url` | string\|null | No | タスクのURL |
 | `project_key` | string\|null | No | データソース内のプロジェクト識別子 |
@@ -88,7 +87,6 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
     {
       "remote_id": "UBS-101",
       "title": "API実装",
-      "status": "in_progress",
       "due_date": "2026-03-15",
       "url": "https://jira.example.com/browse/UBS-101",
       "project_key": "UBS"
@@ -96,17 +94,8 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
     {
       "remote_id": "UBS-102",
       "title": "認証機能の追加",
-      "status": "pending",
       "due_date": "2026-03-20",
       "url": "https://jira.example.com/browse/UBS-102",
-      "project_key": "UBS"
-    },
-    {
-      "remote_id": "UBS-200",
-      "title": "ドキュメント整備",
-      "status": "done",
-      "due_date": null,
-      "url": "https://jira.example.com/browse/UBS-200",
       "project_key": "UBS"
     }
   ]
@@ -189,7 +178,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 
 ## 4. 日次ゴール (`daily/YYYY-MM-DD.json`)
 
-1日1ファイル。その日の作業ゴールと振り返りを記録する。
+1日1ファイル。その日の作業ゴールを記録する。
 
 ### スキーマ
 
@@ -197,7 +186,6 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 |---|---|---|---|
 | `date` | string | Yes | 日付（YYYY-MM-DD形式） |
 | `goals` | array | Yes | ゴールエントリの配列 |
-| `review` | object\|null | No | 日次振り返り（未記入の場合は `null`） |
 
 ### ゴールエントリのスキーマ
 
@@ -206,13 +194,6 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 | `project_id` | string | Yes | プロジェクトの識別子 |
 | `milestone_id` | string | Yes | マイルストーンの識別子 |
 | `tasks` | array | Yes | タスク参照の配列（`ref` キーを持つオブジェクト） |
-
-### レビューのスキーマ
-
-| フィールド | 型 | 必須 | 説明 |
-|---|---|---|---|
-| `summary` | string | Yes | 完了/未完了の概要 |
-| `notes` | string | No | 気づきや翌日への申し送り |
 
 ### 例
 
@@ -228,11 +209,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
         { "ref": "jira/UBS-102" }
       ]
     }
-  ],
-  "review": {
-    "summary": "UBS-101 は完了。UBS-102 はAPI仕様の確認待ちでブロック中。",
-    "notes": "明日の朝にAPI仕様をチームに確認する"
-  }
+  ]
 }
 ```
 
@@ -250,7 +227,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 | `datasource_id` | string | Yes | データソースの識別子 |
 | `remote_id` | string | Yes | データソース内でのタスク一意識別子 |
 | `title` | string | Yes | タスクタイトル |
-| `status` | string | No | `pending`（デフォルト）, `in_progress`, `done` |
+| `status` | string | No | 収集スクリプトが出力してもよいが、sync-tasks.py では無視する（保存しない） |
 | `due_date` | string | No | 期日（YYYY-MM-DD） |
 | `url` | string | No | タスクのURL |
 | `project_key` | string | No | データソース内のプロジェクト識別子（自動振り分けに使用） |
@@ -258,13 +235,13 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 ### 例
 
 ```jsonl
-{"datasource_id":"jira","remote_id":"UBS-101","title":"API実装","status":"in_progress","project_key":"UBS","url":"https://jira.example.com/browse/UBS-101","due_date":"2026-03-15"}
-{"datasource_id":"jira","remote_id":"UBS-102","title":"認証機能の追加","status":"pending","project_key":"UBS","url":"https://jira.example.com/browse/UBS-102","due_date":"2026-03-20"}
-{"datasource_id":"ms-todo","remote_id":"abc123","title":"書類提出","status":"pending","project_key":"個人タスク"}
+{"datasource_id":"jira","remote_id":"UBS-101","title":"API実装","project_key":"UBS","url":"https://jira.example.com/browse/UBS-101","due_date":"2026-03-15"}
+{"datasource_id":"jira","remote_id":"UBS-102","title":"認証機能の追加","project_key":"UBS","url":"https://jira.example.com/browse/UBS-102","due_date":"2026-03-20"}
+{"datasource_id":"ms-todo","remote_id":"abc123","title":"書類提出","project_key":"個人タスク"}
 ```
 
 ### 規約
 
 - 収集スクリプトは完了済みタスクを出力しない（未完了タスクのみ出力）
-- JSONL に含まれないが `tasks/*.json` に存在するタスクは「消失タスク」として扱い、`status` を `done` に変更する
-- フィールドが存在しない場合はデフォルト値を使用（`status` → `"pending"`, その他 → `null`）
+- JSONL に含まれないが `tasks/*.json` に存在するタスクは「消失タスク」として扱い、タスクストアから削除する。プロジェクトと日次ゴールの参照も削除する
+- フィールドが存在しない場合はデフォルト値を使用（`null`）

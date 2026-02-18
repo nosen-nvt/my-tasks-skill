@@ -97,8 +97,8 @@ def process_datasource(
     Returns:
         {
             "added": [...],      # 新規タスク
-            "updated": [...],    # 更新タスク
-            "vanished": [...],   # 消失タスク（status を done に変更）
+            "vanished": [...],   # 消失タスク（ストアから削除）
+            "vanished_refs": [...],   # 消失タスクの ref リスト（cleanup 用）
             "auto_assigned": [...],   # project_mapping で自動割り当て成功
             "needs_review": [...],    # プロジェクト特定できず → 要確認
         }
@@ -107,53 +107,36 @@ def process_datasource(
     datasource = load_datasource(datasources_dir, datasource_id)
     project_mapping = datasource.get("project_mapping", {}) if datasource else {}
 
-    existing_by_id: dict[str, dict] = {t["remote_id"]: t for t in store.get("tasks", [])}
-    incoming_by_id: dict[str, dict] = {t["remote_id"]: t for t in incoming_tasks}
+    # 旧ストアの ID セット（消失検出・自動割り当て判定に使う）
+    existing_ids: set[str] = {t["remote_id"] for t in store.get("tasks", [])}
+    # 旧ストアのタイトル（消失レポート用）
+    existing_titles: dict[str, str] = {t["remote_id"]: t.get("title", "") for t in store.get("tasks", [])}
 
+    # incoming から新しいタスクリストを直接構築（洗い替え）
+    new_tasks = []
     added = []
-    updated = []
-    vanished = []
     auto_assigned = []
     needs_review = []
 
-    # 新規・更新タスクの処理
-    for remote_id, incoming in incoming_by_id.items():
+    for t in incoming_tasks:
+        remote_id = t["remote_id"]
         task_entry = {
             "remote_id": remote_id,
-            "title": incoming["title"],
-            "status": incoming.get("status", "pending"),
-            "due_date": incoming.get("due_date", None),
-            "url": incoming.get("url", None),
-            "project_key": incoming.get("project_key", None),
+            "title": t["title"],
+            "due_date": t.get("due_date"),
+            "url": t.get("url"),
+            "project_key": t.get("project_key"),
         }
+        new_tasks.append(task_entry)
 
-        if remote_id in existing_by_id:
-            # 既存タスク: フィールドを上書き
-            existing = existing_by_id[remote_id]
-            changed = (
-                existing.get("title") != task_entry["title"]
-                or existing.get("status") != task_entry["status"]
-                or existing.get("due_date") != task_entry["due_date"]
-                or existing.get("url") != task_entry["url"]
-            )
-            existing.update(task_entry)
-            if changed:
-                updated.append({
-                    "datasource_id": datasource_id,
-                    "remote_id": remote_id,
-                    "title": task_entry["title"],
-                })
-        else:
-            # 新規タスク: ストアに追加
-            existing_by_id[remote_id] = task_entry
+        # 新規タスクのみ自動割り当て対象
+        if remote_id not in existing_ids:
             added.append({
                 "datasource_id": datasource_id,
                 "remote_id": remote_id,
                 "title": task_entry["title"],
                 "project_key": task_entry["project_key"],
             })
-
-            # プロジェクト自動割り当て
             project_id = resolve_project(task_entry["project_key"], project_mapping)
             ref = f"{datasource_id}/{remote_id}"
             if project_id:
@@ -171,28 +154,76 @@ def process_datasource(
                     "project_key": task_entry["project_key"],
                 })
 
-    # 消失タスクの処理（done 以外のタスクが JSONL に含まれない場合）
-    for remote_id, existing in existing_by_id.items():
-        if remote_id not in incoming_by_id and existing.get("status") != "done":
-            existing["status"] = "done"
-            vanished.append({
-                "datasource_id": datasource_id,
-                "remote_id": remote_id,
-                "title": existing.get("title", ""),
-            })
+    # 消失タスク = 旧ストアにあって incoming にないもの
+    incoming_ids = {t["remote_id"] for t in incoming_tasks}
+    vanished = [
+        {"datasource_id": datasource_id, "remote_id": rid, "title": existing_titles[rid]}
+        for rid in existing_ids - incoming_ids
+    ]
+    vanished_refs = [f"{datasource_id}/{rid}" for rid in existing_ids - incoming_ids]
 
-    # ストアを更新
-    store["tasks"] = list(existing_by_id.values())
+    # 洗い替え保存
+    store["tasks"] = new_tasks
     store["updated_at"] = now_iso()
     save_task_store(tasks_dir, store)
 
     return {
         "added": added,
-        "updated": updated,
         "vanished": vanished,
+        "vanished_refs": vanished_refs,
         "auto_assigned": auto_assigned,
         "needs_review": needs_review,
     }
+
+
+def cleanup_vanished_refs(repo_dir: Path, vanished_refs: list[str]) -> None:
+    """消失タスクへの参照を projects と daily から削除する。"""
+    if not vanished_refs:
+        return
+    refs_to_remove = set(vanished_refs)
+
+    # projects/*.json のマイルストーンタスク参照をクリーンアップ
+    projects_dir = repo_dir / "projects"
+    if projects_dir.exists():
+        for project_path in projects_dir.glob("*.json"):
+            with open(project_path, encoding="utf-8") as f:
+                project = json.load(f)
+            changed = False
+            for milestone in project.get("milestones", []):
+                original = milestone.get("tasks", [])
+                filtered = [t for t in original if t.get("ref") not in refs_to_remove]
+                if len(filtered) != len(original):
+                    milestone["tasks"] = filtered
+                    changed = True
+            if changed:
+                with open(project_path, "w", encoding="utf-8") as f:
+                    json.dump(project, f, ensure_ascii=False, indent=2)
+                    f.write("\n")
+
+    # daily/*.json のゴールタスク参照をクリーンアップ
+    daily_dir = repo_dir / "daily"
+    if daily_dir.exists():
+        for daily_path in daily_dir.glob("*.json"):
+            with open(daily_path, encoding="utf-8") as f:
+                daily = json.load(f)
+            changed = False
+            new_goals = []
+            for goal in daily.get("goals", []):
+                original = goal.get("tasks", [])
+                filtered = [t for t in original if t.get("ref") not in refs_to_remove]
+                if len(filtered) != len(original):
+                    goal["tasks"] = filtered
+                    changed = True
+                # tasks が空になったゴールエントリも除外
+                if filtered:
+                    new_goals.append(goal)
+                else:
+                    changed = True
+            if changed:
+                daily["goals"] = new_goals
+                with open(daily_path, "w", encoding="utf-8") as f:
+                    json.dump(daily, f, ensure_ascii=False, indent=2)
+                    f.write("\n")
 
 
 def apply_auto_assignments(repo_dir: Path, auto_assigned: list[dict]) -> None:
@@ -316,8 +347,8 @@ def main() -> None:
 
     # 集計結果
     total_added = []
-    total_updated = []
     total_vanished = []
+    total_vanished_refs = []
     total_auto_assigned = []
     total_needs_review = []
 
@@ -326,8 +357,8 @@ def main() -> None:
             datasource_id, incoming_tasks, tasks_dir, datasources_dir
         )
         total_added.extend(result["added"])
-        total_updated.extend(result["updated"])
         total_vanished.extend(result["vanished"])
+        total_vanished_refs.extend(result["vanished_refs"])
         total_auto_assigned.extend(result["auto_assigned"])
         total_needs_review.extend(result["needs_review"])
 
@@ -335,17 +366,19 @@ def main() -> None:
     if total_auto_assigned:
         apply_auto_assignments(repo_dir, total_auto_assigned)
 
+    # 消失タスクの参照を projects と daily からクリーンアップ
+    if total_vanished_refs:
+        cleanup_vanished_refs(repo_dir, total_vanished_refs)
+
     # レポートを JSON で出力
     report = {
         "summary": {
             "added": len(total_added),
-            "updated": len(total_updated),
             "vanished": len(total_vanished),
             "auto_assigned": len(total_auto_assigned),
             "needs_review": len(total_needs_review),
         },
         "added": total_added,
-        "updated": total_updated,
         "vanished": total_vanished,
         "auto_assigned": total_auto_assigned,
         "needs_review": total_needs_review,
