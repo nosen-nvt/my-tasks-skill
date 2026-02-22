@@ -25,12 +25,14 @@ JIRA・Microsoft To Do 等の外部データソースからタスクを収集し
 6. **日次ゴール設定** - 今日取り組むタスクを選定して日次ゴールファイルを作成
 7. **タスク操作（データソース側）** - ステータス変更・担当者変更・新規作成等をデータソースに反映
 8. **参照系** - プロジェクト状況確認・日次ゴール確認・タスク検索
+9. **タスクディスパッチ** - デイリーゴールのタスクを tmux で並列実行
 
 ## 詳細リファレンス
 
 - **アーキテクチャ・リポジトリ構成**: `references/architecture.md`
 - **全 JSON スキーマと記述例**: `references/schemas.md`
 - **各操作の詳細手順**: `references/operations.md`
+- **ディスパッチャー設計**: `references/dispatcher-design.md`
 
 ## sync-tasks.py の使い方
 
@@ -70,6 +72,45 @@ python3 ~/.claude/skills/my-tasks/scripts/sync-tasks.py \
 - `vanished`: ストアから削除したタスク（プロジェクトと日次ゴールの参照も削除済み）
 - `auto_assigned`: `datasources/*.json` の `project_mapping` で自動割り当て成功したタスク（`projects/*.json` の `_default` マイルストーンに追加済み）
 - `needs_review`: プロジェクトが特定できなかったタスク → ユーザーに提案・確認が必要
+
+## dispatcher.py の使い方
+
+デイリーゴールのタスクを tmux 上で並列実行するディスパッチャー。
+
+```bash
+# ディスパッチ開始（今日のデイリーゴールを対象）
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py start \
+  --repo ~/.local/share/my-tasks
+
+# オプション指定
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py start \
+  --repo ~/.local/share/my-tasks \
+  --max-slots 5 \
+  --date 2026-02-22 \
+  --command sandbox
+
+# ステータス確認（JSON 出力）
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status
+
+# 実行中のディスパッチにタスクを追加
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py add \
+  --ref jira/UBS-103 \
+  --working-dir /path/to/project \
+  --note "認証部分を優先"
+
+# 新規タスク起動を停止（実行中セッションは継続）
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py stop
+
+# 強制終了（tmux セッションごと終了）
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py kill
+```
+
+### 前提条件
+
+- プロジェクト定義に `working_directory` が設定されていること
+- 日次ゴールが設定済みであること
+
+詳細は `references/dispatcher-design.md` を参照。
 
 ## 注意事項
 

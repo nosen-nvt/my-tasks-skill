@@ -301,3 +301,60 @@
 2. `tasks/*.json` をすべて読み込み、条件に合致するタスクを絞り込み
 
 3. 結果をプロジェクト・マイルストーン情報（`projects/*.json` を参照）と併せて表示
+
+---
+
+## 9. タスクディスパッチ
+
+デイリーゴールのタスクを tmux 上で複数の Claude Code セッションとして並列実行する。
+
+### 前提条件
+
+- 日次ゴールが設定済み（操作6）
+- ディスパッチ対象プロジェクトの `projects/{project_id}.json` に `working_directory` が設定されている
+- `tmux` がインストールされている
+
+### 手順
+
+1. 日次ゴールを設定（操作6）し、今日取り組むタスクを確定
+
+2. 必要に応じてプロジェクト定義に `working_directory` を設定:
+   ```bash
+   # projects/{project_id}.json に "working_directory": "/path/to/project" を追加
+   ```
+
+3. ディスパッチ開始:
+   ```bash
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py start \
+     --repo ~/.local/share/my-tasks \
+     [--max-slots 3] \
+     [--command sandbox]
+   ```
+
+4. 別ターミナルから監視:
+   ```bash
+   # ステータス確認
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status
+
+   # tmux ウィンドウ一覧
+   tmux list-windows -t dispatch
+   ```
+
+5. 必要に応じてタスク追加:
+   ```bash
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py add \
+     --ref jira/UBS-103 \
+     --working-dir /path/to/project \
+     [--note "補足指示"]
+   ```
+
+6. 全タスク完了後、JSON レポートが stdout に出力される
+
+7. 停止・強制終了:
+   ```bash
+   # 新規タスクの起動を停止（実行中セッションは継続）
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py stop
+
+   # tmux セッションごと強制終了
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py kill
+   ```

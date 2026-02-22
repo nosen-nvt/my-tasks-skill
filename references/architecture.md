@@ -86,6 +86,28 @@ bash "$SCRIPT_DIR/fetch-ms-todo.sh"
 
 新しいデータソースを追加した際はこのファイルに呼び出しを追記する。
 
+## ディスパッチャー
+
+デイリーゴールに登録されたタスクを tmux 上で並列実行するバッチ型ツール。
+
+### tmux セッション構成
+
+- **セッション名**: `dispatch`
+- **コントロールウィンドウ**: `_control`
+- **タスクウィンドウ**: `{dispatch_id}`（ref の `/` を `-` に置換、例: `jira-UBS-101`）
+
+### ランタイム状態ファイル
+
+パス: `$XDG_RUNTIME_DIR/my-tasks-dispatcher.json`（フォールバック: `/tmp/my-tasks-dispatcher.json`）
+
+スキーマは `schemas.md` セクション6を参照。
+
+### 終了コードファイル
+
+各セッションの終了コードは `/tmp/dispatch-{dispatch_id}.exit` に書き込まれる。
+
+詳細は `dispatcher-design.md` を参照。
+
 ## sync-tasks.py の役割
 
 タスク最新化処理の中核を担う Python スクリプト。

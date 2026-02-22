@@ -116,6 +116,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 | `name` | string | Yes | プロジェクト名 |
 | `description` | string | No | プロジェクトの説明 |
 | `repositories` | array | No | 関連するリポジトリURLの配列 |
+| `working_directory` | string\|null | No | dispatcher がセッションを起動する作業ディレクトリ。null の場合はディスパッチ不可 |
 | `milestones` | array | Yes | マイルストーンの配列（`_default` を必ず含む） |
 
 ### マイルストーンのスキーマ
@@ -193,7 +194,14 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 |---|---|---|---|
 | `project_id` | string | Yes | プロジェクトの識別子 |
 | `milestone_id` | string | Yes | マイルストーンの識別子 |
-| `tasks` | array | Yes | タスク参照の配列（`ref` キーを持つオブジェクト） |
+| `tasks` | array | Yes | タスク参照の配列 |
+
+### タスク参照のスキーマ
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `ref` | string | Yes | `datasource_id/remote_id` 形式の複合キー |
+| `note` | string\|null | No | dispatcher 向け補足指示 |
 
 ### 例
 
@@ -206,7 +214,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
       "milestone_id": "v1-release",
       "tasks": [
         { "ref": "jira/UBS-101" },
-        { "ref": "jira/UBS-102" }
+        { "ref": "jira/UBS-102", "note": "API の認証部分を優先して実装" }
       ]
     }
   ]
@@ -245,3 +253,78 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 - 収集スクリプトは完了済みタスクを出力しない（未完了タスクのみ出力）
 - JSONL に含まれないが `tasks/*.json` に存在するタスクは「消失タスク」として扱い、タスクストアから削除する。プロジェクトと日次ゴールの参照も削除する
 - フィールドが存在しない場合はデフォルト値を使用（`null`）
+
+---
+
+## 6. ディスパッチャー実行状態 (`$XDG_RUNTIME_DIR/my-tasks-dispatcher.json`)
+
+ディスパッチャーのランタイム状態を保持するファイル。`$XDG_RUNTIME_DIR` が未設定の場合は `/tmp/my-tasks-dispatcher.json` にフォールバックする。
+
+### スキーマ
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `date` | string | Yes | 対象日付（YYYY-MM-DD形式） |
+| `max_slots` | integer | Yes | 最大並列セッション数 |
+| `status` | string | Yes | `running` \| `completed` \| `interrupted` |
+| `command` | string | Yes | セッション起動コマンド（例: `sandbox`） |
+| `started_at` | string | Yes | 開始日時（ISO 8601形式） |
+| `finished_at` | string\|null | Yes | 終了日時（ISO 8601形式）、実行中は `null` |
+| `items` | array | Yes | ディスパッチアイテムの配列 |
+
+### ディスパッチアイテムのスキーマ
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `dispatch_id` | string | Yes | 識別子（ref の `/` を `-` に置換） |
+| `ref` | string | Yes | タスク参照（`datasource_id/remote_id` 形式） |
+| `working_dir` | string | Yes | 作業ディレクトリ |
+| `note` | string\|null | No | 補足指示 |
+| `title` | string\|null | No | タスクタイトル |
+| `status` | string | Yes | `queued` \| `running` \| `done` \| `failed` \| `skipped` |
+| `tmux_window` | string\|null | No | tmux ウィンドウ名 |
+| `pid` | integer\|null | No | tmux ペインの PID |
+| `exit_code` | integer\|null | No | 終了コード |
+| `started_at` | string\|null | No | 開始日時（ISO 8601形式） |
+| `finished_at` | string\|null | No | 終了日時（ISO 8601形式） |
+
+### 例
+
+```json
+{
+  "date": "2026-02-22",
+  "max_slots": 3,
+  "status": "running",
+  "command": "sandbox",
+  "started_at": "2026-02-22T09:00:00+09:00",
+  "finished_at": null,
+  "items": [
+    {
+      "dispatch_id": "jira-UBS-101",
+      "ref": "jira/UBS-101",
+      "working_dir": "/home/user/projects/ubs-mgmt-tool",
+      "note": null,
+      "title": "API実装",
+      "status": "running",
+      "tmux_window": "jira-UBS-101",
+      "pid": 12345,
+      "exit_code": null,
+      "started_at": "2026-02-22T09:00:05+09:00",
+      "finished_at": null
+    },
+    {
+      "dispatch_id": "jira-UBS-102",
+      "ref": "jira/UBS-102",
+      "working_dir": "/home/user/projects/ubs-mgmt-tool",
+      "note": "認証部分を優先",
+      "title": "認証機能の追加",
+      "status": "queued",
+      "tmux_window": null,
+      "pid": null,
+      "exit_code": null,
+      "started_at": null,
+      "finished_at": null
+    }
+  ]
+}
+```
