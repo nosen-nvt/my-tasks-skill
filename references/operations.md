@@ -328,7 +328,7 @@
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py start \
      --repo ~/.local/share/my-tasks \
      [--max-slots 3] \
-     [--command sandbox]
+     [--command "sandbox claude"]
    ```
 
 4. 別ターミナルから監視:

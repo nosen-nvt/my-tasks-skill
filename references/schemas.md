@@ -267,7 +267,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 | `date` | string | Yes | 対象日付（YYYY-MM-DD形式） |
 | `max_slots` | integer | Yes | 最大並列セッション数 |
 | `status` | string | Yes | `running` \| `completed` \| `interrupted` |
-| `command` | string | Yes | セッション起動コマンド（例: `sandbox`） |
+| `command` | string | Yes | セッション起動コマンド（例: `sandbox claude`） |
 | `started_at` | string | Yes | 開始日時（ISO 8601形式） |
 | `finished_at` | string\|null | Yes | 終了日時（ISO 8601形式）、実行中は `null` |
 | `items` | array | Yes | ディスパッチアイテムの配列 |
@@ -295,7 +295,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
   "date": "2026-02-22",
   "max_slots": 3,
   "status": "running",
-  "command": "sandbox",
+  "command": "sandbox claude",
   "started_at": "2026-02-22T09:00:00+09:00",
   "finished_at": null,
   "items": [

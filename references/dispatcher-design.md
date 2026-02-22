@@ -15,7 +15,7 @@ dispatcher.py start
     ├── tmux セッション作成 ("dispatch")
     └── ディスパッチループ
           ├── queued タスクを max_slots まで起動
-          │     └── tmux new-window → sandbox -p "prompt"
+          │     └── tmux new-window → sandbox claude -p "prompt"
           ├── PID 監視 → 終了検知
           ├── 状態ファイル保存 (ポーリング間隔: 5秒)
           └── 全タスク完了で終了 → JSON レポート出力
@@ -50,7 +50,7 @@ dispatcher.py start
 ディスパッチを開始する。
 
 ```bash
-python3 dispatcher.py start --repo ~/.local/share/my-tasks [--date YYYY-MM-DD] [--max-slots N] [--command sandbox]
+python3 dispatcher.py start --repo ~/.local/share/my-tasks [--date YYYY-MM-DD] [--max-slots N] [--command "sandbox claude"]
 ```
 
 | オプション | デフォルト | 説明 |
@@ -58,7 +58,7 @@ python3 dispatcher.py start --repo ~/.local/share/my-tasks [--date YYYY-MM-DD] [
 | `--repo` | (必須) | タスク管理リポジトリのパス |
 | `--date` | 今日 | 対象日付 |
 | `--max-slots` | 3 | 最大並列セッション数 |
-| `--command` | `sandbox` | セッション起動コマンド |
+| `--command` | `sandbox claude` | セッション起動コマンド |
 
 ### `status`
 

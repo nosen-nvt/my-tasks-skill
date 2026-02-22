@@ -28,7 +28,7 @@ JST = timezone(timedelta(hours=9))
 TMUX_SESSION = "dispatch"
 DEFAULT_MAX_SLOTS = 3
 POLL_INTERVAL = 5
-DEFAULT_COMMAND = "sandbox"
+DEFAULT_COMMAND = "sandbox claude"
 
 
 def now_iso() -> str:
