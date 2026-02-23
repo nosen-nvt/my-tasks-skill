@@ -87,7 +87,8 @@ python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py start \
   --repo ~/.local/share/my-tasks \
   --max-slots 5 \
   --date 2026-02-22 \
-  --command "sandbox claude"
+  --command "sandbox claude" \
+  --session my-session
 
 # ステータス確認（JSON 出力）
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status

@@ -12,7 +12,7 @@ dispatcher.py start
     ├── 日次ゴール読み込み (daily/YYYY-MM-DD.json)
     ├── タスク抽出・フラット化
     │     └── project_id → projects/{id}.json → working_directory 解決
-    ├── tmux セッション作成 ("dispatch")
+    ├── tmux セッション解決 (--session / $TMUX / "dispatch")
     └── ディスパッチループ
           ├── queued タスクを max_slots まで起動
           │     └── tmux new-window → sandbox claude -p "prompt"
@@ -23,9 +23,23 @@ dispatcher.py start
 
 ## tmux セッション構成
 
-- **セッション名**: `dispatch`（固定）
+ディスパッチャーは以下の優先順位で使用する tmux セッションを決定する:
+
+1. `--session` 引数で明示指定されたセッション（存在確認あり）
+2. `$TMUX` 環境変数から自動検出した呼び出し元セッション
+3. フォールバック: `dispatch` セッションを新規作成
+
+呼び出し元セッション（優先順位 1, 2）を使用する場合:
+- セッションの新規作成は行わない（存在確認のみ）
+- `kill` コマンドは `tmux kill-window` でディスパッチウィンドウのみを個別終了する
+- 呼び出し元セッションは維持される
+
+フォールバック（優先順位 3）の場合:
+- `dispatch` セッションを新規作成する
 - **コントロールウィンドウ**: `_control`（セッション作成時に自動生成）
-- **タスクウィンドウ**: `{dispatch_id}`（例: `jira-UBS-101`）
+- `kill` コマンドは `tmux kill-session` でセッション全体を終了する
+
+**タスクウィンドウ**: `{dispatch_id}`（例: `jira-UBS-101`）
   - 各ウィンドウで1つの Claude Code セッションが実行される
   - ウィンドウ名は ref の `/` を `-` に置換したもの
 
@@ -50,7 +64,7 @@ dispatcher.py start
 ディスパッチを開始する。
 
 ```bash
-python3 dispatcher.py start --repo ~/.local/share/my-tasks [--date YYYY-MM-DD] [--max-slots N] [--command "sandbox claude"]
+python3 dispatcher.py start --repo ~/.local/share/my-tasks [--date YYYY-MM-DD] [--max-slots N] [--command "sandbox claude"] [--session SESSION_NAME]
 ```
 
 | オプション | デフォルト | 説明 |
@@ -59,6 +73,7 @@ python3 dispatcher.py start --repo ~/.local/share/my-tasks [--date YYYY-MM-DD] [
 | `--date` | 今日 | 対象日付 |
 | `--max-slots` | 3 | 最大並列セッション数 |
 | `--command` | `sandbox claude` | セッション起動コマンド |
+| `--session` | 自動検出 | tmux セッション名を明示指定 |
 
 ### `status`
 
@@ -86,7 +101,8 @@ python3 dispatcher.py stop
 
 ### `kill`
 
-tmux セッション `dispatch` ごと強制終了する。
+tmux セッションまたはディスパッチウィンドウを強制終了する。
+呼び出し元セッション内で動作している場合はウィンドウのみ終了し、セッションは維持する。
 
 ```bash
 python3 dispatcher.py kill

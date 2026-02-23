@@ -268,6 +268,8 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 | `max_slots` | integer | Yes | 最大並列セッション数 |
 | `status` | string | Yes | `running` \| `completed` \| `interrupted` |
 | `command` | string | Yes | セッション起動コマンド（例: `sandbox claude`） |
+| `tmux_session` | string | Yes | 使用中の tmux セッション名 |
+| `is_caller_session` | boolean | Yes | `true` の場合、呼び出し元セッションを使用（kill 時にセッション全体を終了しない） |
 | `started_at` | string | Yes | 開始日時（ISO 8601形式） |
 | `finished_at` | string\|null | Yes | 終了日時（ISO 8601形式）、実行中は `null` |
 | `items` | array | Yes | ディスパッチアイテムの配列 |
@@ -296,6 +298,8 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
   "max_slots": 3,
   "status": "running",
   "command": "sandbox claude",
+  "tmux_session": "main",
+  "is_caller_session": true,
   "started_at": "2026-02-22T09:00:00+09:00",
   "finished_at": null,
   "items": [

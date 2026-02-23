@@ -25,7 +25,7 @@ from pathlib import Path
 
 JST = timezone(timedelta(hours=9))
 
-TMUX_SESSION = "dispatch"
+DEFAULT_SESSION_NAME = "dispatch"
 DEFAULT_MAX_SLOTS = 3
 POLL_INTERVAL = 5
 DEFAULT_COMMAND = "sandbox claude --permission-mode bypassPermissions"
@@ -212,20 +212,61 @@ def build_prompt(item: DispatchItem, repo_dir: Path) -> str:
     return prompt
 
 
-def ensure_tmux_session() -> bool:
-    """tmux セッションが存在しなければ作成する。"""
-    result = subprocess.run(
-        ["tmux", "has-session", "-t", TMUX_SESSION],
-        capture_output=True,
-    )
-    if result.returncode != 0:
+def detect_tmux_session(explicit: str | None) -> tuple[str, bool]:
+    """使用する tmux セッション名を決定する。
+
+    Returns:
+        (session_name, is_caller_session)
+        is_caller_session=True の場合、セッションは呼び出し元のものなので kill 時にセッション全体を終了しない。
+    """
+    # 1. --session 引数による明示指定
+    if explicit:
         result = subprocess.run(
-            ["tmux", "new-session", "-d", "-s", TMUX_SESSION, "-n", "_control"],
+            ["tmux", "has-session", "-t", explicit],
             capture_output=True,
         )
         if result.returncode != 0:
             print(
-                f"エラー: tmux セッション '{TMUX_SESSION}' の作成に失敗しました: "
+                f"エラー: 指定された tmux セッション '{explicit}' が存在しません",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return (explicit, True)
+
+    # 2. $TMUX 環境変数から自動検出
+    if os.environ.get("TMUX"):
+        result = subprocess.run(
+            ["tmux", "display-message", "-p", "#S"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return (result.stdout.strip(), True)
+
+    # 3. フォールバック: デフォルトセッションを新規作成
+    return (DEFAULT_SESSION_NAME, False)
+
+
+def ensure_tmux_session(session_name: str, is_caller_session: bool) -> bool:
+    """tmux セッションが存在しなければ作成する。呼び出し元セッションの場合は存在確認のみ。"""
+    result = subprocess.run(
+        ["tmux", "has-session", "-t", session_name],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        if is_caller_session:
+            print(
+                f"エラー: tmux セッション '{session_name}' が存在しません",
+                file=sys.stderr,
+            )
+            return False
+        result = subprocess.run(
+            ["tmux", "new-session", "-d", "-s", session_name, "-n", "_control"],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            print(
+                f"エラー: tmux セッション '{session_name}' の作成に失敗しました: "
                 f"{result.stderr.decode().strip()}",
                 file=sys.stderr,
             )
@@ -233,7 +274,7 @@ def ensure_tmux_session() -> bool:
     return True
 
 
-def launch_in_tmux(item: DispatchItem, repo_dir: Path, command: str) -> int | None:
+def launch_in_tmux(item: DispatchItem, repo_dir: Path, command: str, session_name: str) -> int | None:
     """tmux ウィンドウで Claude Code セッションを起動し、pane PID を返す。"""
     prompt = build_prompt(item, repo_dir)
     efile = exit_file_path(item.dispatch_id)
@@ -246,7 +287,7 @@ def launch_in_tmux(item: DispatchItem, repo_dir: Path, command: str) -> int | No
     shell_cmd = f"cd '{item.working_dir}' && {command} -p '{escaped_prompt}'; echo $? > '{efile}'"
 
     result = subprocess.run(
-        ["tmux", "new-window", "-t", TMUX_SESSION, "-n", item.dispatch_id, "bash", "-c", shell_cmd],
+        ["tmux", "new-window", "-t", session_name, "-n", item.dispatch_id, "bash", "-c", shell_cmd],
         capture_output=True,
     )
     if result.returncode != 0:
@@ -259,7 +300,7 @@ def launch_in_tmux(item: DispatchItem, repo_dir: Path, command: str) -> int | No
 
     # pane PID を取得
     pid_result = subprocess.run(
-        ["tmux", "list-panes", "-t", f"{TMUX_SESSION}:{item.dispatch_id}", "-F", "#{pane_pid}"],
+        ["tmux", "list-panes", "-t", f"{session_name}:{item.dispatch_id}", "-F", "#{pane_pid}"],
         capture_output=True,
         text=True,
     )
@@ -373,7 +414,7 @@ def handle_stale_running(items: list[dict]) -> None:
         item["finished_at"] = now_iso()
 
 
-def run_dispatcher(repo_dir: Path, date: str, max_slots: int, command: str) -> None:
+def run_dispatcher(repo_dir: Path, date: str, max_slots: int, command: str, explicit_session: str | None = None) -> None:
     """メインディスパッチループ。"""
     # 既に実行中かチェック
     existing = load_state()
@@ -401,9 +442,14 @@ def run_dispatcher(repo_dir: Path, date: str, max_slots: int, command: str) -> N
 
     print(f"ディスパッチ開始: {len(queued)} タスク (スキップ: {len(skipped)})", file=sys.stderr)
 
+    # tmux セッション解決
+    session_name, is_caller_session = detect_tmux_session(explicit_session)
+
     # tmux セッション確保
-    if queued and not ensure_tmux_session():
+    if queued and not ensure_tmux_session(session_name, is_caller_session):
         sys.exit(1)
+
+    print(f"tmux セッション: {session_name}" + (" (呼び出し元)" if is_caller_session else " (新規作成)"), file=sys.stderr)
 
     # 状態初期化
     state: dict = {
@@ -411,6 +457,8 @@ def run_dispatcher(repo_dir: Path, date: str, max_slots: int, command: str) -> N
         "max_slots": max_slots,
         "status": "running",
         "command": command,
+        "tmux_session": session_name,
+        "is_caller_session": is_caller_session,
         "started_at": now_iso(),
         "finished_at": None,
         "items": [asdict(i) for i in items],
@@ -476,6 +524,7 @@ def _dispatch_loop(state: dict, repo_dir: Path, command: str) -> None:
                 DispatchItem(**{k: item[k] for k in DispatchItem.__dataclass_fields__}),
                 repo_dir,
                 command,
+                state.get("tmux_session", DEFAULT_SESSION_NAME),
             )
             if pid is not None:
                 item["status"] = "running"
@@ -537,7 +586,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     date = args.date or today_str()
-    run_dispatcher(repo_dir, date, args.max_slots, args.command)
+    run_dispatcher(repo_dir, date, args.max_slots, args.command, args.session)
 
 
 def cmd_status(_args: argparse.Namespace) -> None:
@@ -618,18 +667,36 @@ def cmd_kill(_args: argparse.Namespace) -> None:
         print("ディスパッチャーは実行されていません", file=sys.stderr)
         sys.exit(1)
 
-    # tmux セッションを kill
-    result = subprocess.run(
-        ["tmux", "kill-session", "-t", TMUX_SESSION],
-        capture_output=True,
-    )
-    if result.returncode == 0:
-        print(f"tmux セッション '{TMUX_SESSION}' を終了しました", file=sys.stderr)
+    session_name = state.get("tmux_session", DEFAULT_SESSION_NAME)
+    is_caller_session = state.get("is_caller_session", False)
+
+    if is_caller_session:
+        # 呼び出し元セッションの場合: ディスパッチウィンドウのみ個別終了
+        killed = 0
+        for item in state.get("items", []):
+            window = item.get("tmux_window")
+            if not window or item["status"] not in ("running", "queued"):
+                continue
+            result = subprocess.run(
+                ["tmux", "kill-window", "-t", f"{session_name}:{window}"],
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                killed += 1
+        print(f"tmux ウィンドウ {killed} 個を終了しました (セッション '{session_name}' は維持)", file=sys.stderr)
     else:
-        print(
-            f"警告: tmux セッションの終了に失敗しました: {result.stderr.decode().strip()}",
-            file=sys.stderr,
+        # 専用セッションの場合: セッション全体を終了
+        result = subprocess.run(
+            ["tmux", "kill-session", "-t", session_name],
+            capture_output=True,
         )
+        if result.returncode == 0:
+            print(f"tmux セッション '{session_name}' を終了しました", file=sys.stderr)
+        else:
+            print(
+                f"警告: tmux セッションの終了に失敗しました: {result.stderr.decode().strip()}",
+                file=sys.stderr,
+            )
 
     # running アイテムを failed に
     for item in state.get("items", []):
@@ -670,6 +737,10 @@ def main() -> None:
     p_start.add_argument(
         "--command", default=DEFAULT_COMMAND,
         help=f"セッション起動コマンド（デフォルト: {DEFAULT_COMMAND}）",
+    )
+    p_start.add_argument(
+        "--session", default=None, metavar="SESSION_NAME",
+        help="tmux セッション名を明示指定（デフォルト: $TMUX から自動検出、なければ 'dispatch' セッションを新規作成）",
     )
     p_start.set_defaults(func=cmd_start)
 
