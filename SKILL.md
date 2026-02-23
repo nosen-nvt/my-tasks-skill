@@ -25,7 +25,7 @@ JIRA・Microsoft To Do 等の外部データソースからタスクを収集し
 6. **日次ゴール設定** - 今日取り組むタスクを選定して日次ゴールファイルを作成
 7. **タスク操作（データソース側）** - ステータス変更・担当者変更・新規作成等をデータソースに反映
 8. **参照系** - プロジェクト状況確認・日次ゴール確認・タスク検索
-9. **タスクディスパッチ** - デイリーゴールのタスクを tmux で並列実行
+9. **タスクディスパッチ** - プロセス分散型ジョブランナーでタスクを tmux で並列実行
 
 ## 詳細リファレンス
 
@@ -75,41 +75,42 @@ python3 ~/.claude/skills/my-tasks/scripts/sync-tasks.py \
 
 ## dispatcher.py の使い方
 
-デイリーゴールのタスクを tmux 上で並列実行するディスパッチャー。
+プロセス分散型ジョブランナー。各ジョブは独立した dispatcher プロセスとして tmux 上で並列実行される。
 
 ```bash
-# ディスパッチ開始（今日のデイリーゴールを対象）
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py start \
-  --repo ~/.local/share/my-tasks
+# ジョブ投入（プロンプトは stdin から）
+echo "バグを修正してください" | python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py run --project bo
+
+# ヒアドキュメントで複数行プロンプト
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py run --project bo <<'EOF'
+ログイン画面のバグを修正してください。
+エラーメッセージが表示されない問題です。
+EOF
 
 # オプション指定
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py start \
-  --repo ~/.local/share/my-tasks \
+echo "fix bug" | python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py run \
+  --project bo \
   --max-slots 5 \
-  --date 2026-02-22 \
   --command "sandbox claude" \
   --session my-session
 
-# ステータス確認（JSON 出力）
+# 状態確認（遅延更新を実行してから表示）
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status --json
 
-# 実行中のディスパッチにタスクを追加
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py add \
-  --ref jira/UBS-103 \
-  --working-dir /path/to/project \
-  --note "認証部分を優先"
+# キューから取り消し
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py cancel --id bo-2
 
-# 新規タスク起動を停止（実行中セッションは継続）
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py stop
-
-# 強制終了（tmux セッションごと終了）
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py kill
+# 実行中ジョブを強制停止
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py kill --id bo-1
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py kill --all
 ```
+
+`--repo` はデフォルト `~/.local/share/my-tasks` で省略可能。
 
 ### 前提条件
 
 - プロジェクト定義に `working_directory` が設定されていること
-- 日次ゴールが設定済みであること
 
 詳細は `references/dispatcher-design.md` を参照。
 

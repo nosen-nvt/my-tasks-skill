@@ -2,24 +2,46 @@
 
 ## 概要
 
-タスクディスパッチャーは、デイリーゴールに登録されたタスクを tmux 上で複数の Claude Code セッションとして並列実行するバッチ型ツールである。粒度の小さいタスクを大量に抱える状況で、手動でのセッション立ち上げ・コンテキスト伝達の繰り返しを自動化する。
+プロセス分散型ジョブランナー。各ジョブは独立した dispatcher プロセスとして実行される。
+中央ループやデーモンは存在しない。状態ファイルが唯一の協調メカニズム。
+スロットチェック〜起動の区間を `flock` で排他制御する。プロンプトは標準入力から読み取る。
 
 ## アーキテクチャ
 
 ```
-dispatcher.py start
-    │
-    ├── 日次ゴール読み込み (daily/YYYY-MM-DD.json)
-    ├── タスク抽出・フラット化
-    │     └── project_id → projects/{id}.json → working_directory 解決
-    ├── tmux セッション解決 (--session / $TMUX / "dispatch")
-    └── ディスパッチループ
-          ├── queued タスクを max_slots まで起動
-          │     └── tmux new-window -d → sandbox claude "prompt"
-          ├── PID 監視 → 終了検知
-          ├── 状態ファイル保存 (ポーリング間隔: 5秒)
-          └── 全タスク完了で終了 → JSON レポート出力
+echo "fix bug" | dispatcher.py run --project bo
+  │
+  ├── flock 取得 → running ファイルを数える
+  ├── スロット空き → tmux ウィンドウを起動、状態ファイルを書く、flock 解放、終了
+  └── スロット満杯 → 状態ファイルを書く、flock 解放 → fork してバックグラウンドで待機、親は即座に返却
+                       └── flock 取得 → スロット空き → 起動 → flock 解放
 ```
+
+## 状態管理
+
+### 状態ディレクトリ
+
+`$XDG_RUNTIME_DIR/my-tasks-dispatch/`（フォールバック: `/tmp/my-tasks-dispatch/`）
+
+### ロックファイル
+
+`{state_dir}/.lock` — `flock` によるファイルロック。スロットチェック〜起動の区間を排他制御する。
+
+### 状態ファイル（1ジョブ = 1ファイル）
+
+`{state_dir}/{dispatch_id}.json`:
+
+詳細なスキーマは `schemas.md` のセクション6を参照。
+
+### dispatch_id の生成
+
+`{project_id}-{連番}` 形式。連番は状態ディレクトリ内の既存ファイルから最大値+1で生成する。
+例: `bo-1`, `bo-2`, `ubs-mgmt-tool-1`
+
+### 遅延更新
+
+完了検知はポーリングではなく「遅延」で行う。`status` コマンドや `run` の待機ループが
+PID 生存チェック + sentinel ファイル検知でステータスを更新する。
 
 ## tmux セッション構成
 
@@ -31,81 +53,61 @@ dispatcher.py start
 
 呼び出し元セッション（優先順位 1, 2）を使用する場合:
 - セッションの新規作成は行わない（存在確認のみ）
-- `kill` コマンドは `tmux kill-window` でディスパッチウィンドウのみを個別終了する
-- 呼び出し元セッションは維持される
 
 フォールバック（優先順位 3）の場合:
 - `dispatch` セッションを新規作成する
 - **コントロールウィンドウ**: `_control`（セッション作成時に自動生成）
-- `kill` コマンドは `tmux kill-session` でセッション全体を終了する
 
-**タスクウィンドウ**: `{dispatch_id}`（例: `jira-UBS-101`）
+**タスクウィンドウ**: `{dispatch_id}`（例: `bo-1`）
   - 各ウィンドウで1つの Claude Code セッションが実行される
-  - ウィンドウ名は ref の `/` を `-` に置換したもの
-
-## ランタイム状態
-
-### 状態ファイル
-
-パス: `$XDG_RUNTIME_DIR/my-tasks-dispatcher.json`（フォールバック: `/tmp/my-tasks-dispatcher.json`）
-
-詳細なスキーマは `schemas.md` のセクション6を参照。
-
-### 通信メカニズム
-
-メインループと他のコマンド（`stop`, `add`）は状態ファイルを介して通信する:
-- `stop`: `status` を `interrupted` に変更 → メインループが次のポーリングで検知して停止
-- `add`: `items` 配列に新しいアイテムを追加 → メインループが次のポーリングで検知して起動
 
 ## CLI コマンドリファレンス
 
-### `start`
+### `run`
 
-ディスパッチを開始する。
+ジョブを投入する。プロンプトは stdin から読み取る。
 
 ```bash
-python3 dispatcher.py start --repo ~/.local/share/my-tasks [--date YYYY-MM-DD] [--max-slots N] [--command "sandbox claude"] [--session SESSION_NAME]
+echo "バグを修正してください" | dispatcher.py run --project bo [--max-slots 3]
+
+# ヒアドキュメントで複数行プロンプト
+dispatcher.py run --project bo <<'EOF'
+ログイン画面のバグを修正してください。
+エラーメッセージが表示されない問題です。
+EOF
 ```
 
 | オプション | デフォルト | 説明 |
 |---|---|---|
-| `--repo` | (必須) | タスク管理リポジトリのパス |
-| `--date` | 今日 | 対象日付 |
-| `--max-slots` | 3 | 最大並列セッション数 |
-| `--command` | `sandbox claude` | セッション起動コマンド |
+| `--project` | (必須) | プロジェクトID |
+| `--repo` | `~/.local/share/my-tasks` | タスク管理リポジトリのパス |
+| `--max-slots` | 3 | 最大並列スロット数 |
+| `--command` | `sandbox claude --permission-mode bypassPermissions` | セッション起動コマンド |
 | `--session` | 自動検出 | tmux セッション名を明示指定 |
 
 ### `status`
 
-実行状況を JSON で出力する。
+状態を表示する（遅延更新を実行してから表示）。
 
 ```bash
-python3 dispatcher.py status
+dispatcher.py status [--json]
 ```
 
-### `add`
+### `cancel`
 
-実行中のディスパッチにタスクを追加する。
-
-```bash
-python3 dispatcher.py add --ref jira/UBS-103 --working-dir /path/to/project [--note "補足"]
-```
-
-### `stop`
-
-新規タスクの起動を停止する。実行中のセッションは継続する。
+キューからジョブを取り消す。
 
 ```bash
-python3 dispatcher.py stop
+dispatcher.py cancel --id bo-2
 ```
 
 ### `kill`
 
-tmux セッションまたはディスパッチウィンドウを強制終了する。
-呼び出し元セッション内で動作している場合はウィンドウのみ終了し、セッションは維持する。
+実行中ジョブを強制停止する。
 
 ```bash
-python3 dispatcher.py kill
+dispatcher.py kill --id bo-1
+dispatcher.py kill --all
 ```
 
 ## セッション終了検知
@@ -114,63 +116,53 @@ python3 dispatcher.py kill
 
 ### Sentinel ファイル検知（主系）
 
-1. Claude がタスク完了時に `touch /tmp/dispatch-{dispatch_id}.done` を実行
-2. ディスパッチャーがポーリングで `.done` ファイルを検知
+1. Claude がタスク完了時に `touch {working_dir}/.dispatch-{dispatch_id}.done` を実行
+2. `status` コマンドや待機ループが `.done` ファイルを検知
 3. `tmux kill-window` で tmux ウィンドウを終了 → `done` (exit_code=0) として記録
 
 ### PID 監視（副系・フォールバック）
 
-1. `os.kill(pid, 0)` で PID 生存チェック（ポーリング間隔: 5秒）
-2. PID 消失時に `/tmp/dispatch-{dispatch_id}.exit` の内容を読み取り
+1. `os.kill(pid, 0)` で PID 生存チェック
+2. PID 消失時に `{working_dir}/.dispatch-{dispatch_id}.exit` の内容を読み取り
 3. exit code 判定:
    - `0` → `done`
    - `0` 以外 → `failed`
-   - exit file なし → リトライ（3回、1秒間隔）→ それでもなければ `failed` (`exit_code=-1`)
+   - exit file なし → `failed` (`exit_code=-1`)
 
-## プロンプトテンプレート
+### シグナルファイルの配置場所
 
-各 Claude Code セッションに渡されるプロンプト:
+すべてのシグナルファイル（`.done`、`.exit`）は `working_dir` 内に配置される。
+これにより、サンドボックス（bwrap）内からディスパッチャーを実行する場合でも、
+`/tmp` が隔離されている環境でシグナルファイルの検知が正常に動作する。
+
+## プロンプト構築
+
+stdin から読み取ったプロンプトに完了通知の指示を追加する:
 
 ```
-タスク {ref} に取り組んでください。
-
-タスク管理リポジトリ: {repo_dir}
-このリポジトリの tasks/{datasource_id}.json と datasources/{datasource_id}.json を参照して、
-タスクの詳細情報を確認してください。
-必要に応じて元データソース（JIRA、Microsoft To Do 等）からも情報を取得してください。
-
-補足指示: {note}  ← note がある場合のみ
+{stdin から読み取ったプロンプト}
 
 作業が完了したら、変更をコミットしてから次のコマンドを実行してください:
-touch /tmp/dispatch-{dispatch_id}.done
+touch {working_dir}/.dispatch-{dispatch_id}.done
 ```
+
+さらに `--append-system-prompt` でシステムプロンプトにも同様の指示を注入する（冗長化）。
+
+## 排他制御
+
+`flock` によるファイルロックで以下の区間を排他制御する:
+
+- **run コマンド**: スロットチェック → dispatch_id 生成 → 状態ファイル書き込み → (起動)
+- **待機ループ**: スロットチェック → 起動 → 状態ファイル更新
+- **status コマンド**: refresh_states（遅延更新）
 
 ## エラーハンドリング
 
 | エラー | 挙動 |
 |---|---|
-| プロジェクト不存在 | 警告（stderr）+ 該当タスクを skip |
-| working_directory 未設定 | 警告（stderr）+ 該当タスクを skip |
-| working_directory がファイルシステムに存在しない | 警告（stderr）+ 該当タスクを skip |
-| tmux ウィンドウ作成失敗 | 警告（stderr）+ 該当タスクを failed |
-| Claude Code exit code != 0 | failed |
+| プロジェクト不存在 | エラー終了 |
+| working_directory 未設定 | エラー終了 |
+| working_directory がファイルシステムに存在しない | エラー終了 |
+| tmux ウィンドウ作成失敗 | エラー終了（run）/ failed（待機ループ） |
+| プロンプトが空 | エラー終了 |
 | PID 消失 + exit file なし | failed (exit_code=-1) |
-| 既にディスパッチャー実行中 | エラー終了 |
-| KeyboardInterrupt | 状態保存して終了（tmux セッションは継続） |
-
-## 実行モード
-
-Claude Code は対話モードで起動する（`claude "prompt"` 形式）。これにより:
-
-- tmux ウィンドウ上で Claude の作業途中経過をリアルタイムに確認できる
-- `tmux new-window -d` フラグにより、ウィンドウはバックグラウンドで作成され、フォーカスが奪われない
-
-### Bash sentinel 方式による完了通知
-
-`/exit` コマンドは内蔵の安全ガードレールにより自律的な発動が制限されるため、
-代わりに Claude に `touch /tmp/dispatch-{dispatch_id}.done` を実行させる。
-これは通常の Bash ツール呼び出しであり、特別な制限がない。
-
-- ユーザープロンプト末尾で sentinel ファイル作成を指示
-- `--append-system-prompt` でシステムプロンプトにも同様の指示を注入（冗長化）
-- ディスパッチャーが sentinel ファイルを検知すると `tmux kill-window` でウィンドウを終了

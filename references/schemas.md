@@ -256,36 +256,21 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 
 ---
 
-## 6. ディスパッチャー実行状態 (`$XDG_RUNTIME_DIR/my-tasks-dispatcher.json`)
+## 6. ディスパッチャー状態ファイル (`{state_dir}/{dispatch_id}.json`)
 
-ディスパッチャーのランタイム状態を保持するファイル。`$XDG_RUNTIME_DIR` が未設定の場合は `/tmp/my-tasks-dispatcher.json` にフォールバックする。
+1ジョブ = 1ファイル。状態ディレクトリは `$XDG_RUNTIME_DIR/my-tasks-dispatch/`（フォールバック: `/tmp/my-tasks-dispatch/`）。
 
 ### スキーマ
 
 | フィールド | 型 | 必須 | 説明 |
 |---|---|---|---|
-| `date` | string | Yes | 対象日付（YYYY-MM-DD形式） |
-| `max_slots` | integer | Yes | 最大並列セッション数 |
-| `status` | string | Yes | `running` \| `completed` \| `interrupted` |
-| `command` | string | Yes | セッション起動コマンド（例: `sandbox claude`） |
-| `tmux_session` | string | Yes | 使用中の tmux セッション名 |
-| `is_caller_session` | boolean | Yes | `true` の場合、呼び出し元セッションを使用（kill 時にセッション全体を終了しない） |
-| `started_at` | string | Yes | 開始日時（ISO 8601形式） |
-| `finished_at` | string\|null | Yes | 終了日時（ISO 8601形式）、実行中は `null` |
-| `items` | array | Yes | ディスパッチアイテムの配列 |
-
-### ディスパッチアイテムのスキーマ
-
-| フィールド | 型 | 必須 | 説明 |
-|---|---|---|---|
-| `dispatch_id` | string | Yes | 識別子（ref の `/` を `-` に置換） |
-| `ref` | string | Yes | タスク参照（`datasource_id/remote_id` 形式） |
+| `dispatch_id` | string | Yes | 識別子（`{project_id}-{連番}` 形式、例: `bo-1`） |
 | `working_dir` | string | Yes | 作業ディレクトリ |
-| `note` | string\|null | No | 補足指示 |
-| `title` | string\|null | No | タスクタイトル |
-| `status` | string | Yes | `queued` \| `running` \| `done` \| `failed` \| `skipped` |
-| `tmux_window` | string\|null | No | tmux ウィンドウ名 |
+| `prompt` | string | Yes | Claude Code に渡すプロンプト |
+| `status` | string | Yes | `queued` \| `running` \| `done` \| `failed` |
 | `pid` | integer\|null | No | tmux ペインの PID |
+| `tmux_session` | string\|null | No | tmux セッション名 |
+| `tmux_window` | string\|null | No | tmux ウィンドウ名 |
 | `exit_code` | integer\|null | No | 終了コード |
 | `started_at` | string\|null | No | 開始日時（ISO 8601形式） |
 | `finished_at` | string\|null | No | 終了日時（ISO 8601形式） |
@@ -294,41 +279,15 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 
 ```json
 {
-  "date": "2026-02-22",
-  "max_slots": 3,
+  "dispatch_id": "bo-1",
+  "working_dir": "/home/nosen/src/.../bo",
+  "prompt": "バグを修正してください",
   "status": "running",
-  "command": "sandbox claude",
+  "pid": 12345,
   "tmux_session": "main",
-  "is_caller_session": true,
-  "started_at": "2026-02-22T09:00:00+09:00",
-  "finished_at": null,
-  "items": [
-    {
-      "dispatch_id": "jira-UBS-101",
-      "ref": "jira/UBS-101",
-      "working_dir": "/home/user/projects/ubs-mgmt-tool",
-      "note": null,
-      "title": "API実装",
-      "status": "running",
-      "tmux_window": "jira-UBS-101",
-      "pid": 12345,
-      "exit_code": null,
-      "started_at": "2026-02-22T09:00:05+09:00",
-      "finished_at": null
-    },
-    {
-      "dispatch_id": "jira-UBS-102",
-      "ref": "jira/UBS-102",
-      "working_dir": "/home/user/projects/ubs-mgmt-tool",
-      "note": "認証部分を優先",
-      "title": "認証機能の追加",
-      "status": "queued",
-      "tmux_window": null,
-      "pid": null,
-      "exit_code": null,
-      "started_at": null,
-      "finished_at": null
-    }
-  ]
+  "tmux_window": "bo-1",
+  "exit_code": null,
+  "started_at": "2026-02-23T10:00:00+09:00",
+  "finished_at": null
 }
 ```

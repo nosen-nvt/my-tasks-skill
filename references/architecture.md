@@ -88,23 +88,20 @@ bash "$SCRIPT_DIR/fetch-ms-todo.sh"
 
 ## ディスパッチャー
 
-デイリーゴールに登録されたタスクを tmux 上で並列実行するバッチ型ツール。
+プロセス分散型ジョブランナー。各ジョブは独立した dispatcher プロセスとして tmux 上で並列実行される。
+中央ループやデーモンは存在しない。
 
-### tmux セッション構成
+### 状態ディレクトリ
 
-- **セッション名**: `dispatch`
-- **コントロールウィンドウ**: `_control`
-- **タスクウィンドウ**: `{dispatch_id}`（ref の `/` を `-` に置換、例: `jira-UBS-101`）
+`$XDG_RUNTIME_DIR/my-tasks-dispatch/`（フォールバック: `/tmp/my-tasks-dispatch/`）
 
-### ランタイム状態ファイル
+1ジョブ = 1状態ファイル（`{dispatch_id}.json`）。`flock` による排他制御でスロット管理を行う。
 
-パス: `$XDG_RUNTIME_DIR/my-tasks-dispatcher.json`（フォールバック: `/tmp/my-tasks-dispatcher.json`）
+### シグナルファイル
 
-スキーマは `schemas.md` セクション6を参照。
-
-### 終了コードファイル
-
-各セッションの終了コードは `/tmp/dispatch-{dispatch_id}.exit` に書き込まれる。
+各セッションのシグナルファイルは `working_dir` 内に配置される:
+- `.dispatch-{dispatch_id}.done` — Claude がタスク完了時に作成する sentinel ファイル
+- `.dispatch-{dispatch_id}.exit` — シェルが終了コードを書き込むファイル
 
 詳細は `dispatcher-design.md` を参照。
 
