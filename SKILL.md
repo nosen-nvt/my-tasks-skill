@@ -104,6 +104,15 @@ python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py cancel --id bo-2
 # 実行中ジョブを強制停止
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py kill --id bo-1
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py kill --all
+
+# プロジェクトの作業ディレクトリで対話セッションを起動
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo
+
+# コマンド指定
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --command "sandbox claude"
+
+# tmux セッション明示指定
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --session main
 ```
 
 `--repo` はデフォルト `~/.local/share/my-tasks` で省略可能。

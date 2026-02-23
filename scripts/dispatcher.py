@@ -8,6 +8,7 @@ dispatcher.py - プロセス分散型ジョブランナー
 
 使い方:
   echo "fix bug" | dispatcher.py run --project bo [--max-slots 3]
+  dispatcher.py open --project bo [--command CMD]
   dispatcher.py status [--json]
   dispatcher.py cancel --id bo-2
   dispatcher.py kill --id bo-1
@@ -32,6 +33,7 @@ DEFAULT_SESSION_NAME = "dispatch"
 DEFAULT_MAX_SLOTS = 3
 POLL_INTERVAL = 5
 DEFAULT_COMMAND = "sandbox claude --permission-mode bypassPermissions"
+DEFAULT_INTERACTIVE_COMMAND = "claude"
 DEFAULT_REPO = "~/.local/share/my-tasks"
 
 
@@ -537,6 +539,47 @@ def cmd_kill(args: argparse.Namespace) -> None:
             print(f"ジョブは既に終了しています: {args.id} (status={item.status})", file=sys.stderr)
 
 
+def cmd_open(args: argparse.Namespace) -> None:
+    repo_dir = resolve_repo(args)
+    project = load_project(repo_dir, args.project)
+    if not project:
+        print(
+            f"エラー: プロジェクト '{args.project}' が見つかりません: "
+            f"{repo_dir / 'projects' / f'{args.project}.json'}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    working_dir = project.get("working_directory")
+    if not working_dir:
+        print(f"エラー: プロジェクト '{args.project}' に working_directory が設定されていません", file=sys.stderr)
+        sys.exit(1)
+
+    if not Path(working_dir).is_dir():
+        print(f"エラー: 作業ディレクトリが存在しません: {working_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    session_name, is_caller = detect_tmux_session(args.session)
+    if not ensure_tmux_session(session_name, is_caller):
+        sys.exit(1)
+
+    window_name = f"{args.project}-interactive"
+    shell_cmd = f"cd '{working_dir}' && {args.command}"
+
+    result = subprocess.run(
+        ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, "bash", "-c", shell_cmd],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"エラー: tmux ウィンドウ作成に失敗しました: {result.stderr.decode().strip()}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print(f"起動: {session_name}:{window_name} ({working_dir})", file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # メイン
 # ---------------------------------------------------------------------------
@@ -567,6 +610,23 @@ def main() -> None:
         help="tmux セッション名を明示指定",
     )
     p_run.set_defaults(func=cmd_run)
+
+    # open
+    p_open = subparsers.add_parser("open", help="プロジェクトの作業ディレクトリで対話セッションを起動する")
+    p_open.add_argument("--project", required=True, help="プロジェクトID")
+    p_open.add_argument(
+        "--repo", default=DEFAULT_REPO, metavar="PATH",
+        help=f"タスク管理リポジトリのパス（デフォルト: {DEFAULT_REPO}）",
+    )
+    p_open.add_argument(
+        "--command", default=DEFAULT_INTERACTIVE_COMMAND,
+        help=f"起動コマンド（デフォルト: {DEFAULT_INTERACTIVE_COMMAND}）",
+    )
+    p_open.add_argument(
+        "--session", default=None, metavar="SESSION_NAME",
+        help="tmux セッション名を明示指定",
+    )
+    p_open.set_defaults(func=cmd_open)
 
     # status
     p_status = subparsers.add_parser("status", help="状態を表示する")

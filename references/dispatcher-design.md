@@ -85,6 +85,25 @@ EOF
 | `--command` | `sandbox claude --permission-mode bypassPermissions` | セッション起動コマンド |
 | `--session` | 自動検出 | tmux セッション名を明示指定 |
 
+### `open`
+
+プロジェクトの作業ディレクトリで対話セッションを起動する。ジョブ管理（状態ファイル、スロット管理、完了検知）は一切行わない。
+
+```bash
+dispatcher.py open --project bo
+dispatcher.py open --project bo --command "sandbox claude"
+dispatcher.py open --project bo --session main
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--project` | (必須) | プロジェクトID |
+| `--repo` | `~/.local/share/my-tasks` | タスク管理リポジトリのパス |
+| `--command` | `claude` | 起動コマンド |
+| `--session` | 自動検出 | tmux セッション名を明示指定 |
+
+ウィンドウ名は `{project_id}-interactive` となる。
+
 ### `status`
 
 状態を表示する（遅延更新を実行してから表示）。
