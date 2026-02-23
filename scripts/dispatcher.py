@@ -284,7 +284,9 @@ def launch_in_tmux(item: DispatchItem, repo_dir: Path, command: str, session_nam
         efile.unlink()
 
     escaped_prompt = prompt.replace("'", "'\"'\"'")
-    shell_cmd = f"cd '{item.working_dir}' && {command} '{escaped_prompt}'; echo $? > '{efile}'"
+    system_suffix = "作業が完了したら、必ず /exit コマンドを実行してセッションを終了してください。"
+    escaped_system = system_suffix.replace("'", "'\"'\"'")
+    shell_cmd = f"cd '{item.working_dir}' && {command} --append-system-prompt '{escaped_system}' '{escaped_prompt}'; echo $? > '{efile}'"
 
     result = subprocess.run(
         ["tmux", "new-window", "-d", "-t", session_name, "-n", item.dispatch_id, "bash", "-c", shell_cmd],
