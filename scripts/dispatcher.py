@@ -33,7 +33,7 @@ DEFAULT_SESSION_NAME = "dispatch"
 DEFAULT_MAX_SLOTS = 3
 POLL_INTERVAL = 5
 DEFAULT_COMMAND = "sandbox claude --permission-mode bypassPermissions"
-DEFAULT_INTERACTIVE_COMMAND = "claude"
+DEFAULT_INTERACTIVE_COMMAND = "sandbox claude --permission-mode bypassPermissions"
 DEFAULT_REPO = "~/.local/share/my-tasks"
 
 
