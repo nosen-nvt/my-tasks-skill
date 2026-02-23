@@ -50,6 +50,10 @@ def exit_file_path(dispatch_id: str) -> Path:
     return Path(f"/tmp/dispatch-{dispatch_id}.exit")
 
 
+def done_file_path(dispatch_id: str, working_dir: str) -> Path:
+    return Path(working_dir) / f".dispatch-{dispatch_id}.done"
+
+
 @dataclass
 class DispatchItem:
     dispatch_id: str
@@ -207,7 +211,8 @@ def build_prompt(item: DispatchItem, repo_dir: Path) -> str:
     if item.note:
         prompt += f"\n\n補足指示: {item.note}"
 
-    prompt += "\n\n作業が完了したら、変更をコミットしてから /exit で終了してください。"
+    done_file = done_file_path(item.dispatch_id, item.working_dir)
+    prompt += f"\n\n作業が完了したら、変更をコミットしてから次のコマンドを実行してください:\ntouch {done_file}"
 
     return prompt
 
@@ -279,12 +284,15 @@ def launch_in_tmux(item: DispatchItem, repo_dir: Path, command: str, session_nam
     prompt = build_prompt(item, repo_dir)
     efile = exit_file_path(item.dispatch_id)
 
-    # 既存の exit file を削除
-    if efile.exists():
-        efile.unlink()
+    dfile = done_file_path(item.dispatch_id, item.working_dir)
+
+    # 既存のシグナルファイルを削除
+    for f in (efile, dfile):
+        if f.exists():
+            f.unlink()
 
     escaped_prompt = prompt.replace("'", "'\"'\"'")
-    system_suffix = "作業が完了したら、必ず /exit コマンドを実行してセッションを終了してください。"
+    system_suffix = f"タスク完了時に必ず touch {dfile} を実行してください。これによりディスパッチャーがタスクの完了を検知します。"
     escaped_system = system_suffix.replace("'", "'\"'\"'")
     shell_cmd = f"cd '{item.working_dir}' && {command} --append-system-prompt '{escaped_system}' '{escaped_prompt}'; echo $? > '{efile}'"
 
@@ -330,10 +338,32 @@ def is_pid_alive(pid: int) -> bool:
         return True
 
 
-def check_session(item_dict: dict) -> None:
-    """実行中アイテムの PID 生存チェックと終了コード読み取りを行う。"""
+def check_session(item_dict: dict, session_name: str) -> None:
+    """実行中アイテムの完了シグナルチェックと PID 生存チェックを行う。"""
     if item_dict["status"] != "running":
         return
+
+    dispatch_id = item_dict["dispatch_id"]
+    working_dir = item_dict.get("working_dir", "")
+    dfile = done_file_path(dispatch_id, working_dir) if working_dir else None
+
+    # Sentinel ファイルチェック — Claude がタスク完了を通知
+    if dfile and dfile.exists():
+        item_dict["exit_code"] = 0
+        item_dict["status"] = "done"
+        item_dict["finished_at"] = now_iso()
+        # tmux ウィンドウを終了
+        window = item_dict.get("tmux_window")
+        if window:
+            subprocess.run(
+                ["tmux", "kill-window", "-t", f"{session_name}:{window}"],
+                capture_output=True,
+            )
+        if dfile:
+            dfile.unlink(missing_ok=True)
+        return
+
+    # PID 生存チェック (既存ロジック)
     pid = item_dict.get("pid")
     if pid is None:
         return
@@ -342,7 +372,6 @@ def check_session(item_dict: dict) -> None:
         return
 
     # PID 消失 — 終了コードファイルを読み取り
-    dispatch_id = item_dict["dispatch_id"]
     efile = exit_file_path(dispatch_id)
 
     exit_code = _read_exit_code(efile)
@@ -372,10 +401,10 @@ def _read_exit_code(efile: Path, retries: int = 3, delay: float = 1.0) -> int | 
     return None
 
 
-def check_all_sessions(items: list[dict]) -> None:
+def check_all_sessions(items: list[dict], session_name: str) -> None:
     """全実行中アイテムのセッション状態をチェックする。"""
     for item in items:
-        check_session(item)
+        check_session(item, session_name)
 
 
 def count_by_status(items: list[dict]) -> dict[str, int]:
@@ -405,7 +434,19 @@ def handle_stale_running(items: list[dict]) -> None:
         if pid is None or is_pid_alive(pid):
             continue
 
-        efile = exit_file_path(item["dispatch_id"])
+        dispatch_id = item["dispatch_id"]
+
+        # Sentinel ファイルがあれば完了扱い
+        working_dir = item.get("working_dir", "")
+        dfile = done_file_path(dispatch_id, working_dir) if working_dir else None
+        if dfile and dfile.exists():
+            item["exit_code"] = 0
+            item["status"] = "done"
+            item["finished_at"] = now_iso()
+            dfile.unlink(missing_ok=True)
+            continue
+
+        efile = exit_file_path(dispatch_id)
         exit_code = _read_exit_code(efile, retries=1, delay=0)
         if exit_code is not None:
             item["exit_code"] = exit_code
@@ -512,7 +553,8 @@ def _dispatch_loop(state: dict, repo_dir: Path, command: str) -> None:
             state["max_slots"] = max_slots
 
         # セッション状態チェック
-        check_all_sessions(items)
+        session_name = state.get("tmux_session", DEFAULT_SESSION_NAME)
+        check_all_sessions(items, session_name)
 
         # 新規タスク起動
         running_count = sum(1 for i in items if i["status"] == "running")
@@ -599,7 +641,8 @@ def cmd_status(_args: argparse.Namespace) -> None:
 
     # 実行中の場合はセッション状態を更新
     if state.get("status") == "running":
-        check_all_sessions(state["items"])
+        session_name = state.get("tmux_session", DEFAULT_SESSION_NAME)
+        check_all_sessions(state["items"], session_name)
         save_state(state)
 
     _print_report(state)

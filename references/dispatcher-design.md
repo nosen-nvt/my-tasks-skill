@@ -110,6 +110,16 @@ python3 dispatcher.py kill
 
 ## セッション終了検知
 
+二段階の完了検知メカニズムを持つ:
+
+### Sentinel ファイル検知（主系）
+
+1. Claude がタスク完了時に `touch /tmp/dispatch-{dispatch_id}.done` を実行
+2. ディスパッチャーがポーリングで `.done` ファイルを検知
+3. `tmux kill-window` で tmux ウィンドウを終了 → `done` (exit_code=0) として記録
+
+### PID 監視（副系・フォールバック）
+
 1. `os.kill(pid, 0)` で PID 生存チェック（ポーリング間隔: 5秒）
 2. PID 消失時に `/tmp/dispatch-{dispatch_id}.exit` の内容を読み取り
 3. exit code 判定:
@@ -131,7 +141,8 @@ python3 dispatcher.py kill
 
 補足指示: {note}  ← note がある場合のみ
 
-作業が完了したら、変更をコミットしてから /exit で終了してください。
+作業が完了したら、変更をコミットしてから次のコマンドを実行してください:
+touch /tmp/dispatch-{dispatch_id}.done
 ```
 
 ## エラーハンドリング
@@ -152,6 +163,14 @@ python3 dispatcher.py kill
 Claude Code は対話モードで起動する（`claude "prompt"` 形式）。これにより:
 
 - tmux ウィンドウ上で Claude の作業途中経過をリアルタイムに確認できる
-- `--append-system-prompt` でシステムプロンプトに `/exit` 終了指示を注入し、作業完了後の確実な終了を促す
-- ユーザープロンプト末尾でも `/exit` による終了を指示（冗長化）
 - `tmux new-window -d` フラグにより、ウィンドウはバックグラウンドで作成され、フォーカスが奪われない
+
+### Bash sentinel 方式による完了通知
+
+`/exit` コマンドは内蔵の安全ガードレールにより自律的な発動が制限されるため、
+代わりに Claude に `touch /tmp/dispatch-{dispatch_id}.done` を実行させる。
+これは通常の Bash ツール呼び出しであり、特別な制限がない。
+
+- ユーザープロンプト末尾で sentinel ファイル作成を指示
+- `--append-system-prompt` でシステムプロンプトにも同様の指示を注入（冗長化）
+- ディスパッチャーが sentinel ファイルを検知すると `tmux kill-window` でウィンドウを終了
