@@ -68,12 +68,12 @@ def is_pid_alive(pid: int) -> bool:
         return True
 
 
-def done_file_path(dispatch_id: str, working_dir: str) -> Path:
-    return Path(working_dir) / f".dispatch-{dispatch_id}.done"
+def done_file_path(dispatch_id: str, state_dir: Path) -> Path:
+    return state_dir / f".dispatch-{dispatch_id}.done"
 
 
-def exit_file_path(dispatch_id: str, working_dir: str) -> Path:
-    return Path(working_dir) / f".dispatch-{dispatch_id}.exit"
+def exit_file_path(dispatch_id: str, state_dir: Path) -> Path:
+    return state_dir / f".dispatch-{dispatch_id}.exit"
 
 
 def load_project(repo_dir: Path, project_id: str) -> dict | None:
@@ -232,7 +232,7 @@ def refresh_states(state_dir: Path) -> None:
         item = DispatchItem(**data)
 
         # Sentinel ファイルチェック（主系）
-        dfile = done_file_path(item.dispatch_id, item.working_dir)
+        dfile = done_file_path(item.dispatch_id, state_dir)
         if dfile.exists():
             item.status = "done"
             item.exit_code = 0
@@ -248,7 +248,7 @@ def refresh_states(state_dir: Path) -> None:
 
         # PID 生存チェック（副系）
         if item.pid is not None and not is_pid_alive(item.pid):
-            efile = exit_file_path(item.dispatch_id, item.working_dir)
+            efile = exit_file_path(item.dispatch_id, state_dir)
             exit_code = _read_exit_code(efile)
             if exit_code is not None:
                 item.exit_code = exit_code
@@ -275,19 +275,19 @@ def count_running(state_dir: Path) -> int:
 # プロンプト構築・tmux 起動
 # ---------------------------------------------------------------------------
 
-def build_prompt(prompt: str, dispatch_id: str, working_dir: str) -> str:
-    dfile = done_file_path(dispatch_id, working_dir)
+def build_prompt(prompt: str, dispatch_id: str, state_dir: Path) -> str:
+    dfile = done_file_path(dispatch_id, state_dir)
     return f"""{prompt}
 
 作業が完了したら、変更をコミットしてから次のコマンドを実行してください:
 touch {dfile}"""
 
 
-def launch_in_tmux(item: DispatchItem, command: str, session_name: str) -> int | None:
+def launch_in_tmux(item: DispatchItem, command: str, session_name: str, state_dir: Path) -> int | None:
     """tmux ウィンドウで Claude Code セッションを起動し、pane PID を返す。"""
-    full_prompt = build_prompt(item.prompt, item.dispatch_id, item.working_dir)
-    efile = exit_file_path(item.dispatch_id, item.working_dir)
-    dfile = done_file_path(item.dispatch_id, item.working_dir)
+    full_prompt = build_prompt(item.prompt, item.dispatch_id, state_dir)
+    efile = exit_file_path(item.dispatch_id, state_dir)
+    dfile = done_file_path(item.dispatch_id, state_dir)
 
     for f in (efile, dfile):
         if f.exists():
@@ -342,7 +342,7 @@ def _wait_and_launch(state_dir: Path, item: DispatchItem, max_slots: int, comman
                 sys.exit(0)
             refresh_states(state_dir)
             if count_running(state_dir) < max_slots:
-                pid = launch_in_tmux(item, command, session)
+                pid = launch_in_tmux(item, command, session, state_dir)
                 if pid is None:
                     item.status = "failed"
                     item.exit_code = -1
@@ -408,7 +408,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         item = DispatchItem(dispatch_id=dispatch_id, working_dir=working_dir, prompt=prompt)
 
         if running < args.max_slots:
-            pid = launch_in_tmux(item, args.command, session_name)
+            pid = launch_in_tmux(item, args.command, session_name, state_dir)
             if pid is None:
                 print("エラー: tmux ウィンドウの起動に失敗しました", file=sys.stderr)
                 sys.exit(1)

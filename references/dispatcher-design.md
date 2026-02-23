@@ -135,14 +135,14 @@ dispatcher.py kill --all
 
 ### Sentinel ファイル検知（主系）
 
-1. Claude がタスク完了時に `touch {working_dir}/.dispatch-{dispatch_id}.done` を実行
+1. Claude がタスク完了時に `touch {state_dir}/.dispatch-{dispatch_id}.done` を実行
 2. `status` コマンドや待機ループが `.done` ファイルを検知
 3. `tmux kill-window` で tmux ウィンドウを終了 → `done` (exit_code=0) として記録
 
 ### PID 監視（副系・フォールバック）
 
 1. `os.kill(pid, 0)` で PID 生存チェック
-2. PID 消失時に `{working_dir}/.dispatch-{dispatch_id}.exit` の内容を読み取り
+2. PID 消失時に `{state_dir}/.dispatch-{dispatch_id}.exit` の内容を読み取り
 3. exit code 判定:
    - `0` → `done`
    - `0` 以外 → `failed`
@@ -150,9 +150,9 @@ dispatcher.py kill --all
 
 ### シグナルファイルの配置場所
 
-すべてのシグナルファイル（`.done`、`.exit`）は `working_dir` 内に配置される。
+すべてのシグナルファイル（`.done`、`.exit`）は状態ディレクトリ（`{state_dir}`）内に配置される。
 これにより、サンドボックス（bwrap）内からディスパッチャーを実行する場合でも、
-`/tmp` が隔離されている環境でシグナルファイルの検知が正常に動作する。
+呼び出し側が `working_dir` への書き込み権限を持たない環境でシグナルファイルの操作が正常に動作する。
 
 ## プロンプト構築
 
@@ -162,7 +162,7 @@ stdin から読み取ったプロンプトに完了通知の指示を追加す�
 {stdin から読み取ったプロンプト}
 
 作業が完了したら、変更をコミットしてから次のコマンドを実行してください:
-touch {working_dir}/.dispatch-{dispatch_id}.done
+touch {state_dir}/.dispatch-{dispatch_id}.done
 ```
 
 さらに `--append-system-prompt` でシステムプロンプトにも同様の指示を注入する（冗長化）。

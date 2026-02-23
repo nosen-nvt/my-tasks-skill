@@ -99,9 +99,9 @@ bash "$SCRIPT_DIR/fetch-ms-todo.sh"
 
 ### シグナルファイル
 
-各セッションのシグナルファイルは `working_dir` 内に配置される:
-- `.dispatch-{dispatch_id}.done` — Claude がタスク完了時に作成する sentinel ファイル
-- `.dispatch-{dispatch_id}.exit` — シェルが終了コードを書き込むファイル
+各セッションのシグナルファイルは状態ディレクトリ内に配置される:
+- `{state_dir}/.dispatch-{dispatch_id}.done` — Claude がタスク完了時に作成する sentinel ファイル
+- `{state_dir}/.dispatch-{dispatch_id}.exit` — シェルが終了コードを書き込むファイル
 
 詳細は `dispatcher-design.md` を参照。
 
