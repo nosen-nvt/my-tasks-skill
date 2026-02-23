@@ -207,7 +207,7 @@ def build_prompt(item: DispatchItem, repo_dir: Path) -> str:
     if item.note:
         prompt += f"\n\n補足指示: {item.note}"
 
-    prompt += "\n\n作業が完了したら、変更をコミットして終了してください。"
+    prompt += "\n\n作業が完了したら、変更をコミットしてから /exit で終了してください。"
 
     return prompt
 
@@ -284,10 +284,10 @@ def launch_in_tmux(item: DispatchItem, repo_dir: Path, command: str, session_nam
         efile.unlink()
 
     escaped_prompt = prompt.replace("'", "'\"'\"'")
-    shell_cmd = f"cd '{item.working_dir}' && {command} -p '{escaped_prompt}'; echo $? > '{efile}'"
+    shell_cmd = f"cd '{item.working_dir}' && {command} '{escaped_prompt}'; echo $? > '{efile}'"
 
     result = subprocess.run(
-        ["tmux", "new-window", "-t", session_name, "-n", item.dispatch_id, "bash", "-c", shell_cmd],
+        ["tmux", "new-window", "-d", "-t", session_name, "-n", item.dispatch_id, "bash", "-c", shell_cmd],
         capture_output=True,
     )
     if result.returncode != 0:

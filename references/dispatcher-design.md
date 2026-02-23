@@ -15,7 +15,7 @@ dispatcher.py start
     ├── tmux セッション解決 (--session / $TMUX / "dispatch")
     └── ディスパッチループ
           ├── queued タスクを max_slots まで起動
-          │     └── tmux new-window → sandbox claude -p "prompt"
+          │     └── tmux new-window -d → sandbox claude "prompt"
           ├── PID 監視 → 終了検知
           ├── 状態ファイル保存 (ポーリング間隔: 5秒)
           └── 全タスク完了で終了 → JSON レポート出力
@@ -131,7 +131,7 @@ python3 dispatcher.py kill
 
 補足指示: {note}  ← note がある場合のみ
 
-作業が完了したら、変更をコミットして終了してください。
+作業が完了したら、変更をコミットしてから /exit で終了してください。
 ```
 
 ## エラーハンドリング
@@ -146,3 +146,11 @@ python3 dispatcher.py kill
 | PID 消失 + exit file なし | failed (exit_code=-1) |
 | 既にディスパッチャー実行中 | エラー終了 |
 | KeyboardInterrupt | 状態保存して終了（tmux セッションは継続） |
+
+## 実行モード
+
+Claude Code は対話モードで起動する（`claude "prompt"` 形式）。これにより:
+
+- tmux ウィンドウ上で Claude の作業途中経過をリアルタイムに確認できる
+- プロンプト末尾で `/exit` による終了を指示し、作業完了後にプロセスが終了する
+- `tmux new-window -d` フラグにより、ウィンドウはバックグラウンドで作成され、フォーカスが奪われない
