@@ -246,18 +246,26 @@ def refresh_states(state_dir: Path) -> None:
             dfile.unlink(missing_ok=True)
             continue
 
-        # PID 生存チェック（副系）
-        if item.pid is not None and not is_pid_alive(item.pid):
-            efile = exit_file_path(item.dispatch_id, state_dir)
-            exit_code = _read_exit_code(efile)
-            if exit_code is not None:
-                item.exit_code = exit_code
-                item.status = "done" if exit_code == 0 else "failed"
-            else:
-                item.exit_code = -1
-                item.status = "failed"
-            item.finished_at = now_iso()
-            save_state(state_dir, item)
+        # tmux ウィンドウ存在チェック（副系）
+        if item.tmux_session and item.tmux_window:
+            result = subprocess.run(
+                ["tmux", "list-panes", "-t", f"{item.tmux_session}:{item.tmux_window}"],
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                continue  # ウィンドウ存在 = まだ実行中
+
+        # ウィンドウ消失 → exit file を確認して done/failed を判定
+        efile = exit_file_path(item.dispatch_id, state_dir)
+        exit_code = _read_exit_code(efile)
+        if exit_code is not None:
+            item.exit_code = exit_code
+            item.status = "done" if exit_code == 0 else "failed"
+        else:
+            item.exit_code = -1
+            item.status = "failed"
+        item.finished_at = now_iso()
+        save_state(state_dir, item)
 
 
 def count_running(state_dir: Path) -> int:

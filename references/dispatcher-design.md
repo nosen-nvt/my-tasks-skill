@@ -41,7 +41,7 @@ echo "fix bug" | dispatcher.py run --project bo
 ### 遅延更新
 
 完了検知はポーリングではなく「遅延」で行う。`status` コマンドや `run` の待機ループが
-PID 生存チェック + sentinel ファイル検知でステータスを更新する。
+tmux ウィンドウ存在チェック + sentinel ファイル検知でステータスを更新する。
 
 ## tmux セッション構成
 
@@ -139,14 +139,21 @@ dispatcher.py kill --all
 2. `status` コマンドや待機ループが `.done` ファイルを検知
 3. `tmux kill-window` で tmux ウィンドウを終了 → `done` (exit_code=0) として記録
 
-### PID 監視（副系・フォールバック）
+### tmux ウィンドウ存在チェック（副系・フォールバック）
 
-1. `os.kill(pid, 0)` で PID 生存チェック
-2. PID 消失時に `{state_dir}/.dispatch-{dispatch_id}.exit` の内容を読み取り
-3. exit code 判定:
+1. `tmux list-panes -t {session}:{window}` でウィンドウの存在を確認
+2. ウィンドウが存在する場合はまだ実行中と判定（`continue`）
+3. ウィンドウ消失時に `{state_dir}/.dispatch-{dispatch_id}.exit` の内容を読み取り
+4. exit code 判定:
    - `0` → `done`
    - `0` 以外 → `failed`
    - exit file なし → `failed` (`exit_code=-1`)
+
+**注意**: 以前は PID ベース（`os.kill(pid, 0)`）の生存チェックを使用していたが、
+sandbox コマンドが `sudo → ip netns exec → sudo → bwrap → claude` という多段プロセスチェーンを
+作るため、tmux の `#{pane_pid}`（最初の `bash -c` プロセス）と実際に動いている Claude プロセスの
+PID が一致せず、誤検知が発生していた。tmux ウィンドウのライフサイクルはジョブのライフサイクルと
+一致するため、こちらの方が堅牢である。PID フィールドは情報用に残している。
 
 ### シグナルファイルの配置場所
 
@@ -184,4 +191,4 @@ touch {state_dir}/.dispatch-{dispatch_id}.done
 | working_directory がファイルシステムに存在しない | エラー終了 |
 | tmux ウィンドウ作成失敗 | エラー終了（run）/ failed（待機ループ） |
 | プロンプトが空 | エラー終了 |
-| PID 消失 + exit file なし | failed (exit_code=-1) |
+| tmux ウィンドウ消失 + exit file なし | failed (exit_code=-1) |
