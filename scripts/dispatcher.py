@@ -32,6 +32,7 @@ JST = timezone(timedelta(hours=9))
 DEFAULT_SESSION_NAME = "dispatch"
 DEFAULT_MAX_SLOTS = 3
 POLL_INTERVAL = 5
+GC_THRESHOLD_HOURS = 72
 DEFAULT_COMMAND = "sandbox claude --permission-mode bypassPermissions"
 DEFAULT_INTERACTIVE_COMMAND = "sandbox claude --permission-mode bypassPermissions"
 DEFAULT_REPO = "~/.local/share/my-tasks"
@@ -266,6 +267,27 @@ def refresh_states(state_dir: Path) -> None:
             item.status = "failed"
         item.finished_at = now_iso()
         save_state(state_dir, item)
+
+    # 完了済みジョブの自動クリーンアップ（GC_THRESHOLD_HOURS 超過分を削除）
+    now = datetime.now(JST)
+    for f in list(state_dir.glob("*.json")):
+        if f.name.startswith("."):
+            continue
+        data = load_json(f)
+        if not data or data.get("status") not in ("done", "failed"):
+            continue
+        finished_at = data.get("finished_at")
+        if not finished_at:
+            continue
+        try:
+            finished_dt = datetime.fromisoformat(finished_at)
+        except (ValueError, TypeError):
+            continue
+        if (now - finished_dt) > timedelta(hours=GC_THRESHOLD_HOURS):
+            dispatch_id = data.get("dispatch_id", f.stem)
+            f.unlink(missing_ok=True)
+            done_file_path(dispatch_id, state_dir).unlink(missing_ok=True)
+            exit_file_path(dispatch_id, state_dir).unlink(missing_ok=True)
 
 
 def count_running(state_dir: Path) -> int:
