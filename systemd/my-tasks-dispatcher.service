@@ -8,6 +8,7 @@ ExecStart=%h/src/github.com/nosen-nvt/my-tasks-skill/scripts/dispatcher.py serve
 Restart=on-failure
 RestartSec=5
 Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=PATH=%h/.local/bin:%h/go/bin:/usr/local/bin:/usr/bin:/bin
 ExecStartPre=/usr/bin/mkdir -p %t/my-tasks-dispatch
 
 [Install]

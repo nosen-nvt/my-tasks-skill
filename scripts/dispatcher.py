@@ -151,12 +151,14 @@ class DispatchServer:
             else:
                 response = await handler(request)
 
+            # wait コマンドの場合は Future を取り出してからレスポンスを送信
+            future = response.pop("_future", None)
+
             writer.write(json.dumps(response, ensure_ascii=False).encode() + b"\n")
             await writer.drain()
 
             # wait コマンドの場合は Future の完了まで接続を保持
             if command == "wait" and response.get("ok") and response.get("waiting"):
-                future = response.pop("_future", None)
                 if future:
                     result = await future
                     writer.write(json.dumps(result, ensure_ascii=False).encode() + b"\n")
