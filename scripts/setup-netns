@@ -1,0 +1,73 @@
+#!/bin/bash
+# netns 初期化スクリプト (root で実行される)
+# sandbox から sudo 経由で呼び出される。直接実行しないこと。
+set -euo pipefail
+
+NS_NAME=ai-ns
+VETH_HOST=veth-host
+VETH_AI=veth-ai
+HOST_IP=10.200.1.1/24
+AI_IP=10.200.1.2/24
+PROXY_PORT=3128
+
+# 1. netns 作成
+ip netns add "$NS_NAME"
+
+# 2. veth ペア作成
+ip link add "$VETH_HOST" type veth peer name "$VETH_AI"
+ip link set "$VETH_AI" netns "$NS_NAME"
+
+# ホスト側 IP 設定
+ip addr add "$HOST_IP" dev "$VETH_HOST"
+ip link set "$VETH_HOST" up
+
+# ai-ns 側 IP 設定
+ip netns exec "$NS_NAME" ip addr add "$AI_IP" dev "$VETH_AI"
+ip netns exec "$NS_NAME" ip link set "$VETH_AI" up
+ip netns exec "$NS_NAME" ip link set lo up
+
+# 3. デフォルトルート
+ip netns exec "$NS_NAME" ip route add default via "${HOST_IP%/*}"
+
+# 4. IP フォワード有効化
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+# 5. NAT (nftables masquerade)
+DEFAULT_IF=$(ip route | awk '/^default/{print $5; exit}')
+if [[ -z "$DEFAULT_IF" ]]; then
+  echo "error: デフォルトインターフェースが見つかりません" >&2
+  exit 1
+fi
+nft add table ip nat
+nft 'add chain ip nat postrouting { type nat hook postrouting priority 100 ; }'
+nft add rule ip nat postrouting oifname "$DEFAULT_IF" masquerade
+
+# 5b. DNS リスナー (systemd-resolved を 10.200.1.1 でも待ち受け)
+RESOLVED_DROPIN_DIR=/etc/systemd/resolved.conf.d
+RESOLVED_DROPIN="$RESOLVED_DROPIN_DIR/ai-sandbox.conf"
+if [[ ! -f "$RESOLVED_DROPIN" ]]; then
+  mkdir -p "$RESOLVED_DROPIN_DIR"
+  cat > "$RESOLVED_DROPIN" <<EOF
+[Resolve]
+DNSStubListenerExtra=${HOST_IP%/*}
+EOF
+  systemctl restart systemd-resolved
+fi
+
+# 6. ai-ns 内 outbound 制限
+ip netns exec "$NS_NAME" nft add table inet filter
+ip netns exec "$NS_NAME" nft 'add chain inet filter output { type filter hook output priority 0 ; policy drop ; }'
+ip netns exec "$NS_NAME" nft add rule inet filter output oifname "lo" accept
+ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "${HOST_IP%/*}" udp dport 53 accept
+ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "${HOST_IP%/*}" tcp dport 53 accept
+ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "${HOST_IP%/*}" tcp dport "$PROXY_PORT" accept
+
+# SSH 許可 (GitHub / Bitbucket)
+for domain in github.com bitbucket.org; do
+  ips=$(dig +short "$domain" A 2>/dev/null || true)
+  if [[ -n "$ips" ]]; then
+    while IFS= read -r ip; do
+      ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "$ip" tcp dport 22 accept
+    done <<< "$ips"
+  fi
+done

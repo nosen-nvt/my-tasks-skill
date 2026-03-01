@@ -1,49 +1,61 @@
 #!/usr/bin/env python3
 """
-dispatcher.py - プロセス分散型ジョブランナー
+dispatcher.py - Unix ドメインソケット C/S ジョブランナー
 
-各ジョブは独立した dispatcher プロセスとして実行される。中央ループやデーモンは存在しない。
-状態ファイルが唯一の協調メカニズム。スロットチェック〜起動の区間を flock で排他制御する。
-プロンプトは標準入力から読み取る。
+サーバ（systemd user service）:
+  dispatcher.py server [--max-slots 3]
 
-使い方:
-  echo "fix bug" | dispatcher.py run --project bo [--max-slots 3]
-  dispatcher.py open --project bo [--command CMD]
+クライアント:
+  echo "..." | dispatcher.py run --project bo
+  dispatcher.py run --task 20260301-001
+  dispatcher.py open --project bo [--session main]
   dispatcher.py status [--json]
-  dispatcher.py cancel --id bo-2
+  dispatcher.py cancel --id bo-1
   dispatcher.py kill --id bo-1
   dispatcher.py kill --all
+  dispatcher.py wait --id bo-1
 """
 
 import argparse
-import fcntl
+import asyncio
 import json
+import logging
 import os
+import signal
 import subprocess
 import sys
-import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-
+from typing import Any
 
 JST = timezone(timedelta(hours=9))
 
-DEFAULT_SESSION_NAME = "dispatch"
 DEFAULT_MAX_SLOTS = 3
-POLL_INTERVAL = 5
-GC_THRESHOLD_HOURS = 72
-DEFAULT_COMMAND = "sandbox claude --permission-mode bypassPermissions"
-DEFAULT_INTERACTIVE_COMMAND = "sandbox claude --permission-mode bypassPermissions"
 DEFAULT_REPO = "~/.local/share/my-tasks"
+DEFAULT_SESSION_NAME = "dispatch"
+
+SOCKET_DIR_NAME = "my-tasks-dispatch"
+SOCKET_FILE_NAME = "dispatcher.sock"
+
+log = logging.getLogger("dispatcher")
 
 
 # ---------------------------------------------------------------------------
-# ユーティリティ（既存から残す）
+# ユーティリティ
 # ---------------------------------------------------------------------------
 
 def now_iso() -> str:
     return datetime.now(JST).isoformat(timespec="seconds")
+
+
+def get_socket_path() -> str:
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}")
+    return os.path.join(runtime_dir, SOCKET_DIR_NAME, SOCKET_FILE_NAME)
+
+
+def get_repo_dir(repo: str = DEFAULT_REPO) -> Path:
+    return Path(repo).expanduser().resolve()
 
 
 def load_json(path: Path) -> dict | None:
@@ -53,59 +65,358 @@ def load_json(path: Path) -> dict | None:
     return None
 
 
-def save_json(path: Path, data: dict) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-
-
-def is_pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-
-def done_file_path(dispatch_id: str, state_dir: Path) -> Path:
-    return state_dir / f".dispatch-{dispatch_id}.done"
-
-
-def exit_file_path(dispatch_id: str, state_dir: Path) -> Path:
-    return state_dir / f".dispatch-{dispatch_id}.exit"
-
-
 def load_project(repo_dir: Path, project_id: str) -> dict | None:
     return load_json(repo_dir / "projects" / f"{project_id}.json")
 
 
-def detect_tmux_session(explicit: str | None) -> tuple[str, bool]:
-    """使用する tmux セッション名を決定する。
+def is_inside_sandbox() -> bool:
+    return os.environ.get("SANDBOX") == "1"
 
-    Returns:
-        (session_name, is_caller_session)
-        is_caller_session=True の場合、セッションは呼び出し元のものなので kill 時にセッション全体を終了しない。
-    """
+
+# ---------------------------------------------------------------------------
+# Job dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Job:
+    dispatch_id: str
+    project_id: str
+    task_id: str | None
+    prompt: str
+    working_dir: str
+    sandbox_mode: str
+    status: str = "queued"
+    pid: int | None = None
+    exit_code: int | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "dispatch_id": self.dispatch_id,
+            "project_id": self.project_id,
+            "task_id": self.task_id,
+            "status": self.status,
+            "pid": self.pid,
+            "exit_code": self.exit_code,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+        }
+
+
+# ---------------------------------------------------------------------------
+# サーバ
+# ---------------------------------------------------------------------------
+
+class DispatchServer:
+    def __init__(self, max_slots: int, repo_dir: Path):
+        self.max_slots = max_slots
+        self.repo_dir = repo_dir
+        self.jobs: dict[str, Job] = {}
+        self.queue: list[Job] = []
+        self.waiters: dict[str, list[asyncio.Future]] = {}
+        self._counter: dict[str, int] = {}
+        self._processes: dict[str, asyncio.subprocess.Process] = {}
+
+    def generate_dispatch_id(self, project_id: str) -> str:
+        self._counter.setdefault(project_id, 0)
+        self._counter[project_id] += 1
+        return f"{project_id}-{self._counter[project_id]}"
+
+    def count_running(self) -> int:
+        return sum(1 for j in self.jobs.values() if j.status == "running")
+
+    # --- コマンドハンドラ ---
+
+    async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        try:
+            data = await reader.readline()
+            if not data:
+                return
+            request = json.loads(data.decode())
+            command = request.get("command", "")
+
+            handler = {
+                "run": self.cmd_run,
+                "open": self.cmd_open,
+                "status": self.cmd_status,
+                "cancel": self.cmd_cancel,
+                "kill": self.cmd_kill,
+                "kill-all": self.cmd_kill_all,
+                "wait": self.cmd_wait,
+            }.get(command)
+
+            if handler is None:
+                response = {"ok": False, "error": f"Unknown command: {command}"}
+            else:
+                response = await handler(request)
+
+            writer.write(json.dumps(response, ensure_ascii=False).encode() + b"\n")
+            await writer.drain()
+
+            # wait コマンドの場合は Future の完了まで接続を保持
+            if command == "wait" and response.get("ok") and response.get("waiting"):
+                future = response.pop("_future", None)
+                if future:
+                    result = await future
+                    writer.write(json.dumps(result, ensure_ascii=False).encode() + b"\n")
+                    await writer.drain()
+        except Exception as e:
+            log.error(f"Client handler error: {e}")
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def cmd_run(self, request: dict) -> dict:
+        project_id = request.get("project_id", "")
+        task_id = request.get("task_id")
+        prompt = request.get("prompt", "")
+
+        if not project_id:
+            return {"ok": False, "error": "project_id is required"}
+        if not prompt:
+            return {"ok": False, "error": "prompt is required"}
+
+        project = load_project(self.repo_dir, project_id)
+        if not project:
+            return {"ok": False, "error": f"Project not found: {project_id}"}
+
+        working_dir = project.get("working_directory", "")
+        if not working_dir:
+            return {"ok": False, "error": f"working_directory not set for project: {project_id}"}
+        if not Path(working_dir).is_dir():
+            return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
+
+        sandbox_mode = project.get("sandbox_mode", "restricted")
+        dispatch_id = self.generate_dispatch_id(project_id)
+
+        job = Job(
+            dispatch_id=dispatch_id,
+            project_id=project_id,
+            task_id=task_id,
+            prompt=prompt,
+            working_dir=working_dir,
+            sandbox_mode=sandbox_mode,
+        )
+        self.jobs[dispatch_id] = job
+
+        if self.count_running() < self.max_slots:
+            asyncio.create_task(self.execute_job(job))
+            log.info(f"Job started: {dispatch_id}")
+            return {"ok": True, "dispatch_id": dispatch_id, "message": "Job started"}
+        else:
+            self.queue.append(job)
+            log.info(f"Job queued: {dispatch_id}")
+            return {"ok": True, "dispatch_id": dispatch_id, "message": "Job queued (slot full)"}
+
+    async def cmd_open(self, request: dict) -> dict:
+        project_id = request.get("project_id", "")
+        session = request.get("session")
+
+        if not project_id:
+            return {"ok": False, "error": "project_id is required"}
+
+        project = load_project(self.repo_dir, project_id)
+        if not project:
+            return {"ok": False, "error": f"Project not found: {project_id}"}
+
+        working_dir = project.get("working_directory", "")
+        if not working_dir:
+            return {"ok": False, "error": f"working_directory not set for project: {project_id}"}
+        if not Path(working_dir).is_dir():
+            return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
+
+        sandbox_mode = project.get("sandbox_mode", "restricted")
+
+        # tmux セッション決定
+        session_name, is_caller = _detect_tmux_session(session)
+        if not _ensure_tmux_session(session_name, is_caller):
+            return {"ok": False, "error": f"tmux session '{session_name}' not available"}
+
+        window_name = f"{project_id}-interactive"
+        cmd = f"cd '{working_dir}' && sandbox --mode {sandbox_mode} claude --permission-mode bypassPermissions"
+
+        result = subprocess.run(
+            ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, "bash", "-c", cmd],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            return {"ok": False, "error": f"tmux window creation failed: {result.stderr.decode().strip()}"}
+
+        log.info(f"Opened interactive session: {session_name}:{window_name}")
+        return {"ok": True, "message": f"Opened {session_name}:{window_name}", "window": window_name}
+
+    async def cmd_status(self, _request: dict) -> dict:
+        jobs = [j.to_dict() for j in self.jobs.values()]
+        return {"ok": True, "jobs": jobs}
+
+    async def cmd_cancel(self, request: dict) -> dict:
+        dispatch_id = request.get("dispatch_id", "")
+        job = self.jobs.get(dispatch_id)
+        if not job:
+            return {"ok": False, "error": f"Unknown dispatch_id: {dispatch_id}"}
+        if job.status != "queued":
+            return {"ok": False, "error": f"Can only cancel queued jobs (current: {job.status})"}
+
+        self.queue = [j for j in self.queue if j.dispatch_id != dispatch_id]
+        del self.jobs[dispatch_id]
+        log.info(f"Job cancelled: {dispatch_id}")
+        return {"ok": True, "dispatch_id": dispatch_id, "message": "Job cancelled"}
+
+    async def cmd_kill(self, request: dict) -> dict:
+        dispatch_id = request.get("dispatch_id", "")
+        job = self.jobs.get(dispatch_id)
+        if not job:
+            return {"ok": False, "error": f"Unknown dispatch_id: {dispatch_id}"}
+
+        await self._kill_job(job)
+        log.info(f"Job killed: {dispatch_id}")
+        return {"ok": True, "dispatch_id": dispatch_id, "message": "Job killed"}
+
+    async def cmd_kill_all(self, _request: dict) -> dict:
+        killed = 0
+        for job in list(self.jobs.values()):
+            if job.status in ("running", "queued"):
+                await self._kill_job(job)
+                killed += 1
+        self.queue.clear()
+        log.info(f"All jobs killed: {killed}")
+        return {"ok": True, "message": f"{killed} jobs killed"}
+
+    async def cmd_wait(self, request: dict) -> dict:
+        dispatch_id = request.get("dispatch_id", "")
+        job = self.jobs.get(dispatch_id)
+        if not job:
+            return {"ok": False, "error": f"Unknown dispatch_id: {dispatch_id}"}
+
+        if job.status in ("done", "failed"):
+            return {"ok": True, "dispatch_id": dispatch_id, "status": job.status, "exit_code": job.exit_code}
+
+        # Future を作成して待機
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self.waiters.setdefault(dispatch_id, []).append(future)
+        return {"ok": True, "waiting": True, "dispatch_id": dispatch_id, "_future": future}
+
+    # --- ジョブ実行 ---
+
+    async def execute_job(self, job: Job):
+        job.status = "running"
+        job.started_at = now_iso()
+
+        system_prompt = self._build_system_prompt(job)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "sandbox", "--mode", job.sandbox_mode,
+                "claude", "-p", job.prompt,
+                "--append-system-prompt", system_prompt,
+                cwd=job.working_dir,
+                env={**os.environ, "SANDBOX": "1"},
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            job.pid = proc.pid
+            self._processes[job.dispatch_id] = proc
+            log.info(f"Job executing: {job.dispatch_id} pid={proc.pid}")
+
+            exit_code = await proc.wait()
+            job.exit_code = exit_code
+            job.status = "done" if exit_code == 0 else "failed"
+        except Exception as e:
+            log.error(f"Job execution error: {job.dispatch_id}: {e}")
+            job.status = "failed"
+            job.exit_code = -1
+        finally:
+            job.finished_at = now_iso()
+            self._processes.pop(job.dispatch_id, None)
+            log.info(f"Job finished: {job.dispatch_id} status={job.status} exit_code={job.exit_code}")
+
+        self._notify_waiters(job)
+        await self.drain_queue()
+
+    async def drain_queue(self):
+        while self.queue and self.count_running() < self.max_slots:
+            job = self.queue.pop(0)
+            asyncio.create_task(self.execute_job(job))
+
+    async def _kill_job(self, job: Job):
+        if job.status == "queued":
+            self.queue = [j for j in self.queue if j.dispatch_id != job.dispatch_id]
+            del self.jobs[job.dispatch_id]
+            return
+
+        if job.status == "running":
+            proc = self._processes.get(job.dispatch_id)
+            if proc and proc.returncode is None:
+                try:
+                    proc.terminate()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                except ProcessLookupError:
+                    pass
+            job.status = "failed"
+            job.exit_code = -1
+            job.finished_at = now_iso()
+            self._processes.pop(job.dispatch_id, None)
+            self._notify_waiters(job)
+
+    def _notify_waiters(self, job: Job):
+        waiters = self.waiters.pop(job.dispatch_id, [])
+        result = {"ok": True, "dispatch_id": job.dispatch_id, "status": job.status, "exit_code": job.exit_code}
+        for future in waiters:
+            if not future.done():
+                future.set_result(result)
+
+    def _build_system_prompt(self, job: Job) -> str:
+        mode_desc = ""
+        if job.sandbox_mode == "restricted":
+            mode_desc = """
+制約事項 (restricted モード):
+- ネットワーク: GitHub/Bitbucket SSH と HTTP プロキシ経由の HTTPS のみ利用可能
+- ファイル: 作業ディレクトリ内のファイルのみ変更可能"""
+        return f"""あなたはサンドボックス環境で実行されています。
+
+実行環境:
+- 作業ディレクトリ: {job.working_dir}
+- ネットワークモード: {job.sandbox_mode}
+{mode_desc}
+
+作業が完了したら、変更をコミットしてください。
+プロセスの終了がジョブ完了の通知になります（シグナルファイルは不要です）。"""
+
+    async def shutdown(self):
+        log.info("Shutting down...")
+        for dispatch_id, proc in list(self._processes.items()):
+            if proc.returncode is None:
+                log.info(f"Terminating job: {dispatch_id}")
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+
+
+# ---------------------------------------------------------------------------
+# tmux ヘルパー（サーバ側 open コマンド用）
+# ---------------------------------------------------------------------------
+
+def _detect_tmux_session(explicit: str | None) -> tuple[str, bool]:
     if explicit:
         result = subprocess.run(
             ["tmux", "has-session", "-t", explicit],
             capture_output=True,
         )
         if result.returncode != 0:
-            print(
-                f"エラー: 指定された tmux セッション '{explicit}' が存在しません",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            return (explicit, True)  # 存在しないが is_caller=True で ensure で弾く
         return (explicit, True)
 
     if os.environ.get("TMUX"):
         result = subprocess.run(
             ["tmux", "display-message", "-p", "#S"],
-            capture_output=True,
-            text=True,
+            capture_output=True, text=True,
         )
         if result.returncode == 0 and result.stdout.strip():
             return (result.stdout.strip(), True)
@@ -113,385 +424,272 @@ def detect_tmux_session(explicit: str | None) -> tuple[str, bool]:
     return (DEFAULT_SESSION_NAME, False)
 
 
-def ensure_tmux_session(session_name: str, is_caller_session: bool) -> bool:
-    """tmux セッションが存在しなければ作成する。呼び出し元セッションの場合は存在確認のみ。"""
+def _ensure_tmux_session(session_name: str, is_caller_session: bool) -> bool:
     result = subprocess.run(
         ["tmux", "has-session", "-t", session_name],
         capture_output=True,
     )
     if result.returncode != 0:
         if is_caller_session:
-            print(
-                f"エラー: tmux セッション '{session_name}' が存在しません",
-                file=sys.stderr,
-            )
             return False
         result = subprocess.run(
             ["tmux", "new-session", "-d", "-s", session_name, "-n", "_control"],
             capture_output=True,
         )
-        if result.returncode != 0:
-            print(
-                f"エラー: tmux セッション '{session_name}' の作成に失敗しました: "
-                f"{result.stderr.decode().strip()}",
-                file=sys.stderr,
-            )
-            return False
+        return result.returncode == 0
     return True
 
 
 # ---------------------------------------------------------------------------
-# 状態管理（新規）
+# サーバ起動
 # ---------------------------------------------------------------------------
 
-def get_state_dir() -> Path:
-    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime_dir:
-        d = Path(runtime_dir) / "my-tasks-dispatch"
-    else:
-        d = Path("/tmp/my-tasks-dispatch")
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+async def run_server(max_slots: int, repo: str):
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+
+    repo_dir = get_repo_dir(repo)
+    if not repo_dir.exists():
+        log.error(f"Repository not found: {repo_dir}")
+        sys.exit(1)
+
+    socket_path = get_socket_path()
+    socket_dir = os.path.dirname(socket_path)
+    os.makedirs(socket_dir, exist_ok=True)
+
+    # 既存ソケットを削除
+    if os.path.exists(socket_path):
+        os.unlink(socket_path)
+
+    server = DispatchServer(max_slots=max_slots, repo_dir=repo_dir)
+
+    loop = asyncio.get_event_loop()
+    loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(_shutdown(server, srv)))
+    loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(_shutdown(server, srv)))
+
+    srv = await asyncio.start_unix_server(server.handle_client, path=socket_path)
+    os.chmod(socket_path, 0o600)
+
+    log.info(f"Dispatch server started: socket={socket_path} max_slots={max_slots} repo={repo_dir}")
+
+    async with srv:
+        await srv.serve_forever()
 
 
-def acquire_lock(state_dir: Path) -> int:
-    lock_path = state_dir / ".lock"
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
-    fcntl.flock(fd, fcntl.LOCK_EX)
-    return fd
+async def _shutdown(server: DispatchServer, srv):
+    await server.shutdown()
+    srv.close()
+    await srv.wait_closed()
+    asyncio.get_event_loop().stop()
 
 
-def release_lock(fd: int) -> None:
-    fcntl.flock(fd, fcntl.LOCK_UN)
-    os.close(fd)
+# ---------------------------------------------------------------------------
+# クライアント
+# ---------------------------------------------------------------------------
 
+async def client_send(request: dict, wait_response: bool = False) -> dict:
+    """サーバにリクエストを送信し、レスポンスを受信する。"""
+    socket_path = get_socket_path()
+    try:
+        reader, writer = await asyncio.open_unix_connection(socket_path)
+    except (ConnectionRefusedError, FileNotFoundError):
+        if is_inside_sandbox():
+            print(
+                "エラー: ディスパッチサーバが起動していません。\n"
+                "ホスト側で起動してください: systemctl --user start my-tasks-dispatcher",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        else:
+            # ホスト環境: サーバをバックグラウンド起動
+            _start_server_background()
+            for _ in range(10):
+                await asyncio.sleep(0.5)
+                try:
+                    reader, writer = await asyncio.open_unix_connection(socket_path)
+                    break
+                except (ConnectionRefusedError, FileNotFoundError):
+                    continue
+            else:
+                print("エラー: サーバへの接続に失敗しました", file=sys.stderr)
+                sys.exit(1)
 
-@dataclass
-class DispatchItem:
-    dispatch_id: str
-    working_dir: str
-    prompt: str
-    status: str = "queued"
-    pid: int | None = None
-    tmux_session: str | None = None
-    tmux_window: str | None = None
-    exit_code: int | None = None
-    started_at: str | None = None
-    finished_at: str | None = None
+    writer.write(json.dumps(request, ensure_ascii=False).encode() + b"\n")
+    await writer.drain()
 
+    data = await reader.readline()
+    response = json.loads(data.decode())
 
-def save_state(state_dir: Path, item: DispatchItem) -> None:
-    save_json(state_dir / f"{item.dispatch_id}.json", asdict(item))
-
-
-def load_all_states(state_dir: Path) -> list[DispatchItem]:
-    items = []
-    for f in sorted(state_dir.glob("*.json")):
-        if f.name.startswith("."):
-            continue
-        data = load_json(f)
+    # wait コマンドの場合、2つ目のレスポンスを待つ
+    if wait_response and response.get("ok") and response.get("waiting"):
+        data = await reader.readline()
         if data:
-            items.append(DispatchItem(**data))
-    return items
+            response = json.loads(data.decode())
+
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except Exception:
+        pass
+    return response
 
 
-def generate_dispatch_id(project_id: str, state_dir: Path) -> str:
-    existing_nums: list[int] = []
-    prefix = f"{project_id}-"
-    for f in state_dir.glob(f"{prefix}*.json"):
-        name = f.stem
-        suffix = name[len(prefix):]
-        try:
-            existing_nums.append(int(suffix))
-        except ValueError:
-            pass
-    next_num = max(existing_nums, default=0) + 1
-    return f"{project_id}-{next_num}"
+def _start_server_background():
+    """サーバをバックグラウンドで起動する。"""
+    script_path = os.path.abspath(__file__)
+    subprocess.Popen(
+        [sys.executable, script_path, "server"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
 
-def _read_exit_code(efile: Path) -> int | None:
-    """終了コードファイルを読み取る（リトライなし、ロック内での使用を想定）。"""
-    if efile.exists():
-        try:
-            content = efile.read_text().strip()
-            if content:
-                return int(content)
-        except (ValueError, OSError):
-            pass
+# ---------------------------------------------------------------------------
+# タスク情報の読み取り
+# ---------------------------------------------------------------------------
+
+def load_task_info(repo_dir: Path, task_id: str) -> dict | None:
+    """index.jsonl からタスク情報を取得する。"""
+    index_path = repo_dir / "tasks" / "index.jsonl"
+    if not index_path.exists():
+        return None
+    with open(index_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+                if entry.get("id") == task_id:
+                    return entry
+            except json.JSONDecodeError:
+                continue
     return None
 
 
-def refresh_states(state_dir: Path) -> None:
-    """running 状態のファイルを PID/sentinel チェックで更新する。ロック内で呼ぶこと。"""
-    for f in list(state_dir.glob("*.json")):
-        if f.name.startswith("."):
-            continue
-        data = load_json(f)
-        if not data or data.get("status") != "running":
-            continue
-
-        item = DispatchItem(**data)
-
-        # Sentinel ファイルチェック（主系）
-        dfile = done_file_path(item.dispatch_id, state_dir)
-        if dfile.exists():
-            item.status = "done"
-            item.exit_code = 0
-            item.finished_at = now_iso()
-            save_state(state_dir, item)
-            if item.tmux_session and item.tmux_window:
-                subprocess.run(
-                    ["tmux", "kill-window", "-t", f"{item.tmux_session}:{item.tmux_window}"],
-                    capture_output=True,
-                )
-            dfile.unlink(missing_ok=True)
-            continue
-
-        # tmux ウィンドウ存在チェック（副系）
-        if item.tmux_session and item.tmux_window:
-            result = subprocess.run(
-                ["tmux", "list-panes", "-t", f"{item.tmux_session}:{item.tmux_window}"],
-                capture_output=True,
-            )
-            if result.returncode == 0:
-                continue  # ウィンドウ存在 = まだ実行中
-
-        # ウィンドウ消失 → exit file を確認して done/failed を判定
-        efile = exit_file_path(item.dispatch_id, state_dir)
-        exit_code = _read_exit_code(efile)
-        if exit_code is not None:
-            item.exit_code = exit_code
-            item.status = "done" if exit_code == 0 else "failed"
-        else:
-            item.exit_code = -1
-            item.status = "failed"
-        item.finished_at = now_iso()
-        save_state(state_dir, item)
-
-    # 完了済みジョブの自動クリーンアップ（GC_THRESHOLD_HOURS 超過分を削除）
-    now = datetime.now(JST)
-    for f in list(state_dir.glob("*.json")):
-        if f.name.startswith("."):
-            continue
-        data = load_json(f)
-        if not data or data.get("status") not in ("done", "failed"):
-            continue
-        finished_at = data.get("finished_at")
-        if not finished_at:
-            continue
-        try:
-            finished_dt = datetime.fromisoformat(finished_at)
-        except (ValueError, TypeError):
-            continue
-        if (now - finished_dt) > timedelta(hours=GC_THRESHOLD_HOURS):
-            dispatch_id = data.get("dispatch_id", f.stem)
-            f.unlink(missing_ok=True)
-            done_file_path(dispatch_id, state_dir).unlink(missing_ok=True)
-            exit_file_path(dispatch_id, state_dir).unlink(missing_ok=True)
-
-
-def count_running(state_dir: Path) -> int:
-    count = 0
-    for f in state_dir.glob("*.json"):
-        if f.name.startswith("."):
-            continue
-        data = load_json(f)
-        if data and data.get("status") == "running":
-            count += 1
-    return count
-
-
-# ---------------------------------------------------------------------------
-# プロンプト構築・tmux 起動
-# ---------------------------------------------------------------------------
-
-def build_prompt(prompt: str, dispatch_id: str, state_dir: Path) -> str:
-    dfile = done_file_path(dispatch_id, state_dir)
-    return f"""{prompt}
-
-作業が完了したら、変更をコミットしてから次のコマンドを実行してください:
-touch {dfile}"""
-
-
-def launch_in_tmux(item: DispatchItem, command: str, session_name: str, state_dir: Path) -> int | None:
-    """tmux ウィンドウで Claude Code セッションを起動し、pane PID を返す。"""
-    full_prompt = build_prompt(item.prompt, item.dispatch_id, state_dir)
-    efile = exit_file_path(item.dispatch_id, state_dir)
-    dfile = done_file_path(item.dispatch_id, state_dir)
-
-    for f in (efile, dfile):
-        if f.exists():
-            f.unlink()
-
-    escaped_prompt = full_prompt.replace("'", "'\"'\"'")
-    system_suffix = f"タスク完了時に必ず touch {dfile} を実行してください。これによりディスパッチャーがタスクの完了を検知します。"
-    escaped_system = system_suffix.replace("'", "'\"'\"'")
-    shell_cmd = f"cd '{item.working_dir}' && {command} --append-system-prompt '{escaped_system}' '{escaped_prompt}'; echo $? > '{efile}'"
-
-    result = subprocess.run(
-        ["tmux", "new-window", "-d", "-t", session_name, "-n", item.dispatch_id, "bash", "-c", shell_cmd],
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        print(
-            f"警告: tmux ウィンドウ作成に失敗しました ({item.dispatch_id}): "
-            f"{result.stderr.decode().strip()}",
-            file=sys.stderr,
-        )
+def read_execution_prompt(repo_dir: Path, task_id: str) -> str | None:
+    """tasks/{task_id}.md から実行プロンプトセクションを読み取る。"""
+    md_path = repo_dir / "tasks" / f"{task_id}.md"
+    if not md_path.exists():
         return None
 
-    pid_result = subprocess.run(
-        ["tmux", "list-panes", "-t", f"{session_name}:{item.dispatch_id}", "-F", "#{pane_pid}"],
-        capture_output=True,
-        text=True,
-    )
-    if pid_result.returncode != 0 or not pid_result.stdout.strip():
-        print(
-            f"警告: PID 取得に失敗しました ({item.dispatch_id})",
-            file=sys.stderr,
-        )
+    with open(md_path, encoding="utf-8") as f:
+        content = f.read()
+
+    # "## 実行プロンプト" セクションを抽出
+    marker = "## 実行プロンプト"
+    idx = content.find(marker)
+    if idx == -1:
         return None
 
-    try:
-        return int(pid_result.stdout.strip().split("\n")[0])
-    except ValueError:
-        return None
+    prompt_section = content[idx + len(marker):].strip()
 
+    # 次のセクション（## で始まる行）があればそこまで
+    lines = prompt_section.split("\n")
+    result_lines = []
+    for line in lines:
+        if line.startswith("## "):
+            break
+        result_lines.append(line)
 
-# ---------------------------------------------------------------------------
-# 待機ループ（子プロセス用）
-# ---------------------------------------------------------------------------
-
-def _wait_and_launch(state_dir: Path, item: DispatchItem, max_slots: int, command: str, session: str) -> None:
-    while True:
-        time.sleep(POLL_INTERVAL)
-        fd = acquire_lock(state_dir)
-        try:
-            # cancel チェック（ファイル削除 = キャンセル）
-            if not (state_dir / f"{item.dispatch_id}.json").exists():
-                sys.exit(0)
-            refresh_states(state_dir)
-            if count_running(state_dir) < max_slots:
-                pid = launch_in_tmux(item, command, session, state_dir)
-                if pid is None:
-                    item.status = "failed"
-                    item.exit_code = -1
-                    item.finished_at = now_iso()
-                    save_state(state_dir, item)
-                    return
-                item.status = "running"
-                item.pid = pid
-                item.tmux_session = session
-                item.tmux_window = item.dispatch_id
-                item.started_at = now_iso()
-                save_state(state_dir, item)
-                return
-        finally:
-            release_lock(fd)
+    return "\n".join(result_lines).strip() or None
 
 
 # ---------------------------------------------------------------------------
 # CLI コマンド
 # ---------------------------------------------------------------------------
 
-def resolve_repo(args: argparse.Namespace) -> Path:
-    return Path(args.repo).expanduser().resolve()
-
-
 def cmd_run(args: argparse.Namespace) -> None:
-    prompt = sys.stdin.read().strip()
-    if not prompt:
-        print("エラー: プロンプトが空です（stdin からプロンプトを読み取ります）", file=sys.stderr)
+    if args.task:
+        # --task モード: index.jsonl + .md から情報を取得
+        repo_dir = get_repo_dir(args.repo)
+        task_info = load_task_info(repo_dir, args.task)
+        if not task_info:
+            print(f"エラー: タスクが見つかりません: {args.task}", file=sys.stderr)
+            sys.exit(1)
+
+        project_id = task_info.get("project_id", "")
+        if not project_id:
+            print(f"エラー: タスク {args.task} に project_id が設定されていません", file=sys.stderr)
+            sys.exit(1)
+
+        prompt = read_execution_prompt(repo_dir, args.task)
+        if not prompt:
+            print(f"エラー: タスク {args.task} に実行プロンプトがありません", file=sys.stderr)
+            sys.exit(1)
+
+        request = {
+            "command": "run",
+            "project_id": project_id,
+            "task_id": args.task,
+            "prompt": prompt,
+        }
+    else:
+        # --project モード: stdin からプロンプト
+        prompt = sys.stdin.read().strip()
+        if not prompt:
+            print("エラー: プロンプトが空です（stdin からプロンプトを読み取ります）", file=sys.stderr)
+            sys.exit(1)
+
+        request = {
+            "command": "run",
+            "project_id": args.project,
+            "prompt": prompt,
+        }
+
+    response = asyncio.run(client_send(request))
+    if response.get("ok"):
+        print(f"{response.get('message', 'OK')}: {response.get('dispatch_id', '')}", file=sys.stderr)
+    else:
+        print(f"エラー: {response.get('error', 'Unknown error')}", file=sys.stderr)
         sys.exit(1)
 
-    repo_dir = resolve_repo(args)
-    project = load_project(repo_dir, args.project)
-    if not project:
-        print(
-            f"エラー: プロジェクト '{args.project}' が見つかりません: "
-            f"{repo_dir / 'projects' / f'{args.project}.json'}",
-            file=sys.stderr,
-        )
+
+def cmd_open(args: argparse.Namespace) -> None:
+    request: dict[str, Any] = {
+        "command": "open",
+        "project_id": args.project,
+    }
+    if args.session:
+        request["session"] = args.session
+
+    response = asyncio.run(client_send(request))
+    if response.get("ok"):
+        print(f"{response.get('message', 'OK')}", file=sys.stderr)
+    else:
+        print(f"エラー: {response.get('error', 'Unknown error')}", file=sys.stderr)
         sys.exit(1)
-
-    working_dir = project.get("working_directory")
-    if not working_dir:
-        print(f"エラー: プロジェクト '{args.project}' に working_directory が設定されていません", file=sys.stderr)
-        sys.exit(1)
-
-    if not Path(working_dir).is_dir():
-        print(f"エラー: 作業ディレクトリが存在しません: {working_dir}", file=sys.stderr)
-        sys.exit(1)
-
-    session_name, is_caller = detect_tmux_session(args.session)
-    if not ensure_tmux_session(session_name, is_caller):
-        sys.exit(1)
-
-    state_dir = get_state_dir()
-
-    # ロック取得 → スロットチェック → 起動 or キュー投入
-    fd = acquire_lock(state_dir)
-    try:
-        refresh_states(state_dir)
-        dispatch_id = generate_dispatch_id(args.project, state_dir)
-        running = count_running(state_dir)
-        item = DispatchItem(dispatch_id=dispatch_id, working_dir=working_dir, prompt=prompt)
-
-        if running < args.max_slots:
-            pid = launch_in_tmux(item, args.command, session_name, state_dir)
-            if pid is None:
-                print("エラー: tmux ウィンドウの起動に失敗しました", file=sys.stderr)
-                sys.exit(1)
-            item.status = "running"
-            item.pid = pid
-            item.tmux_session = session_name
-            item.tmux_window = dispatch_id
-            item.started_at = now_iso()
-            save_state(state_dir, item)
-            print(f"起動: {dispatch_id}", file=sys.stderr)
-            return
-
-        # スロット満杯: queued 状態で保存（ロック内で書き込み、ID 重複を防止）
-        save_state(state_dir, item)
-    finally:
-        release_lock(fd)
-
-    # fork してバックグラウンドで待機、親は即座に返却
-    child_pid = os.fork()
-    if child_pid > 0:
-        print(f"キュー追加: {dispatch_id} (スロット待機中)", file=sys.stderr)
-        return
-
-    # 子プロセス
-    os.setsid()
-    _wait_and_launch(state_dir, item, args.max_slots, args.command, session_name)
-    sys.exit(0)
 
 
 def cmd_status(args: argparse.Namespace) -> None:
-    state_dir = get_state_dir()
+    request = {"command": "status"}
+    response = asyncio.run(client_send(request))
 
-    fd = acquire_lock(state_dir)
-    try:
-        refresh_states(state_dir)
-    finally:
-        release_lock(fd)
+    if not response.get("ok"):
+        print(f"エラー: {response.get('error', 'Unknown error')}", file=sys.stderr)
+        sys.exit(1)
 
-    items = load_all_states(state_dir)
-    if not items:
+    jobs = response.get("jobs", [])
+    if not jobs:
         print("ジョブはありません", file=sys.stderr)
         return
 
     if args.json:
-        print(json.dumps([asdict(i) for i in items], ensure_ascii=False, indent=2))
+        print(json.dumps(jobs, ensure_ascii=False, indent=2))
     else:
-        for item in items:
-            pid_str = str(item.pid) if item.pid else "-"
-            print(f"  {item.dispatch_id:<20} {item.status:<10} pid={pid_str:<8} {item.started_at or '-'}")
+        for job in jobs:
+            pid_str = str(job.get("pid", "")) or "-"
+            task_str = job.get("task_id", "") or "-"
+            print(f"  {job['dispatch_id']:<20} {job['status']:<10} pid={pid_str:<8} task={task_str:<16} {job.get('started_at') or '-'}")
 
         counts: dict[str, int] = {}
-        for item in items:
-            counts[item.status] = counts.get(item.status, 0) + 1
+        for job in jobs:
+            s = job["status"]
+            counts[s] = counts.get(s, 0) + 1
         parts = []
         for s in ["running", "queued", "done", "failed"]:
             if counts.get(s, 0) > 0:
@@ -501,113 +699,41 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 
 def cmd_cancel(args: argparse.Namespace) -> None:
-    state_dir = get_state_dir()
-    state_file = state_dir / f"{args.id}.json"
-
-    if not state_file.exists():
-        print(f"エラー: ジョブが見つかりません: {args.id}", file=sys.stderr)
+    request = {"command": "cancel", "dispatch_id": args.id}
+    response = asyncio.run(client_send(request))
+    if response.get("ok"):
+        print(f"キャンセル: {args.id}", file=sys.stderr)
+    else:
+        print(f"エラー: {response.get('error', 'Unknown error')}", file=sys.stderr)
         sys.exit(1)
-
-    data = load_json(state_file)
-    if not data:
-        print(f"エラー: 状態ファイルの読み込みに失敗しました: {args.id}", file=sys.stderr)
-        sys.exit(1)
-    if data.get("status") != "queued":
-        print(f"エラー: キュー状態のジョブのみキャンセルできます (現在: {data.get('status')})", file=sys.stderr)
-        sys.exit(1)
-
-    state_file.unlink()
-    print(f"キャンセル: {args.id}", file=sys.stderr)
-
-
-def _kill_item(state_dir: Path, item: DispatchItem) -> None:
-    """running ジョブを強制停止する。"""
-    if item.tmux_session and item.tmux_window:
-        subprocess.run(
-            ["tmux", "kill-window", "-t", f"{item.tmux_session}:{item.tmux_window}"],
-            capture_output=True,
-        )
-    item.status = "failed"
-    item.exit_code = -1
-    item.finished_at = now_iso()
-    save_state(state_dir, item)
 
 
 def cmd_kill(args: argparse.Namespace) -> None:
-    state_dir = get_state_dir()
-
     if args.all:
-        items = load_all_states(state_dir)
-        killed = 0
-        for item in items:
-            if item.status == "running":
-                _kill_item(state_dir, item)
-                killed += 1
-            elif item.status == "queued":
-                (state_dir / f"{item.dispatch_id}.json").unlink(missing_ok=True)
-                killed += 1
-        print(f"{killed} 個のジョブを停止しました", file=sys.stderr)
+        request = {"command": "kill-all"}
     else:
-        state_file = state_dir / f"{args.id}.json"
-        if not state_file.exists():
-            print(f"エラー: ジョブが見つかりません: {args.id}", file=sys.stderr)
-            sys.exit(1)
+        request = {"command": "kill", "dispatch_id": args.id}
 
-        data = load_json(state_file)
-        if not data:
-            print(f"エラー: 状態ファイルの読み込みに失敗しました: {args.id}", file=sys.stderr)
-            sys.exit(1)
-        item = DispatchItem(**data)
-
-        if item.status == "queued":
-            state_file.unlink()
-            print(f"キャンセル: {args.id}", file=sys.stderr)
-        elif item.status == "running":
-            _kill_item(state_dir, item)
-            print(f"強制停止: {args.id}", file=sys.stderr)
-        else:
-            print(f"ジョブは既に終了しています: {args.id} (status={item.status})", file=sys.stderr)
-
-
-def cmd_open(args: argparse.Namespace) -> None:
-    repo_dir = resolve_repo(args)
-    project = load_project(repo_dir, args.project)
-    if not project:
-        print(
-            f"エラー: プロジェクト '{args.project}' が見つかりません: "
-            f"{repo_dir / 'projects' / f'{args.project}.json'}",
-            file=sys.stderr,
-        )
+    response = asyncio.run(client_send(request))
+    if response.get("ok"):
+        print(response.get("message", "OK"), file=sys.stderr)
+    else:
+        print(f"エラー: {response.get('error', 'Unknown error')}", file=sys.stderr)
         sys.exit(1)
 
-    working_dir = project.get("working_directory")
-    if not working_dir:
-        print(f"エラー: プロジェクト '{args.project}' に working_directory が設定されていません", file=sys.stderr)
+
+def cmd_wait(args: argparse.Namespace) -> None:
+    request = {"command": "wait", "dispatch_id": args.id}
+    response = asyncio.run(client_send(request, wait_response=True))
+    if response.get("ok"):
+        print(json.dumps(response, ensure_ascii=False, indent=2))
+    else:
+        print(f"エラー: {response.get('error', 'Unknown error')}", file=sys.stderr)
         sys.exit(1)
 
-    if not Path(working_dir).is_dir():
-        print(f"エラー: 作業ディレクトリが存在しません: {working_dir}", file=sys.stderr)
-        sys.exit(1)
 
-    session_name, is_caller = detect_tmux_session(args.session)
-    if not ensure_tmux_session(session_name, is_caller):
-        sys.exit(1)
-
-    window_name = f"{args.project}-interactive"
-    shell_cmd = f"cd '{working_dir}' && {args.command}"
-
-    result = subprocess.run(
-        ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, "bash", "-c", shell_cmd],
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        print(
-            f"エラー: tmux ウィンドウ作成に失敗しました: {result.stderr.decode().strip()}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    print(f"起動: {session_name}:{window_name} ({working_dir})", file=sys.stderr)
+def cmd_server(args: argparse.Namespace) -> None:
+    asyncio.run(run_server(max_slots=args.max_slots, repo=args.repo))
 
 
 # ---------------------------------------------------------------------------
@@ -616,64 +742,60 @@ def cmd_open(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="プロセス分散型ジョブランナー — タスクを tmux 上で並列実行する"
+        description="Unix ドメインソケット C/S ジョブランナー"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # run
-    p_run = subparsers.add_parser("run", help="ジョブを投入する（プロンプトは stdin から）")
-    p_run.add_argument("--project", required=True, help="プロジェクトID")
-    p_run.add_argument(
-        "--repo", default=DEFAULT_REPO, metavar="PATH",
-        help=f"タスク管理リポジトリのパス（デフォルト: {DEFAULT_REPO}）",
-    )
-    p_run.add_argument(
+    # server
+    p_server = subparsers.add_parser("server", help="ディスパッチサーバを起動する")
+    p_server.add_argument(
         "--max-slots", type=int, default=DEFAULT_MAX_SLOTS,
         help=f"最大並列スロット数（デフォルト: {DEFAULT_MAX_SLOTS}）",
     )
-    p_run.add_argument(
-        "--command", default=DEFAULT_COMMAND,
-        help=f"セッション起動コマンド（デフォルト: {DEFAULT_COMMAND}）",
+    p_server.add_argument(
+        "--repo", default=DEFAULT_REPO, metavar="PATH",
+        help=f"タスク管理リポジトリのパス（デフォルト: {DEFAULT_REPO}）",
     )
+    p_server.set_defaults(func=cmd_server)
+
+    # run
+    p_run = subparsers.add_parser("run", help="ジョブを投入する")
+    run_group = p_run.add_mutually_exclusive_group(required=True)
+    run_group.add_argument("--task", help="タスク ID（index.jsonl + .md からプロンプトを読み取る）")
+    run_group.add_argument("--project", help="プロジェクト ID（プロンプトは stdin から）")
     p_run.add_argument(
-        "--session", default=None, metavar="SESSION_NAME",
-        help="tmux セッション名を明示指定",
+        "--repo", default=DEFAULT_REPO, metavar="PATH",
+        help=f"タスク管理リポジトリのパス（デフォルト: {DEFAULT_REPO}）",
     )
     p_run.set_defaults(func=cmd_run)
 
     # open
-    p_open = subparsers.add_parser("open", help="プロジェクトの作業ディレクトリで対話セッションを起動する")
-    p_open.add_argument("--project", required=True, help="プロジェクトID")
-    p_open.add_argument(
-        "--repo", default=DEFAULT_REPO, metavar="PATH",
-        help=f"タスク管理リポジトリのパス（デフォルト: {DEFAULT_REPO}）",
-    )
-    p_open.add_argument(
-        "--command", default=DEFAULT_INTERACTIVE_COMMAND,
-        help=f"起動コマンド（デフォルト: {DEFAULT_INTERACTIVE_COMMAND}）",
-    )
-    p_open.add_argument(
-        "--session", default=None, metavar="SESSION_NAME",
-        help="tmux セッション名を明示指定",
-    )
+    p_open = subparsers.add_parser("open", help="対話セッションを起動する")
+    p_open.add_argument("--project", required=True, help="プロジェクト ID")
+    p_open.add_argument("--session", default=None, help="tmux セッション名を明示指定")
     p_open.set_defaults(func=cmd_open)
 
     # status
-    p_status = subparsers.add_parser("status", help="状態を表示する")
+    p_status = subparsers.add_parser("status", help="ジョブ状態を表示する")
     p_status.add_argument("--json", action="store_true", help="JSON 形式で出力する")
     p_status.set_defaults(func=cmd_status)
 
     # cancel
     p_cancel = subparsers.add_parser("cancel", help="キューからジョブを取り消す")
-    p_cancel.add_argument("--id", required=True, help="ジョブID")
+    p_cancel.add_argument("--id", required=True, help="ジョブ ID")
     p_cancel.set_defaults(func=cmd_cancel)
 
     # kill
     p_kill = subparsers.add_parser("kill", help="ジョブを強制停止する")
     group = p_kill.add_mutually_exclusive_group(required=True)
-    group.add_argument("--id", help="ジョブID")
+    group.add_argument("--id", help="ジョブ ID")
     group.add_argument("--all", action="store_true", help="全ジョブを停止する")
     p_kill.set_defaults(func=cmd_kill)
+
+    # wait
+    p_wait = subparsers.add_parser("wait", help="ジョブ完了を待機する")
+    p_wait.add_argument("--id", required=True, help="ジョブ ID")
+    p_wait.set_defaults(func=cmd_wait)
 
     args = parser.parse_args()
     args.func(args)

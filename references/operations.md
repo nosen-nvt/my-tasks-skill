@@ -1,223 +1,43 @@
 # 操作リファレンス
 
-タスク管理スキルが提供する8つの操作の詳細手順。
+タスク管理スキルが提供する10のオペレーションの詳細手順。
 
 ---
 
-## 1. リポジトリ初期化
+## 1. タスク収集
 
-### 新規作成
+全データソースからタスクを収集し、`tasks/index.jsonl` + `tasks/*.md` を更新する。
 
-1. `~/.local/share/my-tasks/` にディレクトリ構成を作成:
-   ```bash
-   mkdir -p ~/.local/share/my-tasks/{datasources,projects,tasks,daily,scripts}
-   ```
-
-2. `git init`:
-   ```bash
-   cd ~/.local/share/my-tasks && git init
-   ```
-
-3. リモートリポジトリの URL をユーザーに確認:
-   - まだない場合は `gh repo create` でプライベートリポジトリを作成することを提案:
-     ```bash
-     gh repo create my-tasks --private --source ~/.local/share/my-tasks
-     ```
-   - 既存 URL がある場合:
-     ```bash
-     git remote add origin {url}
-     ```
-
-4. `fetch-all.sh` の雛形を作成:
-   ```bash
-   #!/bin/bash
-   set -euo pipefail
-   SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-   # 各データソースの収集スクリプトをここに追加
-   ```
-   ```bash
-   chmod +x ~/.local/share/my-tasks/scripts/fetch-all.sh
-   ```
-
-5. 初回 commit + push:
-   ```bash
-   cd ~/.local/share/my-tasks
-   git add .
-   git commit -m "init: initialize my-tasks repository"
-   git push -u origin main
-   ```
-
-### クローン
-
-1. リモートリポジトリの URL をユーザーに確認
-
-2. `~/.local/share/` に `git clone`:
-   ```bash
-   git clone {url} ~/.local/share/my-tasks
-   ```
-
-3. 収集スクリプトに実行権限を付与:
-   ```bash
-   chmod +x ~/.local/share/my-tasks/scripts/*.sh
-   ```
-
----
-
-## 2. データソース追加
-
-1. ユーザーに以下を確認:
-   - データソースID（例: `jira`, `ms-todo`）
-   - データソースの説明
-   - 収集スクリプトのパス（リポジトリルートからの相対パス、例: `scripts/fetch-jira.sh`）
-
-2. `datasources/{datasource_id}.json` を作成（`schemas.md` のスキーマを参照）:
-   ```json
-   {
-     "datasource_id": "{id}",
-     "description": "{説明}",
-     "script": "scripts/fetch-{id}.sh",
-     "project_mapping": {},
-     "operations": {}
-   }
-   ```
-
-3. 収集スクリプトの雛形を `scripts/fetch-{datasource_id}.sh` に作成:
-   ```bash
-   #!/bin/bash
-   # {datasource_id} の未完了タスクを JSONL 形式で stdout に出力する
-   # TODO: 実際の取得ロジックを実装してください
-   set -euo pipefail
-
-   # 例（JSONL 形式で出力）:
-   # echo '{"datasource_id":"{datasource_id}","remote_id":"TASK-1","title":"タスク名","status":"pending"}'
-   ```
-   ```bash
-   chmod +x ~/.local/share/my-tasks/scripts/fetch-{datasource_id}.sh
-   ```
-
-4. `scripts/fetch-all.sh` に新しいスクリプトの呼び出しを追記:
-   ```bash
-   bash "$SCRIPT_DIR/fetch-{datasource_id}.sh"
-   ```
-
-5. プロジェクトマッピングルールの設定を提案（後から追加も可能）
-
-6. データソース側の操作コマンドを設定（外部スキルを参照して記述）
-
-7. commit + push:
-   ```bash
-   cd ~/.local/share/my-tasks
-   git add .
-   git commit -m "feat: add datasource {datasource_id}"
-   git push
-   ```
-
----
-
-## 3. プロジェクト追加
-
-1. ユーザーに以下を確認:
-   - プロジェクトID（例: `ubs-mgmt-tool`）
-   - プロジェクト名（例: `UBS管理ツール`）
-   - プロジェクトの説明（任意）
-   - 関連するリポジトリURL（任意、複数可）
-
-2. `_default` マイルストーンを含む `projects/{project_id}.json` を作成（`schemas.md` のスキーマを参照）:
-   ```json
-   {
-     "project_id": "{project_id}",
-     "name": "{name}",
-     "description": "{description}",
-     "repositories": [],
-     "milestones": [
-       {
-         "milestone_id": "_default",
-         "name": "未分類",
-         "goal": "",
-         "due_date": null,
-         "tasks": []
-       }
-     ]
-   }
-   ```
-
-3. commit + push:
-   ```bash
-   cd ~/.local/share/my-tasks
-   git add .
-   git commit -m "feat: add project {project_id}"
-   git push
-   ```
-
----
-
-## 4. マイルストーン追加
-
-1. ユーザーに以下を確認:
-   - 対象プロジェクト（既存プロジェクト一覧を表示して選択）
-   - マイルストーン名（例: `v1.0 リリース`）
-   - マイルストーンID（例: `v1-release`）
-   - ゴールの説明（任意）
-   - 期日（YYYY-MM-DD形式、任意）
-
-2. `projects/{project_id}.json` の `milestones` 配列に新しいマイルストーンを追加:
-   ```json
-   {
-     "milestone_id": "{milestone_id}",
-     "name": "{name}",
-     "goal": "{goal}",
-     "due_date": "{due_date}",
-     "tasks": []
-   }
-   ```
-   **注意**: `_default` マイルストーンは末尾に保持すること
-
-3. commit + push:
-   ```bash
-   cd ~/.local/share/my-tasks
-   git add .
-   git commit -m "feat: add milestone {milestone_id} to {project_id}"
-   git push
-   ```
-
----
-
-## 5. タスク最新化
+### 手順
 
 1. `scripts/fetch-all.sh` を実行し JSONL を取得:
    ```bash
    ~/.local/share/my-tasks/scripts/fetch-all.sh > /tmp/my-tasks-sync.jsonl
    ```
 
-2. `sync-tasks.py` を実行してタスクストアを更新:
+2. `sync-tasks.py` を実行してタスクインデックスと Markdown を更新:
    ```bash
    python3 ~/.claude/skills/my-tasks/scripts/sync-tasks.py \
      --repo ~/.local/share/my-tasks \
      --input /tmp/my-tasks-sync.jsonl
    ```
-   スクリプトは以下を処理する:
-   - **新規タスク**: タスクストアに追加
-   - **既存タスク**: title, due_date, url を上書き更新
-   - **消失タスク**: タスクストアから削除し、プロジェクトと日次ゴールの参照も削除（JSONL に含まれない既存タスク）
-   - `updated_at` を現在時刻で更新
 
 3. スクリプトのレポートを確認:
-   - 自動割り当て成功: `project_mapping` でプロジェクトが特定できたタスク → `projects/*.json` の `_default` マイルストーンに追加
-   - 要確認: プロジェクトが特定できなかったタスク → ユーザーに提案して確認
+   - `auto_assigned`: `project_mapping` でプロジェクトが特定できたタスク
+   - `needs_review`: プロジェクトが特定できなかったタスク → ユーザーに確認
+   - `vanished`: 消失タスク（インデックスと Markdown から削除済み）
 
 4. 要確認タスクに対してユーザーと対話:
-   - プロジェクト定義（名前・説明・マイルストーン）をコンテキストとして提示
-   - 割り当て先プロジェクト・マイルストーンをユーザーが選択
-   - または「未割り当て」（`_default` マイルストーン）を選択
+   - プロジェクト一覧をコンテキストとして提示
+   - 割り当て先プロジェクトをユーザーが選択
+   - `tasks/index.jsonl` と `tasks/{id}.md` の `project_id` を更新
 
-5. プロジェクトJSONのマイルストーン内タスク参照を更新（新規タスクの割り当て結果を反映）
-
-6. 一時ファイルを削除:
+5. 一時ファイルを削除:
    ```bash
    rm /tmp/my-tasks-sync.jsonl
    ```
 
-7. commit + push:
+6. commit + push（datasources/ や projects/ に変更がある場合のみ）:
    ```bash
    cd ~/.local/share/my-tasks
    git add .
@@ -227,134 +47,234 @@
 
 ---
 
-## 6. 日次ゴール設定
+## 2. メールトリアージ
 
-1. 今日の日付を確認し、`daily/YYYY-MM-DD.json` が既に存在するか確認
-
-2. 全プロジェクトの `projects/*.json` を読み込み、タスクの一覧を構築:
-   - `tasks/*.json` から各タスクの詳細を取得（タスクストアに存在する = 残っているタスク）
-
-3. マイルストーンの期日を考慮して優先度を算出し、今日取り組むべきタスクを提案:
-   - 期日が近いマイルストーンのタスクを優先
-
-4. ユーザーと対話してタスクを選定:
-   - 提案リストを表示（プロジェクト・マイルストーン単位）
-   - ユーザーが追加・削除・変更を指示できる
-
-5. `daily/YYYY-MM-DD.json` を作成（`schemas.md` のスキーマを参照）
-
-6. commit + push:
-   ```bash
-   cd ~/.local/share/my-tasks
-   git add .
-   git commit -m "daily: set goals for {YYYY-MM-DD}"
-   git push
-   ```
-
----
-
-## 7. タスク操作（データソース側）
-
-1. ユーザーが変更したいタスクと操作内容を確認:
-   - 対象タスクの `datasource_id/remote_id`
-   - 操作の種類（ステータス変更、担当者変更、新規作成 等）
-
-2. 対象データソースの `datasources/{datasource_id}.json` を読み込み、`operations` を参照
-
-3. 対応する操作の `command` テンプレートに実際の値を埋め込んで実行:
-   ```bash
-   # 例: JIRAのステータス更新
-   jira issue move UBS-101 "Done"
-   ```
-
-4. 実行後、タスク最新化を実行（操作5を参照）してリポジトリに反映
-
-5. commit + push（タスク最新化の commit に含まれる）
-
----
-
-## 8. 参照系
-
-### プロジェクト状況確認
-
-1. 対象プロジェクトの `projects/{project_id}.json` を読み込み
-
-2. 各マイルストーンについて:
-   - マイルストーン名・ゴール・期日を表示
-   - タスク参照 (`ref`) から `tasks/*.json` を参照してタスク詳細を取得
-   - タスク数を集計
-
-3. 全体の進捗をマイルストーン単位で表示
-
-### 日次ゴール確認
-
-1. 当日の `daily/YYYY-MM-DD.json` を読み込み（存在しない場合はその旨を伝える）
-
-2. ゴールのタスクの詳細を `tasks/*.json` から取得
-
-3. ゴールの進捗を表示
-
-### タスク検索
-
-1. ユーザーの検索条件を確認（キーワード・プロジェクト・マイルストーン等）
-
-2. `tasks/*.json` をすべて読み込み、条件に合致するタスクを絞り込み
-
-3. 結果をプロジェクト・マイルストーン情報（`projects/*.json` を参照）と併せて表示
-
----
-
-## 9. タスクディスパッチ
-
-デイリーゴールのタスクを tmux 上で複数の Claude Code セッションとして並列実行する。
-
-### 前提条件
-
-- 日次ゴールが設定済み（操作6）
-- ディスパッチ対象プロジェクトの `projects/{project_id}.json` に `working_directory` が設定されている
-- `tmux` がインストールされている
+メールデータソースからアクションアイテムを収集する。
 
 ### 手順
 
-1. 日次ゴールを設定（操作6）し、今日取り組むタスクを確定
+1. メールデータソースの収集スクリプトを実行（fetch-all.sh の一部として、またはメールのみ個別に）
 
-2. 必要に応じてプロジェクト定義に `working_directory` を設定:
-   ```bash
-   # projects/{project_id}.json に "working_directory": "/path/to/project" を追加
+2. 収集スクリプトが担う処理:
+   - 未読メールを取得
+   - エージェントがアクション不要と判断したメールを既読にする
+   - アクション要のメールを JSONL 形式で出力
+
+3. 出力された JSONL を sync-tasks.py に渡してタスク化（操作1と同じフロー）
+
+---
+
+## 3. タスク精査
+
+`pending` タスクに対して質問リストを生成し、`needs_clarification` に遷移する。
+
+### 手順
+
+1. `tasks/index.jsonl` から `status=pending` のタスクを一覧
+
+2. 対象タスクの `tasks/{id}.md` を読み込み
+
+3. タスクの内容を分析し、「未決事項」セクションに質問リストを生成:
+   ```markdown
+   ## 未決事項
+
+   - [ ] 認証方式は OAuth2 でよいか？
+   - [ ] テストカバレッジの目標は？
    ```
 
-3. ディスパッチ開始:
+4. `index.jsonl` と `.md` の status を `needs_clarification` に更新
+
+5. ユーザーに質問を提示し、回答を収集:
+   - 回答済みの項目を `[x]` に更新し、回答を追記
+   - 全項目が `[x]` になったら `scoped` に遷移可能
+
+---
+
+## 4. プロンプト生成
+
+`scoped` タスクの実行プロンプトを生成する。
+
+### 手順
+
+1. `tasks/index.jsonl` から `status=scoped` のタスクを一覧
+
+2. 対象タスクの `tasks/{id}.md` を読み込み
+
+3. 未決事項の回答、事前条件、達成条件を元に実行プロンプトを生成
+
+4. `## 実行プロンプト` セクションにプロンプトを書き込み
+
+---
+
+## 5. プロンプト承認
+
+生成されたプロンプトをユーザーに提示し、承認を得る。
+
+### 手順
+
+1. `tasks/index.jsonl` から `status=scoped` のタスクを一覧
+
+2. `tasks/{id}.md` の `## 実行プロンプト` セクションをユーザーに提示
+
+3. ユーザーが承認したら `index.jsonl` と `.md` の status を `approved` に更新
+
+---
+
+## 6. タスク実行
+
+`approved` タスクをディスパッチャー経由で実行する。
+
+### 手順
+
+1. `tasks/index.jsonl` から `status=approved` のタスクを一覧（または特定のタスク ID を指定）
+
+2. ディスパッチャーにジョブを投入:
    ```bash
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py start \
-     --repo ~/.local/share/my-tasks \
-     [--max-slots 3] \
-     [--command "sandbox claude"]
+   # タスク ID 指定（index.jsonl + .md から自動読み取り）
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py run --task 20260301-001
+
+   # プロジェクト ID + stdin プロンプト指定
+   echo "..." | python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py run --project bo
    ```
 
-4. 別ターミナルから監視:
+3. `index.jsonl` と `.md` の status を `running` に更新
+
+### 対話セッション
+
+ジョブ管理の対象外で対話セッションを起動する場合:
+```bash
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo [--session main]
+```
+
+---
+
+## 7. ステータス確認
+
+タスク一覧やジョブ状況を表示する。
+
+### タスク一覧
+
+1. `tasks/index.jsonl` を読み込み、ステータス別に集計・表示
+
+2. 必要に応じて特定タスクの `tasks/{id}.md` の詳細を表示
+
+### ジョブ状況
+
+1. ディスパッチャーにステータスを問い合わせ:
    ```bash
-   # ステータス確認
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status
-
-   # tmux ウィンドウ一覧
-   tmux list-windows -t dispatch
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status --json
    ```
 
-5. 必要に応じてタスク追加:
+### タスク検索
+
+1. ユーザーの検索条件を確認（キーワード・プロジェクト・ステータス等）
+
+2. `tasks/index.jsonl` をフィルタリングして結果を表示
+
+---
+
+## 8. タスク操作（データソース側）
+
+データソース側のタスクを操作する（ステータス変更、担当者変更、新規作成等）。
+
+### 手順
+
+1. ユーザーが変更したいタスクと操作内容を確認:
+   - 対象タスクの ID（`tasks/index.jsonl` で特定）
+   - 操作の種類
+
+2. タスクの `datasource_id` から `datasources/{datasource_id}.json` を読み込み、`operations` を参照
+
+3. 対応する操作の `command` テンプレートに実際の値を埋め込んで実行:
    ```bash
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py add \
-     --ref jira/UBS-103 \
-     --working-dir /path/to/project \
-     [--note "補足指示"]
+   # 例: JIRA のステータス更新
+   atl jira issue update --key UBS-101 --status "Done" --site urbanb
    ```
 
-6. 全タスク完了後、JSON レポートが stdout に出力される
+4. 操作後、タスク収集を実行（操作1）してリポジトリに反映
 
-7. 停止・強制終了:
+---
+
+## 9. 完了時アクション
+
+`done` タスクの後処理を実行する。
+
+### 手順
+
+1. `tasks/index.jsonl` から `status=done` のタスクを一覧
+
+2. 各タスクの `tasks/{id}.md` の `## 完了時アクション` セクションを確認
+
+3. 記載されたアクションを実行:
+   - データソース側のステータス更新（操作8を活用）
+   - PR の作成
+   - 通知の送信
+   - etc.
+
+4. アクション完了後、必要に応じてタスク収集（操作1）を実行
+
+---
+
+## 10. 設定管理
+
+プロジェクト・データソースの CRUD を行う。
+
+### リポジトリ初期化
+
+#### 新規作成
+
+1. ディレクトリ構成を作成:
    ```bash
-   # 新規タスクの起動を停止（実行中セッションは継続）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py stop
-
-   # tmux セッションごと強制終了
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py kill
+   mkdir -p ~/.local/share/my-tasks/{datasources,projects,tasks,scripts}
    ```
+
+2. `.gitignore` を作成:
+   ```bash
+   echo "tasks/" > ~/.local/share/my-tasks/.gitignore
+   ```
+
+3. `git init` + リモート設定:
+   ```bash
+   cd ~/.local/share/my-tasks && git init
+   gh repo create my-tasks --private --source ~/.local/share/my-tasks
+   ```
+
+4. `fetch-all.sh` の雛形を作成
+
+5. 初回 commit + push
+
+#### クローン
+
+1. `git clone {url} ~/.local/share/my-tasks`
+2. 収集スクリプトに実行権限を付与
+
+### データソース追加
+
+1. ユーザーに以下を確認:
+   - データソース ID、種別（`jira`, `todo`, `mail`）、説明、収集スクリプトパス
+
+2. `datasources/{datasource_id}.json` を作成（`schemas.md` 参照）
+
+3. 収集スクリプトの雛形を作成
+
+4. `scripts/fetch-all.sh` に呼び出しを追記
+
+5. commit + push
+
+### プロジェクト追加
+
+1. ユーザーに以下を確認:
+   - プロジェクト ID、名前、説明、作業ディレクトリ、サンドボックスモード
+
+2. `projects/{project_id}.json` を作成（`schemas.md` 参照）
+
+3. commit + push
+
+### プロジェクト更新
+
+1. 既存の `projects/{project_id}.json` を読み込み
+
+2. 変更内容を適用（sandbox_mode 変更、working_directory 変更等）
+
+3. commit + push

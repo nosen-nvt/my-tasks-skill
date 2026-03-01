@@ -9,6 +9,7 @@
 | フィールド | 型 | 必須 | 説明 |
 |---|---|---|---|
 | `datasource_id` | string | Yes | データソースの識別子（ファイル名と一致） |
+| `type` | string | Yes | データソースの種別（`jira`, `todo`, `mail`） |
 | `description` | string | Yes | データソースの説明 |
 | `script` | string | Yes | 収集スクリプトのパス（リポジトリルートからの相対パス） |
 | `project_mapping` | object | No | `project_key` → `project_id` のマッピング |
@@ -17,7 +18,7 @@
 ### `project_mapping`
 
 JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロジェクトIDへのマッピング。
-タスク最新化時に新規タスクの自動割り当てに使用する。
+タスク収集時に新規タスクの自動割り当てに使用する。
 
 ### `operations`
 
@@ -30,6 +31,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 ```json
 {
   "datasource_id": "jira",
+  "type": "jira",
   "description": "JIRA のタスク",
   "script": "scripts/fetch-jira.sh",
   "project_mapping": {
@@ -40,14 +42,22 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
     "update_status": {
       "description": "タスクのステータスを更新する",
       "command": "jira issue move {remote_id} {status}"
-    },
-    "assign": {
-      "description": "担当者を変更する",
-      "command": "jira issue assign {remote_id} {assignee}"
-    },
-    "create": {
-      "description": "新規タスクを作成する",
-      "command": "jira issue create --project {project_key} --type Task --summary \"{title}\""
+    }
+  }
+}
+```
+
+```json
+{
+  "datasource_id": "mail-urbanb",
+  "type": "mail",
+  "description": "urban-b.com メールからのアクションアイテム",
+  "script": "scripts/fetch-mail-urbanb.sh",
+  "project_mapping": {},
+  "operations": {
+    "mark_read": {
+      "description": "メールを既読にする",
+      "command": "msgraph mail update --message-id {remote_id} --is-read true"
     }
   }
 }
@@ -55,58 +65,107 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 
 ---
 
-## 2. タスクストア (`tasks/{datasource_id}.json`)
+## 2. タスクインデックス (`tasks/index.jsonl`)
 
-1データソース1ファイル。データソースから取得したタスクの実体を保持する。
+全データソースのタスクを統合管理する JSONL ファイル。1行1タスク。
+`tasks/` ディレクトリは `.gitignore` で git 管理対象外とする。
 
 ### スキーマ
 
 | フィールド | 型 | 必須 | 説明 |
 |---|---|---|---|
-| `datasource_id` | string | Yes | データソースの識別子（ファイル名と一致） |
-| `updated_at` | string | Yes | 最終同期日時（ISO 8601形式） |
-| `tasks` | array | Yes | タスクエントリの配列 |
-
-### タスクエントリのスキーマ
-
-| フィールド | 型 | 必須 | 説明 |
-|---|---|---|---|
-| `remote_id` | string | Yes | データソース内でのタスク一意識別子 |
+| `id` | string | Yes | タスク ID（`YYYYMMDD-NNN` 形式） |
+| `remote_id` | string | No | データソース内でのタスク一意識別子 |
+| `datasource_id` | string | Yes | データソースの識別子 |
 | `title` | string | Yes | タスクタイトル |
-| `due_date` | string\|null | No | 期日（YYYY-MM-DD形式）、なければ `null` |
-| `url` | string\|null | No | タスクのURL |
-| `project_key` | string\|null | No | データソース内のプロジェクト識別子 |
+| `status` | string | Yes | タスクステータス |
+| `project_id` | string | No | 紐づくプロジェクトの ID |
+
+### ステータス定義
+
+```
+pending ──→ needs_clarification ──→ scoped ──→ approved ──→ running ──→ done
+              ↑          │                                          └──→ failed
+              └──────────┘
+```
+
+| ステータス | 意味 |
+|-----------|------|
+| `pending` | データソースから取り込まれた初期状態 |
+| `needs_clarification` | 質問が生成されたが、未回答の項目がある |
+| `scoped` | 前提条件・達成条件が明確で、実行プロンプトが生成済み |
+| `approved` | ユーザがプロンプトを承認し、実行待ち |
+| `running` | ディスパッチャーで実行中 |
+| `done` | 完了 |
+| `failed` | 失敗 |
+
+### ID 生成規則
+
+- 形式: `YYYYMMDD-NNN`（日付 + 当日の連番、3桁ゼロ埋め）
+- 例: `20260301-001`, `20260301-002`, ...`20260301-999`
+- 日をまたいだ場合、連番はリセットされる
 
 ### 例
 
-```json
-{
-  "datasource_id": "jira",
-  "updated_at": "2026-02-18T09:00:00+09:00",
-  "tasks": [
-    {
-      "remote_id": "UBS-101",
-      "title": "API実装",
-      "due_date": "2026-03-15",
-      "url": "https://jira.example.com/browse/UBS-101",
-      "project_key": "UBS"
-    },
-    {
-      "remote_id": "UBS-102",
-      "title": "認証機能の追加",
-      "due_date": "2026-03-20",
-      "url": "https://jira.example.com/browse/UBS-102",
-      "project_key": "UBS"
-    }
-  ]
-}
+```jsonl
+{"id":"20260301-001","remote_id":"UBS-101","datasource_id":"jira","title":"API実装","status":"pending","project_id":"ubs-mgmt-tool"}
+{"id":"20260301-002","remote_id":"abc123","datasource_id":"ms-todo","title":"書類提出","status":"needs_clarification","project_id":""}
 ```
 
 ---
 
-## 3. プロジェクト定義 (`projects/{project_id}.json`)
+## 3. タスク実体 (`tasks/{id}.md`)
 
-1プロジェクト1ファイル。プロジェクトとマイルストーンの構成を定義する。
+1タスク1ファイル。タスクの詳細情報を Markdown 形式で保持する。
+
+### 構造
+
+```markdown
+# {title}
+
+- ID: {id}
+- Remote ID: {remote_id}
+- Datasource: {datasource_id}
+- Project: {project_id}
+- Status: {status}
+
+## 概要
+
+（タスクの説明。sync-tasks.py による初期生成時は空）
+
+## 未決事項
+
+- [ ] （精査フェーズで生成される質問リスト）
+
+## 事前条件
+
+（タスク実行の前提条件）
+
+## 達成条件
+
+（タスクの完了判定基準）
+
+## 完了時アクション
+
+（タスク完了後に実行するアクション）
+
+## 実行プロンプト
+
+（scoped ステータスに遷移した際にエージェントが生成）
+```
+
+### 規約
+
+- メタデータ部分（冒頭のリスト）はプログラムから読み書きする
+- `## 未決事項` はチェックボックス形式。全て `[x]` になったら scoped への遷移が可能
+- `## 実行プロンプト` は scoped 時に生成され、approved 時にディスパッチャーに渡される
+- 各セクションは空でもヘッダを残す（パース容易性のため）
+
+---
+
+## 4. プロジェクト定義 (`projects/{project_id}.json`)
+
+1プロジェクト1ファイル。プロジェクトの構成を定義する。
 
 ### スキーマ
 
@@ -116,30 +175,8 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 | `name` | string | Yes | プロジェクト名 |
 | `description` | string | No | プロジェクトの説明 |
 | `repositories` | array | No | 関連するリポジトリURLの配列 |
-| `working_directory` | string\|null | No | dispatcher がセッションを起動する作業ディレクトリ。null の場合はディスパッチ不可 |
-| `milestones` | array | Yes | マイルストーンの配列（`_default` を必ず含む） |
-
-### マイルストーンのスキーマ
-
-| フィールド | 型 | 必須 | 説明 |
-|---|---|---|---|
-| `milestone_id` | string | Yes | マイルストーンの識別子 |
-| `name` | string | Yes | マイルストーン名 |
-| `goal` | string | No | マイルストーンのゴール説明 |
-| `due_date` | string\|null | No | 期日（YYYY-MM-DD形式）、なければ `null` |
-| `tasks` | array | Yes | タスク参照の配列 |
-
-### タスク参照のスキーマ
-
-| フィールド | 型 | 必須 | 説明 |
-|---|---|---|---|
-| `ref` | string | Yes | `datasource_id/remote_id` 形式の複合キー |
-
-### 規約
-
-- すべてのタスクはいずれかのマイルストーンに属する
-- マイルストーン指定がないタスクは `_default` マイルストーンに紐づける
-- `_default` マイルストーンは必ず存在しなければならない
+| `working_directory` | string | Yes | ディスパッチャーが使用する作業ディレクトリ |
+| `sandbox_mode` | string | No | サンドボックスモード（`restricted` or `unrestricted`、デフォルト: `restricted`） |
 
 ### 例
 
@@ -151,73 +188,8 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
   "repositories": [
     "https://github.com/example/ubs-mgmt-tool"
   ],
-  "milestones": [
-    {
-      "milestone_id": "v1-release",
-      "name": "v1.0 リリース",
-      "goal": "基本機能の実装完了",
-      "due_date": "2026-03-31",
-      "tasks": [
-        { "ref": "jira/UBS-101" },
-        { "ref": "jira/UBS-102" }
-      ]
-    },
-    {
-      "milestone_id": "_default",
-      "name": "未分類",
-      "goal": "",
-      "due_date": null,
-      "tasks": [
-        { "ref": "jira/UBS-200" }
-      ]
-    }
-  ]
-}
-```
-
----
-
-## 4. 日次ゴール (`daily/YYYY-MM-DD.json`)
-
-1日1ファイル。その日の作業ゴールを記録する。
-
-### スキーマ
-
-| フィールド | 型 | 必須 | 説明 |
-|---|---|---|---|
-| `date` | string | Yes | 日付（YYYY-MM-DD形式） |
-| `goals` | array | Yes | ゴールエントリの配列 |
-
-### ゴールエントリのスキーマ
-
-| フィールド | 型 | 必須 | 説明 |
-|---|---|---|---|
-| `project_id` | string | Yes | プロジェクトの識別子 |
-| `milestone_id` | string | Yes | マイルストーンの識別子 |
-| `tasks` | array | Yes | タスク参照の配列 |
-
-### タスク参照のスキーマ
-
-| フィールド | 型 | 必須 | 説明 |
-|---|---|---|---|
-| `ref` | string | Yes | `datasource_id/remote_id` 形式の複合キー |
-| `note` | string\|null | No | dispatcher 向け補足指示 |
-
-### 例
-
-```json
-{
-  "date": "2026-02-18",
-  "goals": [
-    {
-      "project_id": "ubs-mgmt-tool",
-      "milestone_id": "v1-release",
-      "tasks": [
-        { "ref": "jira/UBS-101" },
-        { "ref": "jira/UBS-102", "note": "API の認証部分を優先して実装" }
-      ]
-    }
-  ]
+  "working_directory": "/home/nosen/src/github.com/example/ubs-mgmt-tool",
+  "sandbox_mode": "restricted"
 }
 ```
 
@@ -251,43 +223,35 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 ### 規約
 
 - 収集スクリプトは完了済みタスクを出力しない（未完了タスクのみ出力）
-- JSONL に含まれないが `tasks/*.json` に存在するタスクは「消失タスク」として扱い、タスクストアから削除する。プロジェクトと日次ゴールの参照も削除する
+- JSONL に含まれないが `tasks/index.jsonl` に存在するタスクは「消失タスク」として扱い、インデックスと Markdown ファイルから削除する
 - フィールドが存在しない場合はデフォルト値を使用（`null`）
 
 ---
 
-## 6. ディスパッチャー状態ファイル (`{state_dir}/{dispatch_id}.json`)
+## 6. ディスパッチャージョブ状態（インメモリ）
 
-1ジョブ = 1ファイル。状態ディレクトリは `$XDG_RUNTIME_DIR/my-tasks-dispatch/`（フォールバック: `/tmp/my-tasks-dispatch/`）。
+ディスパッチャーサーバがインメモリで管理するジョブ状態。
+ファイルへの永続化は行わない（サーバ再起動時にリセット）。
+ソケット: `$XDG_RUNTIME_DIR/my-tasks-dispatch/dispatcher.sock`
 
-### スキーマ
+### ジョブフィールド
 
-| フィールド | 型 | 必須 | 説明 |
-|---|---|---|---|
-| `dispatch_id` | string | Yes | 識別子（`{project_id}-{連番}` 形式、例: `bo-1`） |
-| `working_dir` | string | Yes | 作業ディレクトリ |
-| `prompt` | string | Yes | Claude Code に渡すプロンプト |
-| `status` | string | Yes | `queued` \| `running` \| `done` \| `failed` |
-| `pid` | integer\|null | No | tmux ペインの PID |
-| `tmux_session` | string\|null | No | tmux セッション名 |
-| `tmux_window` | string\|null | No | tmux ウィンドウ名 |
-| `exit_code` | integer\|null | No | 終了コード |
-| `started_at` | string\|null | No | 開始日時（ISO 8601形式） |
-| `finished_at` | string\|null | No | 終了日時（ISO 8601形式） |
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `dispatch_id` | string | 識別子（`{project_id}-{連番}` 形式、例: `bo-1`） |
+| `project_id` | string | プロジェクト ID |
+| `task_id` | string\|null | タスク ID（`run --task` の場合） |
+| `status` | string | `queued` \| `running` \| `done` \| `failed` |
+| `pid` | integer\|null | 子プロセスの PID |
+| `exit_code` | integer\|null | 終了コード |
+| `started_at` | string\|null | 開始日時（ISO 8601形式） |
+| `finished_at` | string\|null | 終了日時（ISO 8601形式） |
 
-### 例
+### status レスポンス例
 
 ```json
-{
-  "dispatch_id": "bo-1",
-  "working_dir": "/home/nosen/src/.../bo",
-  "prompt": "バグを修正してください",
-  "status": "running",
-  "pid": 12345,
-  "tmux_session": "main",
-  "tmux_window": "bo-1",
-  "exit_code": null,
-  "started_at": "2026-02-23T10:00:00+09:00",
-  "finished_at": null
-}
+{"ok": true, "jobs": [
+  {"dispatch_id": "bo-1", "project_id": "bo", "task_id": "20260301-001", "status": "running", "pid": 12345, "exit_code": null, "started_at": "2026-03-01T10:00:00+09:00", "finished_at": null},
+  {"dispatch_id": "bo-2", "project_id": "bo", "task_id": null, "status": "queued", "pid": null, "exit_code": null, "started_at": null, "finished_at": null}
+]}
 ```

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-sync-tasks.py - タスク最新化スクリプト
+sync-tasks.py - タスク同期スクリプト
 
-fetch-all.sh が出力する JSONL を受け取り、tasks/*.json（タスクストア）を更新する。
+fetch-all.sh が出力する JSONL を受け取り、tasks/index.jsonl + tasks/{id}.md を更新する。
 
 使い方:
   fetch-all.sh | python3 sync-tasks.py --repo ~/.local/share/my-tasks
@@ -22,6 +22,14 @@ JST = timezone(timedelta(hours=9))
 def now_iso() -> str:
     return datetime.now(JST).isoformat(timespec="seconds")
 
+
+def today_str() -> str:
+    return datetime.now(JST).strftime("%Y%m%d")
+
+
+# ---------------------------------------------------------------------------
+# JSONL 入力
+# ---------------------------------------------------------------------------
 
 def load_jsonl(source) -> list[dict]:
     """JSONL を読み込んでリストで返す。空行・コメント行は無視する。"""
@@ -47,27 +55,143 @@ def load_jsonl(source) -> list[dict]:
     return tasks
 
 
-def load_task_store(tasks_dir: Path, datasource_id: str) -> dict:
-    """tasks/{datasource_id}.json を読み込む。存在しない場合は空のストアを返す。"""
-    store_path = tasks_dir / f"{datasource_id}.json"
-    if store_path.exists():
-        with open(store_path, encoding="utf-8") as f:
-            return json.load(f)
-    return {
-        "datasource_id": datasource_id,
-        "updated_at": now_iso(),
-        "tasks": [],
-    }
+# ---------------------------------------------------------------------------
+# タスクインデックス (index.jsonl)
+# ---------------------------------------------------------------------------
+
+def load_index(tasks_dir: Path) -> list[dict]:
+    """tasks/index.jsonl を読み込んでリストで返す。存在しない場合は空リストを返す。"""
+    index_path = tasks_dir / "index.jsonl"
+    if not index_path.exists():
+        return []
+    entries = []
+    with open(index_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return entries
 
 
-def save_task_store(tasks_dir: Path, store: dict) -> None:
-    """tasks/{datasource_id}.json に書き込む。"""
+def save_index(tasks_dir: Path, entries: list[dict]) -> None:
+    """tasks/index.jsonl に書き出す。"""
     tasks_dir.mkdir(parents=True, exist_ok=True)
-    store_path = tasks_dir / f"{store['datasource_id']}.json"
-    with open(store_path, "w", encoding="utf-8") as f:
-        json.dump(store, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    index_path = tasks_dir / "index.jsonl"
+    with open(index_path, "w", encoding="utf-8") as f:
+        for entry in entries:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+
+def generate_task_id(tasks_dir: Path) -> str:
+    """YYYYMMDD-NNN 形式のタスク ID を生成する。"""
+    date_prefix = today_str()
+    existing = load_index(tasks_dir)
+
+    max_seq = 0
+    for entry in existing:
+        eid = entry.get("id", "")
+        if eid.startswith(date_prefix + "-"):
+            try:
+                seq = int(eid[len(date_prefix) + 1:])
+                if seq > max_seq:
+                    max_seq = seq
+            except ValueError:
+                pass
+
+    return f"{date_prefix}-{max_seq + 1:03d}"
+
+
+# ---------------------------------------------------------------------------
+# タスク Markdown
+# ---------------------------------------------------------------------------
+
+def create_task_markdown(tasks_dir: Path, entry: dict) -> None:
+    """タスク実体の Markdown ファイルを生成する。"""
+    task_id = entry["id"]
+    md_path = tasks_dir / f"{task_id}.md"
+
+    content = f"""# {entry['title']}
+
+- ID: {entry['id']}
+- Remote ID: {entry.get('remote_id', '')}
+- Datasource: {entry['datasource_id']}
+- Project: {entry.get('project_id', '')}
+- Status: {entry['status']}
+
+## 概要
+
+
+
+## 未決事項
+
+
+
+## 事前条件
+
+
+
+## 達成条件
+
+
+
+## 完了時アクション
+
+
+
+## 実行プロンプト
+
+"""
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def update_task_markdown_metadata(tasks_dir: Path, entry: dict) -> None:
+    """タスク Markdown ファイルのメタデータ部分（タイトルとリスト）を更新する。"""
+    task_id = entry["id"]
+    md_path = tasks_dir / f"{task_id}.md"
+
+    if not md_path.exists():
+        create_task_markdown(tasks_dir, entry)
+        return
+
+    with open(md_path, encoding="utf-8") as f:
+        content = f.read()
+
+    lines = content.split("\n")
+    new_lines = []
+    for line in lines:
+        if line.startswith("# ") and new_lines == []:
+            new_lines.append(f"# {entry['title']}")
+        elif line.startswith("- ID: "):
+            new_lines.append(f"- ID: {entry['id']}")
+        elif line.startswith("- Remote ID: "):
+            new_lines.append(f"- Remote ID: {entry.get('remote_id', '')}")
+        elif line.startswith("- Datasource: "):
+            new_lines.append(f"- Datasource: {entry['datasource_id']}")
+        elif line.startswith("- Project: "):
+            new_lines.append(f"- Project: {entry.get('project_id', '')}")
+        elif line.startswith("- Status: "):
+            new_lines.append(f"- Status: {entry['status']}")
+        else:
+            new_lines.append(line)
+
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(new_lines))
+
+
+def delete_task(tasks_dir: Path, task_id: str) -> None:
+    """index エントリの削除は呼び出し側で行う。ここでは .md ファイルの削除のみ。"""
+    md_path = tasks_dir / f"{task_id}.md"
+    md_path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# データソース読み込み
+# ---------------------------------------------------------------------------
 
 def load_datasource(datasources_dir: Path, datasource_id: str) -> dict | None:
     """datasources/{datasource_id}.json を読み込む。存在しない場合は None を返す。"""
@@ -85,215 +209,133 @@ def resolve_project(project_key: str | None, project_mapping: dict) -> str | Non
     return project_mapping.get(project_key)
 
 
+# ---------------------------------------------------------------------------
+# データソース処理
+# ---------------------------------------------------------------------------
+
 def process_datasource(
     datasource_id: str,
     incoming_tasks: list[dict],
     tasks_dir: Path,
     datasources_dir: Path,
+    index_entries: list[dict],
 ) -> dict:
     """
     1データソース分のタスクを処理する。
 
+    index_entries はインプレースで変更される（新規追加・消失削除）。
+
     Returns:
         {
-            "added": [...],      # 新規タスク
-            "vanished": [...],   # 消失タスク（ストアから削除）
-            "vanished_refs": [...],   # 消失タスクの ref リスト（cleanup 用）
-            "auto_assigned": [...],   # project_mapping で自動割り当て成功
-            "needs_review": [...],    # プロジェクト特定できず → 要確認
+            "added": [...],
+            "updated": [...],
+            "vanished": [...],
+            "auto_assigned": [...],
+            "needs_review": [...],
         }
     """
-    store = load_task_store(tasks_dir, datasource_id)
     datasource = load_datasource(datasources_dir, datasource_id)
     project_mapping = datasource.get("project_mapping", {}) if datasource else {}
 
-    # 旧ストアの ID セット（消失検出・自動割り当て判定に使う）
-    existing_ids: set[str] = {t["remote_id"] for t in store.get("tasks", [])}
-    # 旧ストアのタイトル（消失レポート用）
-    existing_titles: dict[str, str] = {t["remote_id"]: t.get("title", "") for t in store.get("tasks", [])}
+    # 既存インデックスから当該データソースのエントリを取得
+    existing_entries = {
+        e["remote_id"]: e for e in index_entries
+        if e.get("datasource_id") == datasource_id and e.get("remote_id")
+    }
 
-    # incoming から新しいタスクリストを直接構築（洗い替え）
-    new_tasks = []
+    incoming_ids = {t["remote_id"] for t in incoming_tasks}
+
     added = []
+    updated = []
     auto_assigned = []
     needs_review = []
 
     for t in incoming_tasks:
         remote_id = t["remote_id"]
-        task_entry = {
-            "remote_id": remote_id,
-            "title": t["title"],
-            "due_date": t.get("due_date"),
-            "url": t.get("url"),
-            "project_key": t.get("project_key"),
-        }
-        new_tasks.append(task_entry)
 
-        # 新規タスクのみ自動割り当て対象
-        if remote_id not in existing_ids:
+        if remote_id in existing_entries:
+            # 既存タスク: title 変更があれば更新
+            entry = existing_entries[remote_id]
+            if entry.get("title") != t["title"]:
+                entry["title"] = t["title"]
+                update_task_markdown_metadata(tasks_dir, entry)
+                updated.append({
+                    "datasource_id": datasource_id,
+                    "remote_id": remote_id,
+                    "title": t["title"],
+                    "id": entry["id"],
+                })
+        else:
+            # 新規タスク
+            task_id = generate_task_id(tasks_dir)
+            project_id = resolve_project(t.get("project_key"), project_mapping) or ""
+
+            new_entry = {
+                "id": task_id,
+                "remote_id": remote_id,
+                "datasource_id": datasource_id,
+                "title": t["title"],
+                "status": "pending",
+                "project_id": project_id,
+            }
+            index_entries.append(new_entry)
+            create_task_markdown(tasks_dir, new_entry)
+
             added.append({
                 "datasource_id": datasource_id,
                 "remote_id": remote_id,
-                "title": task_entry["title"],
-                "project_key": task_entry["project_key"],
+                "title": t["title"],
+                "id": task_id,
+                "project_key": t.get("project_key"),
             })
-            project_id = resolve_project(task_entry["project_key"], project_mapping)
-            ref = f"{datasource_id}/{remote_id}"
+
             if project_id:
                 auto_assigned.append({
-                    "ref": ref,
-                    "title": task_entry["title"],
+                    "id": task_id,
+                    "title": t["title"],
                     "project_id": project_id,
-                    "milestone_id": "_default",
-                    "project_key": task_entry["project_key"],
+                    "project_key": t.get("project_key"),
                 })
             else:
                 needs_review.append({
-                    "ref": ref,
-                    "title": task_entry["title"],
-                    "project_key": task_entry["project_key"],
+                    "id": task_id,
+                    "title": t["title"],
+                    "project_key": t.get("project_key"),
                 })
 
-    # 消失タスク = 旧ストアにあって incoming にないもの
-    incoming_ids = {t["remote_id"] for t in incoming_tasks}
-    vanished = [
-        {"datasource_id": datasource_id, "remote_id": rid, "title": existing_titles[rid]}
-        for rid in existing_ids - incoming_ids
-    ]
-    vanished_refs = [f"{datasource_id}/{rid}" for rid in existing_ids - incoming_ids]
+    # 消失タスク = 既存にあって incoming にないもの
+    vanished = []
+    vanished_ids = set()
+    for remote_id, entry in existing_entries.items():
+        if remote_id not in incoming_ids:
+            vanished.append({
+                "datasource_id": datasource_id,
+                "remote_id": remote_id,
+                "title": entry.get("title", ""),
+                "id": entry["id"],
+            })
+            vanished_ids.add(entry["id"])
+            delete_task(tasks_dir, entry["id"])
 
-    # 洗い替え保存
-    store["tasks"] = new_tasks
-    store["updated_at"] = now_iso()
-    save_task_store(tasks_dir, store)
+    # index_entries から消失タスクを除去
+    index_entries[:] = [e for e in index_entries if e.get("id") not in vanished_ids]
 
     return {
         "added": added,
+        "updated": updated,
         "vanished": vanished,
-        "vanished_refs": vanished_refs,
         "auto_assigned": auto_assigned,
         "needs_review": needs_review,
     }
 
 
-def cleanup_vanished_refs(repo_dir: Path, vanished_refs: list[str]) -> None:
-    """消失タスクへの参照を projects と daily から削除する。"""
-    if not vanished_refs:
-        return
-    refs_to_remove = set(vanished_refs)
-
-    # projects/*.json のマイルストーンタスク参照をクリーンアップ
-    projects_dir = repo_dir / "projects"
-    if projects_dir.exists():
-        for project_path in projects_dir.glob("*.json"):
-            with open(project_path, encoding="utf-8") as f:
-                project = json.load(f)
-            changed = False
-            for milestone in project.get("milestones", []):
-                original = milestone.get("tasks", [])
-                filtered = [t for t in original if t.get("ref") not in refs_to_remove]
-                if len(filtered) != len(original):
-                    milestone["tasks"] = filtered
-                    changed = True
-            if changed:
-                with open(project_path, "w", encoding="utf-8") as f:
-                    json.dump(project, f, ensure_ascii=False, indent=2)
-                    f.write("\n")
-
-    # daily/*.json のゴールタスク参照をクリーンアップ
-    daily_dir = repo_dir / "daily"
-    if daily_dir.exists():
-        for daily_path in daily_dir.glob("*.json"):
-            with open(daily_path, encoding="utf-8") as f:
-                daily = json.load(f)
-            changed = False
-            new_goals = []
-            for goal in daily.get("goals", []):
-                original = goal.get("tasks", [])
-                filtered = [t for t in original if t.get("ref") not in refs_to_remove]
-                if len(filtered) != len(original):
-                    goal["tasks"] = filtered
-                    changed = True
-                # tasks が空になったゴールエントリも除外
-                if filtered:
-                    new_goals.append(goal)
-                else:
-                    changed = True
-            if changed:
-                daily["goals"] = new_goals
-                with open(daily_path, "w", encoding="utf-8") as f:
-                    json.dump(daily, f, ensure_ascii=False, indent=2)
-                    f.write("\n")
-
-
-def apply_auto_assignments(repo_dir: Path, auto_assigned: list[dict]) -> None:
-    """
-    自動割り当て成功タスクをプロジェクトの _default マイルストーンに追加する。
-    既に含まれているタスクはスキップする。
-    """
-    projects_dir = repo_dir / "projects"
-    if not projects_dir.exists():
-        return
-
-    # project_id ごとにグループ化
-    by_project: dict[str, list[dict]] = {}
-    for item in auto_assigned:
-        pid = item["project_id"]
-        by_project.setdefault(pid, []).append(item)
-
-    for project_id, items in by_project.items():
-        project_path = projects_dir / f"{project_id}.json"
-        if not project_path.exists():
-            print(
-                f"警告: プロジェクト {project_id} が見つかりません（{project_path}）",
-                file=sys.stderr,
-            )
-            continue
-
-        with open(project_path, encoding="utf-8") as f:
-            project = json.load(f)
-
-        # 既存の全タスク参照を収集
-        existing_refs: set[str] = set()
-        for milestone in project.get("milestones", []):
-            for task in milestone.get("tasks", []):
-                existing_refs.add(task["ref"])
-
-        # _default マイルストーンを見つける（なければ末尾に作成）
-        default_milestone = None
-        for milestone in project.get("milestones", []):
-            if milestone["milestone_id"] == "_default":
-                default_milestone = milestone
-                break
-
-        if default_milestone is None:
-            default_milestone = {
-                "milestone_id": "_default",
-                "name": "未分類",
-                "goal": "",
-                "due_date": None,
-                "tasks": [],
-            }
-            project.setdefault("milestones", []).append(default_milestone)
-
-        # 新規タスクを _default に追加
-        added_count = 0
-        for item in items:
-            ref = item["ref"]
-            if ref not in existing_refs:
-                default_milestone.setdefault("tasks", []).append({"ref": ref})
-                existing_refs.add(ref)
-                added_count += 1
-
-        if added_count > 0:
-            with open(project_path, "w", encoding="utf-8") as f:
-                json.dump(project, f, ensure_ascii=False, indent=2)
-                f.write("\n")
-
+# ---------------------------------------------------------------------------
+# メイン
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="fetch-all.sh の JSONL 出力を受け取り、tasks/*.json を更新する"
+        description="fetch-all.sh の JSONL 出力を受け取り、tasks/index.jsonl + tasks/*.md を更新する"
     )
     parser.add_argument(
         "--repo",
@@ -337,48 +379,47 @@ def main() -> None:
         ds_id = task["datasource_id"]
         by_datasource.setdefault(ds_id, []).append(task)
 
-    # tasks/*.json に存在するが今回の JSONL に含まれないデータソースも処理
+    # 既存 index を読み込み
+    index_entries = load_index(tasks_dir)
+
+    # index に存在するが今回の JSONL に含まれないデータソースも処理
     # （全タスクが完了した場合、JSONL に出現しなくなる）
-    if tasks_dir.exists():
-        for task_file in tasks_dir.glob("*.json"):
-            ds_id = task_file.stem
-            if ds_id not in by_datasource:
-                by_datasource[ds_id] = []
+    for entry in index_entries:
+        ds_id = entry.get("datasource_id")
+        if ds_id and ds_id not in by_datasource:
+            by_datasource[ds_id] = []
 
     # 集計結果
     total_added = []
+    total_updated = []
     total_vanished = []
-    total_vanished_refs = []
     total_auto_assigned = []
     total_needs_review = []
 
     for datasource_id, incoming_tasks in by_datasource.items():
         result = process_datasource(
-            datasource_id, incoming_tasks, tasks_dir, datasources_dir
+            datasource_id, incoming_tasks, tasks_dir, datasources_dir, index_entries
         )
         total_added.extend(result["added"])
+        total_updated.extend(result["updated"])
         total_vanished.extend(result["vanished"])
-        total_vanished_refs.extend(result["vanished_refs"])
         total_auto_assigned.extend(result["auto_assigned"])
         total_needs_review.extend(result["needs_review"])
 
-    # 自動割り当て成功タスクをプロジェクトに反映
-    if total_auto_assigned:
-        apply_auto_assignments(repo_dir, total_auto_assigned)
-
-    # 消失タスクの参照を projects と daily からクリーンアップ
-    if total_vanished_refs:
-        cleanup_vanished_refs(repo_dir, total_vanished_refs)
+    # index を保存
+    save_index(tasks_dir, index_entries)
 
     # レポートを JSON で出力
     report = {
         "summary": {
             "added": len(total_added),
+            "updated": len(total_updated),
             "vanished": len(total_vanished),
             "auto_assigned": len(total_auto_assigned),
             "needs_review": len(total_needs_review),
         },
         "added": total_added,
+        "updated": total_updated,
         "vanished": total_vanished,
         "auto_assigned": total_auto_assigned,
         "needs_review": total_needs_review,

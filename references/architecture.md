@@ -13,38 +13,54 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 
 ```
 ~/.local/share/my-tasks/
-├── datasources/           # データソース定義（1ファイル = 1データソース）
+├── .git/
+├── .gitignore                       # tasks/ を除外
+├── datasources/                     # git 管理
 │   ├── jira.json
-│   └── ms-todo.json
-├── projects/              # プロジェクト定義（1ファイル = 1プロジェクト）
-│   ├── project-a.json
-│   └── project-b.json
-├── tasks/                 # タスクストア（1ファイル = 1データソース）
-│   ├── jira.json
-│   └── ms-todo.json
-├── daily/                 # 日次ゴール（1ファイル = 1日）
-│   ├── 2026-02-18.json
-│   └── ...
-└── scripts/               # 収集スクリプト
-    ├── fetch-all.sh        # 全データソース一括取得
+│   ├── ms-todo.json
+│   └── mail-urbanb.json
+├── projects/                        # git 管理
+│   ├── bo.json
+│   └── ubs-mgmt-tool.json
+├── tasks/                           # gitignored
+│   ├── index.jsonl                  # タスクインデックス
+│   └── {task_id}.md                 # タスク実体（Markdown）
+└── scripts/                         # git 管理
+    ├── fetch-all.sh
     ├── fetch-jira.sh
     └── fetch-ms-todo.sh
 ```
 
+### git 管理ポリシー
+
+- `datasources/` と `projects/` は git 管理（設定情報）
+- `tasks/` は `.gitignore` で除外（タスクデータはローカルのみ、再収集で復元可能）
+- `scripts/` は git 管理（収集スクリプト）
+
 ## タスクの参照方法
 
-タスクは `datasource_id/remote_id` の複合キーで参照する。
-
-**形式**: `{datasource_id}/{remote_id}`
+タスクは `id`（`YYYYMMDD-NNN` 形式）で一意に識別する。
 
 **例**:
-- `jira/UBS-101` → `datasources/jira.json` の `datasource_id` + `tasks/jira.json` 内の `remote_id: "UBS-101"`
-- `ms-todo/abc123` → `datasources/ms-todo.json` の `datasource_id` + `tasks/ms-todo.json` 内の `remote_id: "abc123"`
+- `20260301-001` → `tasks/index.jsonl` 内のエントリ + `tasks/20260301-001.md`
 
-タスクの参照を解決する手順:
-1. スラッシュで分割して `datasource_id` と `remote_id` を取得
-2. `tasks/{datasource_id}.json` を読み込み
-3. `tasks` 配列から `remote_id` が一致するエントリを取得
+タスク情報の取得:
+1. `tasks/index.jsonl` から `id` が一致する行を取得（サマリ情報）
+2. `tasks/{id}.md` を読み込み（詳細・プロンプト等）
+
+## タスクのステータスフロー
+
+```
+pending → needs_clarification → scoped → approved → running → done
+                                                           └→ failed
+```
+
+- `pending`: データソースから取り込まれた初期状態
+- `needs_clarification`: 質問が生成されたが未回答の項目がある
+- `scoped`: 前提条件・達成条件が明確で、実行プロンプトが生成済み
+- `approved`: ユーザがプロンプトを承認し、実行待ち
+- `running`: ディスパッチャーで実行中
+- `done` / `failed`: 完了 / 失敗
 
 ## git 操作ポリシー
 
@@ -57,19 +73,18 @@ git commit -m "{コミットメッセージ}"
 git push
 ```
 
+**注意**: `tasks/` は gitignore なので commit 対象外。
+
 ### コミットメッセージ規約
 
 | 操作 | メッセージ例 |
 |------|-------------|
-| タスク最新化 | `sync: update tasks from all datasources` |
-| 日次ゴール設定 | `daily: set goals for 2026-02-18` |
+| タスク収集 | `sync: update tasks from all datasources` |
 | データソース追加 | `feat: add datasource jira` |
 | プロジェクト追加 | `feat: add project ubs-mgmt-tool` |
-| マイルストーン追加 | `feat: add milestone v1-release to ubs-mgmt-tool` |
-| タスク操作 | `task: operate on jira/UBS-101` |
+| タスク操作 | `task: operate on 20260301-001` |
+| 設定変更 | `config: update project bo` |
 | リポジトリ初期化 | `init: initialize my-tasks repository` |
-
-git は手軽な分散DBとして利用しており、コミット粒度を細かく意識する必要はない。
 
 ## fetch-all.sh の構造
 
@@ -88,27 +103,41 @@ bash "$SCRIPT_DIR/fetch-ms-todo.sh"
 
 ## ディスパッチャー
 
-プロセス分散型ジョブランナー。各ジョブは独立した dispatcher プロセスとして tmux 上で並列実行される。
-中央ループやデーモンは存在しない。
+Unix ドメインソケット C/S アーキテクチャのジョブランナー。
+サーバは systemd user service として常駐し、asyncio でジョブキューと子プロセスを管理する。
 
-### 状態ディレクトリ
+### ソケットパス
 
-`$XDG_RUNTIME_DIR/my-tasks-dispatch/`（フォールバック: `/tmp/my-tasks-dispatch/`）
+`$XDG_RUNTIME_DIR/my-tasks-dispatch/dispatcher.sock`
 
-1ジョブ = 1状態ファイル（`{dispatch_id}.json`）。`flock` による排他制御でスロット管理を行う。
+### コマンド
 
-### シグナルファイル
-
-各セッションのシグナルファイルは状態ディレクトリ内に配置される:
-- `{state_dir}/.dispatch-{dispatch_id}.done` — Claude がタスク完了時に作成する sentinel ファイル
-- `{state_dir}/.dispatch-{dispatch_id}.exit` — シェルが終了コードを書き込むファイル
+| コマンド | 説明 |
+|---------|------|
+| `run` | ジョブを投入（タスク ID またはプロジェクト ID + プロンプト指定） |
+| `open` | 対話的セッションを tmux で開く |
+| `status` | 全ジョブのステータスを返す |
+| `cancel` | キュー内ジョブを取消 |
+| `kill` | 実行中ジョブを強制停止 |
+| `kill-all` | 全ジョブを強制停止 |
+| `wait` | ジョブ完了まで接続を保持 |
 
 詳細は `dispatcher-design.md` を参照。
 
+## サンドボックス
+
+ジョブ実行時のプロセス隔離を提供する。2つのモードを持つ。
+
+| モード | ネットワーク | 用途 |
+|--------|-------------|------|
+| `restricted`（デフォルト） | ai-ns namespace（制限付き） | 通常のコーディングタスク |
+| `unrestricted` | ホストネットワーク直接 | ブラウザオートメーション、外部 API 連携 |
+
+プロジェクト定義の `sandbox_mode` フィールドでモードを指定する。
+
 ## sync-tasks.py の役割
 
-タスク最新化処理の中核を担う Python スクリプト。
-詳細は `../scripts/sync-tasks.py` を参照。
+タスク収集処理の中核を担う Python スクリプト。
 
 **呼び出し方**:
 ```bash

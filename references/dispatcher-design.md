@@ -2,193 +2,228 @@
 
 ## 概要
 
-プロセス分散型ジョブランナー。各ジョブは独立した dispatcher プロセスとして実行される。
-中央ループやデーモンは存在しない。状態ファイルが唯一の協調メカニズム。
-スロットチェック〜起動の区間を `flock` で排他制御する。プロンプトは標準入力から読み取る。
+Unix ドメインソケット C/S アーキテクチャのジョブランナー。
+サーバは systemd user service として常駐し、asyncio でジョブキューと子プロセスを管理する。
+クライアントはソケット経由でジョブ投入・状態確認・制御コマンドを送信する。
 
 ## アーキテクチャ
 
 ```
-echo "fix bug" | dispatcher.py run --project bo
-  │
-  ├── flock 取得 → running ファイルを数える
-  ├── スロット空き → tmux ウィンドウを起動、状態ファイルを書く、flock 解放、終了
-  └── スロット満杯 → 状態ファイルを書く、flock 解放 → fork してバックグラウンドで待機、親は即座に返却
-                       └── flock 取得 → スロット空き → 起動 → flock 解放
+┌─ ホスト ──────────────────────────────────────────────┐
+│                                                        │
+│  systemd user service                                  │
+│  └─ dispatcher.py server                               │
+│       ├─ asyncio.start_unix_server(SOCKET_PATH)        │
+│       ├─ ジョブキュー管理（max_slots）                  │
+│       ├─ fork: sandbox claude -p "..." (job 1)         │
+│       ├─ fork: sandbox claude -p "..." (job 2)         │
+│       └─ wait: 完了検知 → ステータス更新               │
+│                                                        │
+│  SOCKET_PATH = $XDG_RUNTIME_DIR/                       │
+│                my-tasks-dispatch/dispatcher.sock        │
+│       │                                                │
+│       │ bind mount                                     │
+│  ┌─ サンドボックス ──────────────────────────────────┐ │
+│  │    │                                              │ │
+│  │  Claude Code (スキル実行中)                       │ │
+│  │    └─ dispatcher.py run --task 20260301-001       │ │
+│  │        └─ connect(SOCKET_PATH) → ホストへ到達     │ │
+│  └───────────────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────────┘
 ```
 
-## 状態管理
+## プロトコル
 
-### 状態ディレクトリ
+JSON over Unix ドメインソケット。改行区切り（1行1メッセージ）。
 
-`$XDG_RUNTIME_DIR/my-tasks-dispatch/`（フォールバック: `/tmp/my-tasks-dispatch/`）
+### リクエスト
 
-### ロックファイル
+| コマンド | フィールド | 説明 |
+|---------|-----------|------|
+| `run` | `task_id?`, `project_id`, `prompt` | ジョブを実行（sandbox_mode はプロジェクト設定から自動解決） |
+| `open` | `project_id`, `session?` | 対話的セッションを tmux で開く |
+| `status` | | 全ジョブのステータスを返す |
+| `cancel` | `dispatch_id` | キュー内ジョブを取消 |
+| `kill` | `dispatch_id` | 実行中ジョブを強制停止 |
+| `kill-all` | | 全ジョブを強制停止 |
+| `wait` | `dispatch_id` | ジョブ完了まで接続を保持 |
 
-`{state_dir}/.lock` — `flock` によるファイルロック。スロットチェック〜起動の区間を排他制御する。
+```json
+{"command": "run", "task_id": "20260301-001", "project_id": "ubs-mgmt-tool", "prompt": "..."}
+{"command": "run", "project_id": "bo", "prompt": "バグを修正してください"}
+{"command": "open", "project_id": "ubs-mgmt-tool", "session": "main"}
+{"command": "status"}
+{"command": "cancel", "dispatch_id": "ubs-mgmt-tool-1"}
+{"command": "kill", "dispatch_id": "ubs-mgmt-tool-1"}
+{"command": "kill-all"}
+{"command": "wait", "dispatch_id": "ubs-mgmt-tool-1"}
+```
 
-### 状態ファイル（1ジョブ = 1ファイル）
+### レスポンス
 
-`{state_dir}/{dispatch_id}.json`:
+```json
+{"ok": true, "dispatch_id": "ubs-mgmt-tool-1", "message": "Job started"}
+{"ok": true, "dispatch_id": "ubs-mgmt-tool-2", "message": "Job queued (slot full)"}
+{"ok": true, "jobs": [
+  {"dispatch_id": "ubs-mgmt-tool-1", "task_id": "20260301-001", "status": "running", "pid": 12345},
+  {"dispatch_id": "ubs-mgmt-tool-2", "task_id": "20260301-003", "status": "queued", "pid": null}
+]}
+{"ok": false, "error": "Unknown dispatch_id: xyz"}
+```
 
-詳細なスキーマは `schemas.md` のセクション6を参照。
+## サーバ (`DispatchServer`)
 
-### dispatch_id の生成
+### ジョブライフサイクル
 
-`{project_id}-{連番}` 形式。連番は状態ディレクトリ内の既存ファイルから最大値+1で生成する。
-例: `bo-1`, `bo-2`, `ubs-mgmt-tool-1`
+```
+queued ──→ running ──→ done
+                   └──→ failed
+```
 
-### 遅延更新
+### インメモリ状態管理
 
-完了検知はポーリングではなく「遅延」で行う。`status` コマンドや `run` の待機ループが
-tmux ウィンドウ存在チェック + sentinel ファイル検知でステータスを更新する。
+サーバはジョブ状態をインメモリで管理する。永続化は行わない。
+サーバ再起動時にジョブ状態は失われるが、以下の理由で許容可能:
 
-## tmux セッション構成
+- 実行中のジョブ（子プロセス）はサーバ再起動時に SIGTERM で終了する
+- 過去のジョブ履歴は不要（完了したタスクは index.jsonl の status で管理）
+- systemd の `Restart=on-failure` で自動復旧
 
-ディスパッチャーは以下の優先順位で使用する tmux セッションを決定する:
+### ジョブ実行フロー
 
-1. `--session` 引数で明示指定されたセッション（存在確認あり）
+1. `cmd_run`: リクエスト受信
+2. `dispatch_id` を生成（`{project_id}-{連番}`）
+3. スロットに空きがあれば `execute_job()` で即実行
+4. スロット満杯なら queue に追加し `queued` で応答
+5. `execute_job()`:
+   - プロジェクト設定から `sandbox_mode` と `working_directory` を取得
+   - `asyncio.create_subprocess_exec("sandbox", "--mode", mode, "claude", "-p", prompt, ...)` でジョブ実行
+   - `proc.wait()` で完了検知
+   - `done` or `failed` に更新
+   - waiter に通知
+   - `drain_queue()` で次のジョブを起動
+
+### `open` コマンド
+
+対話的セッションは引き続き tmux を使用する。ジョブ管理の対象外。
+
+1. クライアントから `open` コマンドを受信
+2. `projects/{project_id}.json` から `sandbox_mode` と `working_directory` を取得
+3. 指定された tmux セッション（またはデフォルトセッション）にウィンドウを作成
+4. ウィンドウ内で `sandbox --mode {sandbox_mode} claude --permission-mode bypassPermissions` を実行
+5. ウィンドウ名: `{project_id}-interactive`
+
+### `wait` コマンド
+
+ジョブ完了までソケット接続を保持する。
+
+1. `dispatch_id` に対応する `asyncio.Future` を作成
+2. ジョブが既に完了していれば即座にレスポンスを返す
+3. 未完了の場合、Future の完了を待ってからレスポンスを返す
+
+### SIGTERM ハンドラ
+
+全子プロセスに SIGTERM を送信してからサーバを終了する。
+
+### ログ
+
+- 標準出力にログを出力（systemd の journal に自動収集される）
+- ログ形式: `{timestamp} {level} {message}`
+
+## クライアント
+
+### サーバ接続
+
+```python
+async def client_send(request: dict) -> dict:
+    try:
+        reader, writer = await asyncio.open_unix_connection(SOCKET_PATH)
+    except (ConnectionRefusedError, FileNotFoundError):
+        if is_inside_sandbox():
+            raise RuntimeError("Dispatch server is not running on the host.")
+        else:
+            start_server_background()
+            reader, writer = await retry_connect()
+    # ...
+```
+
+サンドボックス内でサーバが未起動の場合はエラーを返す。
+ホスト環境ではサーバをバックグラウンド起動してリトライする。
+
+### CLI コマンド
+
+```bash
+# タスクの実行プロンプトを index + Markdown から読み取ってジョブ投入
+dispatcher.py run --task 20260301-001
+
+# プロンプトを stdin から読み取ってジョブ投入
+echo "..." | dispatcher.py run --project ubs-mgmt-tool
+
+# 対話的セッション
+dispatcher.py open --project ubs-mgmt-tool [--session main]
+
+# ステータス確認
+dispatcher.py status [--json]
+
+# ジョブ制御
+dispatcher.py cancel --id ubs-mgmt-tool-1
+dispatcher.py kill --id ubs-mgmt-tool-1
+dispatcher.py kill --all
+
+# ジョブ完了待機
+dispatcher.py wait --id ubs-mgmt-tool-1
+
+# サーバ起動（通常は systemd 経由）
+dispatcher.py server [--max-slots 3]
+```
+
+### `run --task` の処理
+
+1. `tasks/index.jsonl` から `task_id` に対応するエントリを取得
+2. `tasks/{task_id}.md` から実行プロンプトセクションを読み取り
+3. エントリの `project_id` を使用
+4. サーバに `run` コマンドを送信
+
+### `run --project` の処理
+
+1. stdin からプロンプトを読み取り
+2. サーバに `run` コマンドを送信
+
+## tmux セッション決定
+
+`open` コマンド時に使用する tmux セッションの決定優先順位:
+
+1. `--session` 引数で明示指定（存在確認あり）
 2. `$TMUX` 環境変数から自動検出した呼び出し元セッション
 3. フォールバック: `dispatch` セッションを新規作成
-
-呼び出し元セッション（優先順位 1, 2）を使用する場合:
-- セッションの新規作成は行わない（存在確認のみ）
-
-フォールバック（優先順位 3）の場合:
-- `dispatch` セッションを新規作成する
-- **コントロールウィンドウ**: `_control`（セッション作成時に自動生成）
-
-**タスクウィンドウ**: `{dispatch_id}`（例: `bo-1`）
-  - 各ウィンドウで1つの Claude Code セッションが実行される
-
-## CLI コマンドリファレンス
-
-### `run`
-
-ジョブを投入する。プロンプトは stdin から読み取る。
-
-```bash
-echo "バグを修正してください" | dispatcher.py run --project bo [--max-slots 3]
-
-# ヒアドキュメントで複数行プロンプト
-dispatcher.py run --project bo <<'EOF'
-ログイン画面のバグを修正してください。
-エラーメッセージが表示されない問題です。
-EOF
-```
-
-| オプション | デフォルト | 説明 |
-|---|---|---|
-| `--project` | (必須) | プロジェクトID |
-| `--repo` | `~/.local/share/my-tasks` | タスク管理リポジトリのパス |
-| `--max-slots` | 3 | 最大並列スロット数 |
-| `--command` | `sandbox claude --permission-mode bypassPermissions` | セッション起動コマンド |
-| `--session` | 自動検出 | tmux セッション名を明示指定 |
-
-### `open`
-
-プロジェクトの作業ディレクトリで対話セッションを起動する。ジョブ管理（状態ファイル、スロット管理、完了検知）は一切行わない。
-
-```bash
-dispatcher.py open --project bo
-dispatcher.py open --project bo --command "sandbox claude"
-dispatcher.py open --project bo --session main
-```
-
-| オプション | デフォルト | 説明 |
-|---|---|---|
-| `--project` | (必須) | プロジェクトID |
-| `--repo` | `~/.local/share/my-tasks` | タスク管理リポジトリのパス |
-| `--command` | `claude` | 起動コマンド |
-| `--session` | 自動検出 | tmux セッション名を明示指定 |
-
-ウィンドウ名は `{project_id}-interactive` となる。
-
-### `status`
-
-状態を表示する（遅延更新を実行してから表示）。
-
-```bash
-dispatcher.py status [--json]
-```
-
-### `cancel`
-
-キューからジョブを取り消す。
-
-```bash
-dispatcher.py cancel --id bo-2
-```
-
-### `kill`
-
-実行中ジョブを強制停止する。
-
-```bash
-dispatcher.py kill --id bo-1
-dispatcher.py kill --all
-```
-
-## セッション終了検知
-
-二段階の完了検知メカニズムを持つ:
-
-### Sentinel ファイル検知（主系）
-
-1. Claude がタスク完了時に `touch {state_dir}/.dispatch-{dispatch_id}.done` を実行
-2. `status` コマンドや待機ループが `.done` ファイルを検知
-3. `tmux kill-window` で tmux ウィンドウを終了 → `done` (exit_code=0) として記録
-
-### tmux ウィンドウ存在チェック（副系・フォールバック）
-
-1. `tmux list-panes -t {session}:{window}` でウィンドウの存在を確認
-2. ウィンドウが存在する場合はまだ実行中と判定（`continue`）
-3. ウィンドウ消失時に `{state_dir}/.dispatch-{dispatch_id}.exit` の内容を読み取り
-4. exit code 判定:
-   - `0` → `done`
-   - `0` 以外 → `failed`
-   - exit file なし → `failed` (`exit_code=-1`)
-
-**注意**: 以前は PID ベース（`os.kill(pid, 0)`）の生存チェックを使用していたが、
-sandbox コマンドが `sudo → ip netns exec → sudo → bwrap → claude` という多段プロセスチェーンを
-作るため、tmux の `#{pane_pid}`（最初の `bash -c` プロセス）と実際に動いている Claude プロセスの
-PID が一致せず、誤検知が発生していた。tmux ウィンドウのライフサイクルはジョブのライフサイクルと
-一致するため、こちらの方が堅牢である。PID フィールドは情報用に残している。
-
-### シグナルファイルの配置場所
-
-すべてのシグナルファイル（`.done`、`.exit`）は状態ディレクトリ（`{state_dir}`）内に配置される。
-これにより、サンドボックス（bwrap）内からディスパッチャーを実行する場合でも、
-呼び出し側が `working_dir` への書き込み権限を持たない環境でシグナルファイルの操作が正常に動作する。
-
-## プロンプト構築
-
-stdin から読み取ったプロンプトに完了通知の指示を追加する:
-
-```
-{stdin から読み取ったプロンプト}
-
-作業が完了したら、変更をコミットしてから次のコマンドを実行してください:
-touch {state_dir}/.dispatch-{dispatch_id}.done
-```
-
-さらに `--append-system-prompt` でシステムプロンプトにも同様の指示を注入する（冗長化）。
-
-## 排他制御
-
-`flock` によるファイルロックで以下の区間を排他制御する:
-
-- **run コマンド**: スロットチェック → dispatch_id 生成 → 状態ファイル書き込み → (起動)
-- **待機ループ**: スロットチェック → 起動 → 状態ファイル更新
-- **status コマンド**: refresh_states（遅延更新）
 
 ## エラーハンドリング
 
 | エラー | 挙動 |
 |---|---|
-| プロジェクト不存在 | エラー終了 |
-| working_directory 未設定 | エラー終了 |
-| working_directory がファイルシステムに存在しない | エラー終了 |
-| tmux ウィンドウ作成失敗 | エラー終了（run）/ failed（待機ループ） |
-| プロンプトが空 | エラー終了 |
-| tmux ウィンドウ消失 + exit file なし | failed (exit_code=-1) |
+| プロジェクト不存在 | エラーレスポンス |
+| working_directory 未設定 | エラーレスポンス |
+| working_directory がファイルシステムに存在しない | エラーレスポンス |
+| プロンプトが空 | エラーレスポンス |
+| 不明な dispatch_id | エラーレスポンス |
+| サーバ未起動（サンドボックス内） | エラー終了 |
+| サーバ未起動（ホスト） | バックグラウンド起動してリトライ |
+
+## 追加システムプロンプト
+
+ジョブ実行時に `--append-system-prompt` で注入する情報:
+
+```
+あなたはサンドボックス環境で実行されています。
+
+実行環境:
+- 作業ディレクトリ: {working_directory}
+- ネットワークモード: {restricted|unrestricted}
+
+制約事項 (restricted モード):
+- ネットワーク: GitHub/Bitbucket SSH と HTTP プロキシ経由の HTTPS のみ利用可能
+- ファイル: 作業ディレクトリ内のファイルのみ変更可能
+
+作業が完了したら、変更をコミットしてください。
+プロセスの終了がジョブ完了の通知になります（シグナルファイルは不要です）。
+```

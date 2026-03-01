@@ -1,0 +1,14 @@
+[Unit]
+Description=My Tasks Dispatcher Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/src/github.com/nosen-nvt/my-tasks-skill/scripts/dispatcher.py server
+Restart=on-failure
+RestartSec=5
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+ExecStartPre=/usr/bin/mkdir -p %t/my-tasks-dispatch
+
+[Install]
+WantedBy=default.target
