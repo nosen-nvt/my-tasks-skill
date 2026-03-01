@@ -110,19 +110,6 @@ if [[ "$MODE" == "restricted" ]]; then
   echo "nameserver 10.200.1.1" > "$RESOLV_CONF"
   trap "rm -f '$RESOLV_CONF'" EXIT
 
-  # tmux ソケットのバインドマウント（ディスパッチャーがサンドボックス内から tmux を操作するため）
-  TMUX_BIND=()
-  TMUX_DIR="/tmp/tmux-$(id -u)"
-  if [[ -d "$TMUX_DIR" ]]; then
-    TMUX_BIND=(--bind "$TMUX_DIR" "$TMUX_DIR")
-  fi
-
-  # TMUX 環境変数のパススルー（tmux セッション自動検出用）
-  TMUX_ENV=()
-  if [[ -n "${TMUX:-}" ]]; then
-    TMUX_ENV=(--setenv TMUX "$TMUX")
-  fi
-
   sudo ip netns exec ai-ns \
     sudo -u "$USER" \
     bwrap --unshare-pid --unshare-ipc --unshare-uts --die-with-parent \
@@ -139,7 +126,6 @@ if [[ "$MODE" == "restricted" ]]; then
       --tmpfs /run \
       --ro-bind "$RESOLV_CONF" /run/systemd/resolve/stub-resolv.conf \
       --bind /run/user/$(id -u)/gnupg /run/user/$(id -u)/gnupg \
-      "${TMUX_BIND[@]}" \
       "${DISPATCH_BIND[@]}" \
       "${COMM_BIND[@]}" \
       --bind $HOME $HOME \
@@ -168,7 +154,6 @@ if [[ "$MODE" == "restricted" ]]; then
       --setenv WORKDIR $WORK \
       --setenv SANDBOX "1" \
       --setenv GOOGLE_CHAT_WEBHOOK_URL "${GOOGLE_CHAT_WEBHOOK_URL:-}" \
-      "${TMUX_ENV[@]}" \
       --cap-drop ALL \
       "${SANDBOX_CMD[@]}"
 
