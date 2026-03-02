@@ -99,8 +99,13 @@ python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py cancel --id bo-1
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py kill --id bo-1
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py kill --all
 
-# ジョブ完了待機
+# ジョブ完了待機（run とは別途実行）
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py wait --id bo-1
+
+# 実行して完了まで待機（run は非同期なので、dispatch_id を取り出して wait に渡す）
+# run の出力例（stderr）: "Job started: bo-1"
+DISP=$(python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py run --task 20260301-001 2>&1 | grep -oP '[\w-]+-\d+$')
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py wait --id "$DISP"
 
 # ジョブの stdout/stderr ログを表示
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py log --id bo-1
