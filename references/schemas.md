@@ -49,15 +49,47 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 
 ```json
 {
-  "datasource_id": "mail-urbanb",
+  "datasource_id": "mail-outlook",
   "type": "mail",
-  "description": "urban-b.com メールからのアクションアイテム",
-  "script": "scripts/fetch-mail-urbanb.sh",
+  "description": "Outlook (Microsoft 365) メールからのアクションアイテム",
+  "script": "scripts/fetch-mail-outlook.sh",
   "project_mapping": {},
   "operations": {
     "mark_read": {
       "description": "メールを既読にする",
       "command": "msgraph mail update --message-id {remote_id} --is-read true"
+    }
+  }
+}
+```
+
+```json
+{
+  "datasource_id": "mail-gmail-nvt",
+  "type": "mail",
+  "description": "Gmail (nvt) メールからのアクションアイテム",
+  "script": "scripts/fetch-mail-gmail.sh nvt",
+  "project_mapping": {},
+  "operations": {
+    "mark_read": {
+      "description": "メールを既読にする（google-cli modify 実装後に有効）",
+      "command": "google mail modify {remote_id} --remove-label UNREAD --account nvt"
+    }
+  }
+}
+```
+
+```json
+{
+  "datasource_id": "mail-gmail-qzl",
+  "type": "mail",
+  "description": "Gmail (qzl) メールからのアクションアイテム",
+  "script": "scripts/fetch-mail-gmail.sh qzl",
+  "project_mapping": {},
+  "operations": {
+    "mark_read": {
+      "description": "メールを既読にする（google-cli modify 実装後に有効）",
+      "command": "google mail modify {remote_id} --remove-label UNREAD --account qzl"
     }
   }
 }

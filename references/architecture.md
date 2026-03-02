@@ -18,7 +18,9 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 ├── datasources/                     # git 管理
 │   ├── jira.json
 │   ├── ms-todo.json
-│   └── mail-urbanb.json
+│   ├── mail-outlook.json
+│   ├── mail-gmail-nvt.json
+│   └── mail-gmail-qzl.json
 ├── projects/                        # git 管理
 │   ├── bo.json
 │   └── ubs-mgmt-tool.json
@@ -28,7 +30,9 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 └── scripts/                         # git 管理
     ├── fetch-all.sh
     ├── fetch-jira.sh
-    └── fetch-ms-todo.sh
+    ├── fetch-ms-todo.sh
+    ├── fetch-mail-outlook.sh
+    └── fetch-mail-gmail.sh
 ```
 
 ### git 管理ポリシー

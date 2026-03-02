@@ -49,18 +49,37 @@
 
 ## 2. メールトリアージ
 
-メールデータソースからアクションアイテムを収集する。
+全メールアカウント（Outlook + Gmail）の未読メールを一括トリアージし、アクションアイテムをタスク化する。
 
 ### 手順
 
-1. メールデータソースの収集スクリプトを実行（fetch-all.sh の一部として、またはメールのみ個別に）
+1. 全メールデータソースを列挙:
+   ```bash
+   # datasources/ から type=mail のファイルを取得
+   grep -l '"type": "mail"' ~/.local/share/my-tasks/datasources/*.json
+   ```
 
-2. 収集スクリプトが担う処理:
-   - 未読メールを取得
-   - エージェントがアクション不要と判断したメールを既読にする
-   - アクション要のメールを JSONL 形式で出力
+2. 各アカウントの未読メールを取得:
+   - **Outlook**: `msgraph mail list --unread --top 50`
+   - **Gmail**: `google mail list --label UNREAD --max 50 --json --account {alias}`
 
-3. 出力された JSONL を sync-tasks.py に渡してタスク化（操作1と同じフロー）
+3. エージェントが各メールをトリアージ:
+   - 件名・送信者・スニペットから要否を判断
+   - 必要に応じて `get` コマンドで本文を取得:
+     - Outlook: `msgraph mail get --message-id {id}`
+     - Gmail: `google mail get {id} --account {alias}`
+
+4. 非アクション対象を既読化（datasource の `operations.mark_read` を使用）:
+   - Outlook: `msgraph mail update --message-id {remote_id} --is-read true`
+   - Gmail: `google mail modify {remote_id} --remove-label UNREAD --account {alias}`
+     （google-cli に `modify` コマンド未実装の場合はスキップ）
+
+5. アクション対象のメールを JSONL に出力し `sync-tasks.py` でタスク化（操作1と同じフロー）
+
+### 注意
+
+- メールトリアージはエージェント対話が必要なため `fetch-all.sh` には含めない
+- Gmail の既読化（`google mail modify`）は google-cli への機能追加が前提
 
 ---
 
