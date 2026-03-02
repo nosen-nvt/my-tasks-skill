@@ -169,15 +169,21 @@ elif [[ "$MODE" == "unrestricted" ]]; then
     --dev /dev \
     --tmpfs /tmp \
     --tmpfs /run \
+    --ro-bind /run/systemd/resolve /run/systemd/resolve \
     "${DISPATCH_BIND[@]}" \
     "${COMM_BIND[@]}" \
+    --ro-bind $HOME/.local/bin $HOME/.local/bin \
+    --ro-bind $HOME/.local/share/claude $HOME/.local/share/claude \
     --bind $HOME/.claude $HOME/.claude \
+    --bind $HOME/.claude.json $HOME/.claude.json \
     --bind $WORK $WORK \
     --bind $HOME/.cache $HOME/.cache \
+    --ro-bind $HOME/.volta $HOME/.volta \
+    --ro-bind /opt/google/chrome /opt/google/chrome \
     --chdir $WORK \
     --clearenv \
     "${ENV_FILE_ARGS[@]}" \
-    --setenv PATH "/usr/bin:$HOME/.local/bin/" \
+    --setenv PATH "/usr/bin:$HOME/.local/bin:$HOME/.volta/bin" \
     --setenv HOME $HOME \
     --setenv TERM "xterm-256color" \
     --setenv COLORTERM "truecolor" \
