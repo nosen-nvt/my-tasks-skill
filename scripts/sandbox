@@ -184,6 +184,7 @@ elif [[ "$MODE" == "unrestricted" ]]; then
     "${PLAYWRIGHT_BIND[@]}" \
     --bind $HOME/.local $HOME/.local \
     --bind $HOME/.claude $HOME/.claude \
+    --ro-bind $HOME/src/github.com/nosen-nvt/my-tasks-skill $HOME/src/github.com/nosen-nvt/my-tasks-skill \
     --bind $HOME/.claude.json $HOME/.claude.json \
     --bind $HOME/.gnupg $HOME/.gnupg \
     --bind $HOME/.password-store $HOME/.password-store \
