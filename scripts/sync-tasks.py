@@ -86,13 +86,12 @@ def save_index(tasks_dir: Path, entries: list[dict]) -> None:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def generate_task_id(tasks_dir: Path) -> str:
+def generate_task_id(index_entries: list[dict]) -> str:
     """YYYYMMDD-NNN 形式のタスク ID を生成する。"""
     date_prefix = today_str()
-    existing = load_index(tasks_dir)
 
     max_seq = 0
-    for entry in existing:
+    for entry in index_entries:
         eid = entry.get("id", "")
         if eid.startswith(date_prefix + "-"):
             try:
@@ -267,7 +266,7 @@ def process_datasource(
                 })
         else:
             # 新規タスク
-            task_id = generate_task_id(tasks_dir)
+            task_id = generate_task_id(index_entries)
             project_id = resolve_project(t.get("project_key"), project_mapping) or ""
 
             new_entry = {
