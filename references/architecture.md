@@ -56,7 +56,7 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 
 ```
 pending → needs_clarification → scoped → approved → running → done
-  ↕                                                        └→ failed
+  ↕              └→ done (manual)                          └→ failed
 deferred
 ```
 

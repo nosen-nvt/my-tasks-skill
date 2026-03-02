@@ -117,8 +117,8 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 
 ```
 pending ──→ needs_clarification ──→ scoped ──→ approved ──→ running ──→ done
-  │           ↑          │                                          └──→ failed
-  ↓ ↑         └──────────┘
+  │           ↑    │     │                                          └──→ failed
+  ↓ ↑         └────┘     └──→ done (manual)
 deferred
 ```
 
@@ -126,7 +126,7 @@ deferred
 |-----------|------|
 | `pending` | データソースから取り込まれた初期状態 |
 | `deferred` | 精査を先送りしたタスク（pending からのみ遷移可） |
-| `needs_clarification` | 質問が生成されたが、未回答の項目がある |
+| `needs_clarification` | 質問が生成されたが、未回答の項目がある（manual プロジェクトでは全回答後 `done` へ直接遷移） |
 | `scoped` | 前提条件・達成条件が明確で、実行プロンプトが生成済み |
 | `approved` | ユーザがプロンプトを承認し、実行待ち |
 | `running` | ディスパッチャーで実行中 |
@@ -138,6 +138,7 @@ deferred
 - `pending` → `deferred`: 精査前（pending）のタスクのみ先送り可
 - `deferred` → `pending`: 先送りを取り消し、精査待ちに戻す
 - `deferred` からは `needs_clarification` へ直接遷移しない（必ず `pending` を経由）
+- **manual プロジェクト短縮フロー**: プロジェクト定義に `working_directory` がないプロジェクトは manual 扱い。`needs_clarification` で全未決事項が `[x]` になったら `scoped` / `approved` / `running` をスキップし `done` へ直接遷移する。完了時アクション（操作9）は通常通り実行する
 
 ### ID 生成規則
 
@@ -215,7 +216,7 @@ deferred
 | `name` | string | Yes | プロジェクト名 |
 | `description` | string | No | プロジェクトの説明 |
 | `repositories` | array | No | 関連するリポジトリURLの配列 |
-| `working_directory` | string | Yes | ディスパッチャーが使用する作業ディレクトリ |
+| `working_directory` | string | No | ディスパッチャーが使用する作業ディレクトリ（未設定の場合 manual プロジェクト扱い） |
 | `sandbox_mode` | string | No | サンドボックスモード（`restricted` or `unrestricted`、デフォルト: `restricted`） |
 
 ### 例

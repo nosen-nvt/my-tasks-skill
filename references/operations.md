@@ -105,7 +105,11 @@
 
 5. ユーザーに質問を提示し、回答を収集:
    - 回答済みの項目を `[x]` に更新し、回答を追記
-   - 全項目が `[x]` になったら `scoped` に遷移可能
+   - 全項目が `[x]` になったら次のステップへ
+
+6. **manual プロジェクト判定**: タスクの `project_id` に対応する `projects/{project_id}.json` を確認し、`working_directory` が未設定かどうかを判定:
+   - **`working_directory` あり（通常フロー）**: `scoped` に遷移
+   - **`working_directory` なし（manual 短縮フロー）**: `scoped` / `approved` / `running` をスキップし `done` に直接遷移。完了時アクション（操作9）を実行する
 
 ---
 
