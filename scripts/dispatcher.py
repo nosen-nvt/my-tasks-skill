@@ -14,6 +14,7 @@ dispatcher.py - Unix ドメインソケット C/S ジョブランナー
   dispatcher.py kill --id bo-1
   dispatcher.py kill --all
   dispatcher.py wait --id bo-1
+  dispatcher.py log --id bo-1
 """
 
 import argparse
@@ -117,6 +118,10 @@ class DispatchServer:
         self.waiters: dict[str, list[asyncio.Future]] = {}
         self._counter: dict[str, int] = {}
         self._processes: dict[str, asyncio.subprocess.Process] = {}
+
+    def _log_path(self, dispatch_id: str) -> Path:
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}")
+        return Path(runtime_dir) / SOCKET_DIR_NAME / f"{dispatch_id}.log"
 
     def generate_dispatch_id(self, project_id: str) -> str:
         self._counter.setdefault(project_id, 0)
@@ -309,19 +314,22 @@ class DispatchServer:
         job.started_at = now_iso()
 
         system_prompt = self._build_system_prompt(job)
+        log_path = self._log_path(job.dispatch_id)
+        log_file = None
         try:
+            log_file = open(log_path, "w", encoding="utf-8")
             proc = await asyncio.create_subprocess_exec(
                 "sandbox", "--mode", job.sandbox_mode,
                 "claude", "-p", job.prompt,
                 "--append-system-prompt", system_prompt,
                 cwd=job.working_dir,
                 env={**os.environ, "SANDBOX": "1"},
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=log_file,
             )
             job.pid = proc.pid
             self._processes[job.dispatch_id] = proc
-            log.info(f"Job executing: {job.dispatch_id} pid={proc.pid}")
+            log.info(f"Job executing: {job.dispatch_id} pid={proc.pid} log={log_path}")
 
             exit_code = await proc.wait()
             job.exit_code = exit_code
@@ -331,6 +339,8 @@ class DispatchServer:
             job.status = "failed"
             job.exit_code = -1
         finally:
+            if log_file:
+                log_file.close()
             job.finished_at = now_iso()
             self._processes.pop(job.dispatch_id, None)
             log.info(f"Job finished: {job.dispatch_id} status={job.status} exit_code={job.exit_code}")
@@ -390,6 +400,21 @@ class DispatchServer:
 作業が完了したら、変更をコミットしてください。
 プロセスの終了がジョブ完了の通知になります（シグナルファイルは不要です）。"""
 
+    async def cleanup_old_logs(self):
+        """6時間以上経過したログファイルを定期的に削除する。"""
+        max_age = 6 * 3600
+        while True:
+            await asyncio.sleep(1800)  # 30分間隔
+            try:
+                log_dir = self._log_path("_").parent
+                now = datetime.now().timestamp()
+                for p in log_dir.glob("*.log"):
+                    if now - p.stat().st_mtime > max_age:
+                        p.unlink()
+                        log.info(f"Cleaned up old log: {p.name}")
+            except Exception as e:
+                log.error(f"Log cleanup error: {e}")
+
     async def shutdown(self):
         log.info("Shutting down...")
         for dispatch_id, proc in list(self._processes.items()):
@@ -422,6 +447,18 @@ def _detect_tmux_session(explicit: str | None) -> tuple[str, bool]:
         )
         if result.returncode == 0 and result.stdout.strip():
             return (result.stdout.strip(), True)
+
+    # サーバ環境（TMUX 未設定）: アタッチ中のクライアントセッションを検出
+    result = subprocess.run(
+        ["tmux", "list-clients", "-F", "#{client_session}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        sessions = [s.strip() for s in result.stdout.strip().split("\n") if s.strip()]
+        # デフォルト(dispatch)以外のセッションを優先
+        non_default = [s for s in sessions if s != DEFAULT_SESSION_NAME]
+        if non_default:
+            return (non_default[0], True)
 
     return (DEFAULT_SESSION_NAME, False)
 
@@ -476,6 +513,8 @@ async def run_server(max_slots: int, repo: str):
     os.chmod(socket_path, 0o600)
 
     log.info(f"Dispatch server started: socket={socket_path} max_slots={max_slots} repo={repo_dir}")
+
+    asyncio.create_task(server.cleanup_old_logs())
 
     async with srv:
         await srv.serve_forever()
@@ -734,6 +773,15 @@ def cmd_wait(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_log(args: argparse.Namespace) -> None:
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}")
+    log_path = Path(runtime_dir) / SOCKET_DIR_NAME / f"{args.id}.log"
+    if not log_path.exists():
+        print(f"エラー: ログファイルが見つかりません: {log_path}", file=sys.stderr)
+        sys.exit(1)
+    print(log_path.read_text(encoding="utf-8"), end="")
+
+
 def cmd_server(args: argparse.Namespace) -> None:
     asyncio.run(run_server(max_slots=args.max_slots, repo=args.repo))
 
@@ -798,6 +846,11 @@ def main() -> None:
     p_wait = subparsers.add_parser("wait", help="ジョブ完了を待機する")
     p_wait.add_argument("--id", required=True, help="ジョブ ID")
     p_wait.set_defaults(func=cmd_wait)
+
+    # log
+    p_log = subparsers.add_parser("log", help="ジョブの stdout/stderr ログを表示する")
+    p_log.add_argument("--id", required=True, help="ジョブ ID")
+    p_log.set_defaults(func=cmd_log)
 
     args = parser.parse_args()
     args.func(args)

@@ -102,6 +102,9 @@ python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py kill --all
 # ジョブ完了待機
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py wait --id bo-1
 
+# ジョブの stdout/stderr ログを表示
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py log --id bo-1
+
 # サーバ起動（通常は systemd 経由）
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py server [--max-slots 3]
 ```

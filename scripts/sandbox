@@ -102,6 +102,13 @@ COMM_DIR="/run/user/$(id -u)/communicator"
 mkdir -p "$COMM_DIR"
 COMM_BIND=(--bind "$COMM_DIR" "$COMM_DIR")
 
+# playwright-cli デーモンソケット用バインドマウント
+# ソケットは /tmp/playwright-cli/ に作成されるが、--tmpfs /tmp で隔離されるため
+# ホスト側のデーモンを共有するにはバインドマウントが必要
+PLAYWRIGHT_SOCK_DIR="/tmp/playwright-cli"
+mkdir -p "$PLAYWRIGHT_SOCK_DIR"
+PLAYWRIGHT_BIND=(--bind "$PLAYWRIGHT_SOCK_DIR" "$PLAYWRIGHT_SOCK_DIR")
+
 if [[ "$MODE" == "restricted" ]]; then
   # --- restricted モード: ai-ns namespace + 既存の bwrap 構成 ---
   ensure_netns
@@ -128,6 +135,7 @@ if [[ "$MODE" == "restricted" ]]; then
       --bind /run/user/$(id -u)/gnupg /run/user/$(id -u)/gnupg \
       "${DISPATCH_BIND[@]}" \
       "${COMM_BIND[@]}" \
+      "${PLAYWRIGHT_BIND[@]}" \
       --bind $HOME $HOME \
       --ro-bind $HOME/src $HOME/src \
       --bind $HOME/.claude/ $HOME/.claude \
@@ -170,12 +178,16 @@ elif [[ "$MODE" == "unrestricted" ]]; then
     --tmpfs /tmp \
     --tmpfs /run \
     --ro-bind /run/systemd/resolve /run/systemd/resolve \
+    --bind /run/user/$(id -u)/gnupg /run/user/$(id -u)/gnupg \
     "${DISPATCH_BIND[@]}" \
     "${COMM_BIND[@]}" \
+    "${PLAYWRIGHT_BIND[@]}" \
     --ro-bind $HOME/.local/bin $HOME/.local/bin \
     --ro-bind $HOME/.local/share/claude $HOME/.local/share/claude \
     --bind $HOME/.claude $HOME/.claude \
     --bind $HOME/.claude.json $HOME/.claude.json \
+    --bind $HOME/.gnupg $HOME/.gnupg \
+    --bind $HOME/.password-store $HOME/.password-store \
     --bind $WORK $WORK \
     --bind $HOME/.cache $HOME/.cache \
     --ro-bind $HOME/.volta $HOME/.volta \
@@ -183,10 +195,12 @@ elif [[ "$MODE" == "unrestricted" ]]; then
     --chdir $WORK \
     --clearenv \
     "${ENV_FILE_ARGS[@]}" \
-    --setenv PATH "/usr/bin:$HOME/.local/bin:$HOME/.volta/bin" \
+    --bind $HOME/go $HOME/go \
+    --setenv PATH "/usr/bin:$HOME/.local/bin:$HOME/.volta/bin:$HOME/go/bin" \
     --setenv HOME $HOME \
     --setenv TERM "xterm-256color" \
     --setenv COLORTERM "truecolor" \
+    --setenv PASSWORD_STORE_DIR "$HOME/.password-store" \
     --setenv XDG_RUNTIME_DIR "/run/user/1000" \
     --setenv WORKDIR $WORK \
     --setenv SANDBOX "1" \

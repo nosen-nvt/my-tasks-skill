@@ -47,6 +47,7 @@ JSON over Unix ドメインソケット。改行区切り（1行1メッセージ
 | `kill` | `dispatch_id` | 実行中ジョブを強制停止 |
 | `kill-all` | | 全ジョブを強制停止 |
 | `wait` | `dispatch_id` | ジョブ完了まで接続を保持 |
+| `log` | (CLI のみ) | ジョブの stdout/stderr ログを表示（ファイル直接読み取り） |
 
 ```json
 {"command": "run", "task_id": "20260301-001", "project_id": "ubs-mgmt-tool", "prompt": "..."}
@@ -97,7 +98,8 @@ queued ──→ running ──→ done
 4. スロット満杯なら queue に追加し `queued` で応答
 5. `execute_job()`:
    - プロジェクト設定から `sandbox_mode` と `working_directory` を取得
-   - `asyncio.create_subprocess_exec("sandbox", "--mode", mode, "claude", "-p", prompt, ...)` でジョブ実行
+   - `$XDG_RUNTIME_DIR/my-tasks-dispatch/{dispatch_id}.log` にログファイルを作成
+   - `asyncio.create_subprocess_exec("sandbox", "--mode", mode, "claude", "-p", prompt, ...)` でジョブ実行（stdout/stderr をログファイルに出力）
    - `proc.wait()` で完了検知
    - `done` or `failed` に更新
    - waiter に通知
@@ -112,6 +114,14 @@ queued ──→ running ──→ done
 3. 指定された tmux セッション（またはデフォルトセッション）にウィンドウを作成
 4. ウィンドウ内で `sandbox --mode {sandbox_mode} claude --permission-mode bypassPermissions` を実行
 5. ウィンドウ名: `{project_id}-interactive`
+
+### `log` コマンド
+
+ジョブの stdout/stderr ログを表示する。サーバ通信不要のクライアント専用コマンド。
+
+- ログファイルパス: `$XDG_RUNTIME_DIR/my-tasks-dispatch/{dispatch_id}.log`
+- ジョブ実行時に stdout/stderr が同一ファイルに書き出される
+- tmpfs 上のため OS 再起動で自動クリーンアップされる
 
 ### `wait` コマンド
 
@@ -172,6 +182,9 @@ dispatcher.py kill --all
 
 # ジョブ完了待機
 dispatcher.py wait --id ubs-mgmt-tool-1
+
+# ジョブの stdout/stderr ログを表示
+dispatcher.py log --id ubs-mgmt-tool-1
 
 # サーバ起動（通常は systemd 経由）
 dispatcher.py server [--max-slots 3]
