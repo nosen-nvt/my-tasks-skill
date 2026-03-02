@@ -53,7 +53,36 @@ JIRA・Microsoft To Do・メール等の外部データソースからタスク�
 python3 ~/.claude/skills/my-tasks/scripts/sync-tasks.py \
   --repo ~/.local/share/my-tasks \
   --input /tmp/tasks.jsonl
+
+# 特定データソースのみ処理（他データソースのタスクには影響しない）
+python3 ~/.claude/skills/my-tasks/scripts/sync-tasks.py \
+  --repo ~/.local/share/my-tasks \
+  --input /tmp/tasks.jsonl \
+  --datasource jira,ms-todo
+
+# メールトリアージ時（メール系データソースのみ指定）
+python3 ~/.claude/skills/my-tasks/scripts/sync-tasks.py \
+  --repo ~/.local/share/my-tasks \
+  --input /tmp/mail-triage.jsonl \
+  --datasource mail-outlook,mail-gmail-nvt,mail-gmail-qzl
 ```
+
+### 引数
+
+| 引数 | 必須 | 説明 |
+|---|---|---|
+| `--repo PATH` | Yes | タスク管理リポジトリのパス |
+| `--input FILE` | No | JSONL ファイルのパス（省略時は stdin） |
+| `--datasource IDS` | No | 処理対象のデータソース ID（カンマ区切り）。未指定時は入力 JSONL に含まれるデータソースのみ処理 |
+
+### sync_mode による動作の違い
+
+datasource 設定の `sync_mode` フィールドに応じて同期動作が異なる:
+
+| sync_mode | 消失検出 | deferred 消失時 | done タスクの GC | 用途 |
+|---|---|---|---|---|
+| `full`（デフォルト） | あり | `done` に遷移 | なし | JIRA、To Do 等の状態型データソース |
+| `append` | なし | - | あり（sync 時に除去） | メール等のイベント型データソース |
 
 ### 出力（JSON レポート）
 
@@ -63,12 +92,16 @@ python3 ~/.claude/skills/my-tasks/scripts/sync-tasks.py \
     "added": 3,
     "updated": 1,
     "vanished": 1,
+    "completed": 0,
+    "gc": 2,
     "auto_assigned": 2,
     "needs_review": 1
   },
   "added": [...],
   "updated": [...],
   "vanished": [...],
+  "completed": [...],
+  "gc": [...],
   "auto_assigned": [...],
   "needs_review": [...]
 }
@@ -76,6 +109,8 @@ python3 ~/.claude/skills/my-tasks/scripts/sync-tasks.py \
 
 - `auto_assigned`: `project_mapping` で自動割り当て成功したタスク
 - `needs_review`: プロジェクトが特定できなかったタスク → ユーザーに確認が必要
+- `completed`: deferred から done に遷移したタスク（full モード: リモート側で完了済み）
+- `gc`: GC で除去された done タスク（append モード）
 
 ## dispatcher.py の使い方
 

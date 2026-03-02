@@ -17,15 +17,24 @@
 
 2. `sync-tasks.py` を実行してタスクインデックスと Markdown を更新:
    ```bash
+   # 全データソース（fetch-all.sh の出力に含まれる全データソースを処理）
    python3 ~/.claude/skills/my-tasks/scripts/sync-tasks.py \
      --repo ~/.local/share/my-tasks \
      --input /tmp/my-tasks-sync.jsonl
+
+   # 特定データソースのみ処理（他データソースのタスクには影響しない）
+   python3 ~/.claude/skills/my-tasks/scripts/sync-tasks.py \
+     --repo ~/.local/share/my-tasks \
+     --input /tmp/my-tasks-sync.jsonl \
+     --datasource jira,ms-todo
    ```
 
 3. スクリプトのレポートを確認:
    - `auto_assigned`: `project_mapping` でプロジェクトが特定できたタスク
    - `needs_review`: プロジェクトが特定できなかったタスク → ユーザーに確認
-   - `vanished`: 消失タスク（インデックスと Markdown から削除済み）
+   - `vanished`: 消失タスク（full モード: インデックスと Markdown から削除済み）
+   - `completed`: deferred から done に遷移したタスク（full モード: リモート側で完了）
+   - `gc`: GC で除去された done タスク（append モード）
 
 4. 要確認タスクに対してユーザーと対話:
    - プロジェクト一覧をコンテキストとして提示
@@ -74,7 +83,14 @@
    - Gmail: `google mail modify {remote_id} --remove-label UNREAD --account {alias}`
      （google-cli に `modify` コマンド未実装の場合はスキップ）
 
-5. アクション対象のメールを JSONL に出力し `sync-tasks.py` でタスク化（操作1と同じフロー）
+5. アクション対象のメールを JSONL に出力し `sync-tasks.py` でタスク化:
+   ```bash
+   python3 ~/.claude/skills/my-tasks/scripts/sync-tasks.py \
+     --repo ~/.local/share/my-tasks \
+     --input /tmp/mail-triage.jsonl \
+     --datasource mail-outlook,mail-gmail-nvt,mail-gmail-qzl
+   ```
+   `--datasource` でメール系のみ指定し、JIRA/To Do のタスクに影響を与えない
 
 ### 注意
 

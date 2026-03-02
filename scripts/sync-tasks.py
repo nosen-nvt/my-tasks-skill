@@ -224,17 +224,43 @@ def process_datasource(
 
     index_entries はインプレースで変更される（新規追加・消失削除）。
 
+    datasource 設定の sync_mode に応じて動作を切り替える:
+    - "full": 消失検出を実施（deferred 消失時は done に遷移）
+    - "append": 消失検出をスキップ、done タスクの GC を実施
+
     Returns:
         {
             "added": [...],
             "updated": [...],
             "vanished": [...],
+            "completed": [...],
+            "gc": [...],
             "auto_assigned": [...],
             "needs_review": [...],
         }
     """
     datasource = load_datasource(datasources_dir, datasource_id)
     project_mapping = datasource.get("project_mapping", {}) if datasource else {}
+    sync_mode = datasource.get("sync_mode", "full") if datasource else "full"
+
+    # append モードの GC: done エントリを除去し .md を削除
+    gc = []
+    if sync_mode == "append":
+        gc_ids = set()
+        for entry in index_entries:
+            if (entry.get("datasource_id") == datasource_id
+                    and entry.get("status") == "done"):
+                gc.append({
+                    "datasource_id": datasource_id,
+                    "remote_id": entry.get("remote_id", ""),
+                    "title": entry.get("title", ""),
+                    "id": entry["id"],
+                })
+                gc_ids.add(entry["id"])
+                delete_task(tasks_dir, entry["id"])
+        if gc_ids:
+            index_entries[:] = [e for e in index_entries
+                                if e.get("id") not in gc_ids]
 
     # 既存インデックスから当該データソースのエントリを取得
     existing_entries = {
@@ -302,31 +328,43 @@ def process_datasource(
                     "project_key": t.get("project_key"),
                 })
 
-    PROTECTED_STATUSES = {"deferred"}
-
-    # 消失タスク = 既存にあって incoming にないもの
+    # 消失検出は full モードのみ
     vanished = []
-    vanished_ids = set()
-    for remote_id, entry in existing_entries.items():
-        if remote_id not in incoming_ids:
-            if entry.get("status") in PROTECTED_STATUSES:
-                continue  # deferred タスクはデータソースから消えても保持
-            vanished.append({
-                "datasource_id": datasource_id,
-                "remote_id": remote_id,
-                "title": entry.get("title", ""),
-                "id": entry["id"],
-            })
-            vanished_ids.add(entry["id"])
-            delete_task(tasks_dir, entry["id"])
+    completed = []
+    if sync_mode == "full":
+        vanished_ids = set()
+        for remote_id, entry in existing_entries.items():
+            if remote_id not in incoming_ids:
+                if entry.get("status") == "deferred":
+                    # deferred タスクが消失 → done に遷移
+                    entry["status"] = "done"
+                    update_task_markdown_metadata(tasks_dir, entry)
+                    completed.append({
+                        "datasource_id": datasource_id,
+                        "remote_id": remote_id,
+                        "title": entry.get("title", ""),
+                        "id": entry["id"],
+                    })
+                    continue
+                vanished.append({
+                    "datasource_id": datasource_id,
+                    "remote_id": remote_id,
+                    "title": entry.get("title", ""),
+                    "id": entry["id"],
+                })
+                vanished_ids.add(entry["id"])
+                delete_task(tasks_dir, entry["id"])
 
-    # index_entries から消失タスクを除去
-    index_entries[:] = [e for e in index_entries if e.get("id") not in vanished_ids]
+        # index_entries から消失タスクを除去
+        index_entries[:] = [e for e in index_entries
+                            if e.get("id") not in vanished_ids]
 
     return {
         "added": added,
         "updated": updated,
         "vanished": vanished,
+        "completed": completed,
+        "gc": gc,
         "auto_assigned": auto_assigned,
         "needs_review": needs_review,
     }
@@ -351,6 +389,12 @@ def main() -> None:
         metavar="FILE",
         default=None,
         help="JSONL ファイルのパス（省略時は stdin から読み込む）",
+    )
+    parser.add_argument(
+        "--datasource",
+        metavar="IDS",
+        default=None,
+        help="処理対象のデータソース ID（カンマ区切り）。未指定時は入力 JSONL に含まれるデータソースのみ処理",
     )
     args = parser.parse_args()
 
@@ -382,20 +426,26 @@ def main() -> None:
         ds_id = task["datasource_id"]
         by_datasource.setdefault(ds_id, []).append(task)
 
+    # --datasource 指定時: 指定されたデータソースのみ処理対象とする
+    if args.datasource:
+        target_ds_ids = {s.strip() for s in args.datasource.split(",")}
+        # 指定されたが JSONL に含まれないデータソースは空リストで追加
+        for ds_id in target_ds_ids:
+            if ds_id not in by_datasource:
+                by_datasource[ds_id] = []
+        # 指定外のデータソースを除外
+        by_datasource = {k: v for k, v in by_datasource.items()
+                         if k in target_ds_ids}
+
     # 既存 index を読み込み
     index_entries = load_index(tasks_dir)
-
-    # index に存在するが今回の JSONL に含まれないデータソースも処理
-    # （全タスクが完了した場合、JSONL に出現しなくなる）
-    for entry in index_entries:
-        ds_id = entry.get("datasource_id")
-        if ds_id and ds_id not in by_datasource:
-            by_datasource[ds_id] = []
 
     # 集計結果
     total_added = []
     total_updated = []
     total_vanished = []
+    total_completed = []
+    total_gc = []
     total_auto_assigned = []
     total_needs_review = []
 
@@ -406,6 +456,8 @@ def main() -> None:
         total_added.extend(result["added"])
         total_updated.extend(result["updated"])
         total_vanished.extend(result["vanished"])
+        total_completed.extend(result["completed"])
+        total_gc.extend(result["gc"])
         total_auto_assigned.extend(result["auto_assigned"])
         total_needs_review.extend(result["needs_review"])
 
@@ -418,12 +470,16 @@ def main() -> None:
             "added": len(total_added),
             "updated": len(total_updated),
             "vanished": len(total_vanished),
+            "completed": len(total_completed),
+            "gc": len(total_gc),
             "auto_assigned": len(total_auto_assigned),
             "needs_review": len(total_needs_review),
         },
         "added": total_added,
         "updated": total_updated,
         "vanished": total_vanished,
+        "completed": total_completed,
+        "gc": total_gc,
         "auto_assigned": total_auto_assigned,
         "needs_review": total_needs_review,
     }

@@ -12,8 +12,20 @@
 | `type` | string | Yes | データソースの種別（`jira`, `todo`, `mail`） |
 | `description` | string | Yes | データソースの説明 |
 | `script` | string | Yes | 収集スクリプトのパス（リポジトリルートからの相対パス） |
+| `sync_mode` | string | No | 同期モード（`"full"` or `"append"`、デフォルト: `"full"`） |
 | `project_mapping` | object | No | `project_key` → `project_id` のマッピング |
 | `operations` | object | No | データソース側でのタスク操作コマンド定義 |
+
+### `sync_mode`
+
+データソースの同期モードを指定する。
+
+| 値 | 説明 |
+|---|---|
+| `"full"` | 全量同期。JSONL に含まれないタスクを「消失」として検出・削除する。deferred タスクが消失した場合は `done` に遷移する。JIRA・To Do などの状態型データソース向け |
+| `"append"` | 追記同期。消失検出をスキップし、新規追加と既存更新のみ行う。sync 実行時に `done` タスクを GC（インデックス除去 + md 削除）する。メールなどのイベント型データソース向け |
+
+デフォルト値は `"full"`（後方互換性）。
 
 ### `project_mapping`
 
@@ -32,6 +44,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 {
   "datasource_id": "jira",
   "type": "jira",
+  "sync_mode": "full",
   "description": "JIRA のタスク",
   "script": "scripts/fetch-jira.sh",
   "project_mapping": {
@@ -51,6 +64,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 {
   "datasource_id": "mail-outlook",
   "type": "mail",
+  "sync_mode": "append",
   "description": "Outlook (Microsoft 365) メールからのアクションアイテム",
   "script": "scripts/fetch-mail-outlook.sh",
   "project_mapping": {},
@@ -67,6 +81,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 {
   "datasource_id": "mail-gmail-nvt",
   "type": "mail",
+  "sync_mode": "append",
   "description": "Gmail (nvt) メールからのアクションアイテム",
   "script": "scripts/fetch-mail-gmail.sh nvt",
   "project_mapping": {},
@@ -83,6 +98,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 {
   "datasource_id": "mail-gmail-qzl",
   "type": "mail",
+  "sync_mode": "append",
   "description": "Gmail (qzl) メールからのアクションアイテム",
   "script": "scripts/fetch-mail-gmail.sh qzl",
   "project_mapping": {},
@@ -264,7 +280,8 @@ deferred
 ### 規約
 
 - 収集スクリプトは完了済みタスクを出力しない（未完了タスクのみ出力）
-- JSONL に含まれないが `tasks/index.jsonl` に存在するタスクは「消失タスク」として扱い、インデックスと Markdown ファイルから削除する
+- `sync_mode=full` のデータソース: JSONL に含まれないが `tasks/index.jsonl` に存在するタスクは「消失タスク」として扱い、インデックスと Markdown ファイルから削除する（deferred タスクが消失した場合は `done` に遷移）
+- `sync_mode=append` のデータソース: 消失検出をスキップし、新規追加と既存更新のみ行う。sync 実行時に `done` タスクを GC する
 - フィールドが存在しない場合はデフォルト値を使用（`null`）
 
 ---
