@@ -302,11 +302,15 @@ def process_datasource(
                     "project_key": t.get("project_key"),
                 })
 
+    PROTECTED_STATUSES = {"deferred"}
+
     # 消失タスク = 既存にあって incoming にないもの
     vanished = []
     vanished_ids = set()
     for remote_id, entry in existing_entries.items():
         if remote_id not in incoming_ids:
+            if entry.get("status") in PROTECTED_STATUSES:
+                continue  # deferred タスクはデータソースから消えても保持
             vanished.append({
                 "datasource_id": datasource_id,
                 "remote_id": remote_id,

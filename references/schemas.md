@@ -85,19 +85,27 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 
 ```
 pending ──→ needs_clarification ──→ scoped ──→ approved ──→ running ──→ done
-              ↑          │                                          └──→ failed
-              └──────────┘
+  │           ↑          │                                          └──→ failed
+  ↓ ↑         └──────────┘
+deferred
 ```
 
 | ステータス | 意味 |
 |-----------|------|
 | `pending` | データソースから取り込まれた初期状態 |
+| `deferred` | 精査を先送りしたタスク（pending からのみ遷移可） |
 | `needs_clarification` | 質問が生成されたが、未回答の項目がある |
 | `scoped` | 前提条件・達成条件が明確で、実行プロンプトが生成済み |
 | `approved` | ユーザがプロンプトを承認し、実行待ち |
 | `running` | ディスパッチャーで実行中 |
 | `done` | 完了 |
 | `failed` | 失敗 |
+
+### 遷移ルール補足
+
+- `pending` → `deferred`: 精査前（pending）のタスクのみ先送り可
+- `deferred` → `pending`: 先送りを取り消し、精査待ちに戻す
+- `deferred` からは `needs_clarification` へ直接遷移しない（必ず `pending` を経由）
 
 ### ID 生成規則
 

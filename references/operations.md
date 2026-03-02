@@ -70,7 +70,7 @@
 
 ### 手順
 
-1. `tasks/index.jsonl` から `status=pending` のタスクを一覧
+1. `tasks/index.jsonl` から `status=pending` のタスクを一覧（`deferred` タスクは精査対象外）
 
 2. 対象タスクの `tasks/{id}.md` を読み込み
 
@@ -278,3 +278,36 @@ python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo [--ses
 2. 変更内容を適用（sandbox_mode 変更、working_directory 変更等）
 
 3. commit + push
+
+---
+
+## 11. タスク先送り / 先送り取消
+
+`pending` タスクを `deferred`（先送り）にする、またはその取り消しを行う。
+
+### 先送り（pending → deferred）
+
+1. 対象タスクの `tasks/index.jsonl` エントリを確認し、`status` が `pending` であることを確認
+
+2. `index.jsonl` の当該エントリの `status` を `deferred` に更新
+
+3. `tasks/{id}.md` の `- Status:` 行を `deferred` に更新
+
+### 先送り取消（deferred → pending）
+
+1. 対象タスクの `tasks/index.jsonl` エントリを確認し、`status` が `deferred` であることを確認
+
+2. `index.jsonl` の当該エントリの `status` を `pending` に更新
+
+3. `tasks/{id}.md` の `- Status:` 行を `pending` に更新
+
+### 制約
+
+- `pending` → `deferred` 遷移は `status=pending` のタスクのみ可
+- `deferred` からは `pending` にのみ戻せる（`needs_clarification` への直接遷移は不可）
+- git commit は不要（tasks/ は gitignore 対象）
+
+### 例
+
+- 「[タスク名] を先送りして」→ `pending` → `deferred`
+- 「やっぱりやる」「pending に戻して」→ `deferred` → `pending`

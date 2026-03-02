@@ -52,10 +52,12 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 
 ```
 pending → needs_clarification → scoped → approved → running → done
-                                                           └→ failed
+  ↕                                                        └→ failed
+deferred
 ```
 
 - `pending`: データソースから取り込まれた初期状態
+- `deferred`: 精査を先送りしたタスク（pending からのみ遷移可、取り消しで pending に戻る）
 - `needs_clarification`: 質問が生成されたが未回答の項目がある
 - `scoped`: 前提条件・達成条件が明確で、実行プロンプトが生成済み
 - `approved`: ユーザがプロンプトを承認し、実行待ち
