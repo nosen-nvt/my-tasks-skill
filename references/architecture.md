@@ -24,6 +24,13 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 ├── projects/                        # git 管理
 │   ├── bo.json
 │   └── ubs-mgmt-tool.json
+├── proxy-profiles/                  # git 管理
+│   ├── dev.json
+│   ├── full.json
+│   └── office.json
+├── sandbox-profiles/                # git 管理
+│   ├── restricted-default.json
+│   └── unrestricted-browser.json
 ├── tasks/                           # gitignored
 │   ├── index.jsonl                  # タスクインデックス
 │   └── {task_id}.md                 # タスク実体（Markdown）
@@ -134,13 +141,13 @@ Unix ドメインソケット C/S アーキテクチャのジョブランナー�
 
 ジョブ実行時のプロセス隔離を提供する。プロファイルベースで構成を管理する。
 
-| プロファイル | モード | ネットワーク | 用途 |
-|-------------|--------|-------------|------|
-| `default` | restricted | ai-ns namespace（制限付き） | 通常のコーディングタスク |
-| `unrestricted` | unrestricted | ホストネットワーク直接 | ブラウザオートメーション、外部 API 連携 |
+| プロファイル | ネットワーク保護 | ネットワーク | 用途 |
+|-------------|---------------|-------------|------|
+| `default` | あり | ai-ns namespace + proxy 経由 | 通常のコーディングタスク |
+| `unrestricted` | なし | ホストネットワーク直接 | ブラウザオートメーション、外部 API 連携 |
 
 プロジェクト定義の `sandbox_profile` フィールドでプロファイルを指定する（デフォルト: `"default"`）。
-モードはプロファイルの `proxy_profile` フィールドから自動決定される（設定あり → restricted、null → unrestricted）。
+ネットワーク保護の有無はプロファイルの `proxy_profile` フィールドから自動決定される（設定あり → 保護あり、null → 保護なし）。
 
 ## sync-tasks.py の役割
 

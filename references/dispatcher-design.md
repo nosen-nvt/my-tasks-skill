@@ -231,9 +231,9 @@ dispatcher.py server [--max-slots 3]
 
 実行環境:
 - 作業ディレクトリ: {working_directory}
-- ネットワークモード: {restricted|unrestricted}
+- ネットワーク: {保護あり (netns + proxy)|ホストネットワーク直接}
 
-制約事項 (restricted モード):
+制約事項 (ネットワーク保護あり):
 - ネットワーク: GitHub/Bitbucket SSH と HTTP プロキシ経由の HTTPS のみ利用可能
 - ファイル: 作業ディレクトリ内のファイルのみ変更可能
 

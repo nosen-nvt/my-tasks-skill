@@ -88,7 +88,7 @@ def load_proxy_profile(profile_id: str, profiles_dir: str = DEFAULT_PROXY_PROFIL
 BUILTIN_SANDBOX_PROFILES: dict[str, dict] = {
     "default": {
         "profile_id": "default",
-        "proxy_profile": "dev",
+        "proxy_profile": "full",
         "allowed_credentials": "*",
     },
     "unrestricted": {
@@ -207,7 +207,7 @@ class Job:
     prompt: str
     working_dir: str
     sandbox_profile_arg: str = "default"
-    sandbox_mode: str = "restricted"
+    network_protected: bool = True
     proxy_port: int = 3128
     allowed_credentials: list[str] | str = field(default_factory=list)
     status: str = "queued"
@@ -329,11 +329,11 @@ class DispatchServer:
 
         proxy_profile_id = sandbox_profile_data.get("proxy_profile")
         if proxy_profile_id:
-            sandbox_mode = "restricted"
+            network_protected = True
             proxy_profile = load_proxy_profile(proxy_profile_id)
             proxy_port = proxy_profile["port"] if proxy_profile and "port" in proxy_profile else 3128
         else:
-            sandbox_mode = "unrestricted"
+            network_protected = False
             proxy_port = 3128
         allowed_credentials = sandbox_profile_data.get("allowed_credentials", "*")
         sandbox_profile_arg = _resolve_sandbox_profile_arg(profile_id)
@@ -347,7 +347,7 @@ class DispatchServer:
             prompt=prompt,
             working_dir=working_dir,
             sandbox_profile_arg=sandbox_profile_arg,
-            sandbox_mode=sandbox_mode,
+            network_protected=network_protected,
             proxy_port=proxy_port,
             allowed_credentials=allowed_credentials,
         )
@@ -557,10 +557,10 @@ class DispatchServer:
                 future.set_result(result)
 
     def _build_system_prompt(self, job: Job) -> str:
-        mode_desc = ""
-        if job.sandbox_mode == "restricted":
-            mode_desc = """
-制約事項 (restricted モード):
+        network_desc = ""
+        if job.network_protected:
+            network_desc = """
+制約事項 (ネットワーク保護あり):
 - ネットワーク: GitHub/Bitbucket SSH と HTTP プロキシ経由の HTTPS のみ利用可能
 - ファイル: 作業ディレクトリ内のファイルのみ変更可能"""
 
@@ -579,12 +579,13 @@ class DispatchServer:
 - `cred-get <entry>` または `pass show <entry>` で以下の認証情報を取得できます:
 {entries}"""
 
+        network_mode = "保護あり (netns + proxy)" if job.network_protected else "ホストネットワーク直接"
         return f"""あなたはサンドボックス環境で実行されています。
 
 実行環境:
 - 作業ディレクトリ: {job.working_dir}
-- ネットワークモード: {job.sandbox_mode}
-{mode_desc}{cred_desc}
+- ネットワーク: {network_mode}
+{network_desc}{cred_desc}
 
 作業が完了したら、変更をコミットしてください。
 プロセスの終了がジョブ完了の通知になります（シグナルファイルは不要です）。"""

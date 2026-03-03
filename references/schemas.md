@@ -261,8 +261,8 @@ deferred
 
 | ID | proxy_profile | 説明 |
 |---|---|---|
-| `default` | `"dev"` | restricted モード。netns + proxy 経由。通常のコーディングタスク用 |
-| `unrestricted` | `null` | unrestricted モード。ホストネットワーク直接。ブラウザオートメーション等 |
+| `default` | `"full"` | ネットワーク保護あり。netns + proxy 経由。通常のコーディングタスク用 |
+| `unrestricted` | `null` | ネットワーク保護なし。ホストネットワーク直接。ブラウザオートメーション等 |
 
 ### ファイルベースプロファイル (`sandbox-profiles/{profile_id}.json`)
 
@@ -271,7 +271,7 @@ deferred
 | フィールド | 型 | 必須 | 説明 |
 |---|---|---|---|
 | `profile_id` | string | Yes | プロファイル識別子（ファイル名と一致） |
-| `proxy_profile` | string or null | Yes | 参照する Proxy プロファイル ID。設定ありの場合は restricted モード。`null` の場合は unrestricted モード |
+| `proxy_profile` | string or null | Yes | 参照する Proxy プロファイル ID。設定ありの場合はネットワーク保護あり（netns + proxy）。`null` の場合はホストネットワーク直接 |
 | `allowed_credentials` | string or array | Yes | `"*"`（全 pass エントリ許可）or エントリパスの配列 |
 | `extra_binds` | array | No | ベースマウントに追加する bind mount のリスト |
 

@@ -45,7 +45,7 @@ def ensure_netns() -> None:
 BUILTIN_PROFILES: dict[str, dict] = {
     "default": {
         "profile_id": "default",
-        "proxy_profile": "dev",
+        "proxy_profile": "full",
         "allowed_credentials": "*",
         "extra_binds": [
             {"source": "$HOME/.nuget",  "target": "$HOME/.nuget",  "mode": "rw"},
@@ -96,8 +96,8 @@ def resolve_profile(name_or_path: str) -> dict:
     raise FileNotFoundError(f"サンドボックスプロファイルが見つかりません: {name_or_path}")
 
 
-def resolve_mode(profile: dict) -> str:
-    return "restricted" if profile.get("proxy_profile") else "unrestricted"
+def uses_network_protection(profile: dict) -> bool:
+    return bool(profile.get("proxy_profile"))
 
 
 def resolve_extra_binds(profile: dict) -> list[str]:
@@ -131,7 +131,7 @@ def load_env_files(paths: list[str]) -> list[str]:
 # --- bwrap 引数構築 -----------------------------------------------------------
 
 def _base_binds() -> list[str]:
-    """restricted / unrestricted 共通の OS レベルバインド."""
+    """全モード共通の OS レベルバインド."""
     return [
         "--ro-bind", "/etc", "/etc",
         "--ro-bind", "/usr", "/usr",
@@ -183,7 +183,7 @@ def _cred_env() -> list[str]:
 
 # --- モード別 bwrap 引数 ------------------------------------------------------
 
-def build_restricted_args(
+def build_netns_args(
     work: str,
     proxy_port: int,
     profile_binds: list[str],
@@ -225,7 +225,7 @@ def build_restricted_args(
     ]
 
 
-def build_unrestricted_args(
+def build_host_network_args(
     work: str,
     profile_binds: list[str],
     env_file_args: list[str],
@@ -265,7 +265,7 @@ def run(
     work = os.getcwd()
 
     profile = resolve_profile(sandbox_profile)
-    mode = resolve_mode(profile)
+    network_protected = uses_network_protection(profile)
     profile_binds = resolve_extra_binds(profile)
 
     if command is None:
@@ -274,10 +274,10 @@ def run(
     env_file_args = load_env_files(env_files or [])
     cred_args = _cred_env()
 
-    if mode == "restricted":
+    if network_protected:
         ensure_netns()
-        exec_args = build_restricted_args(work, proxy_port, profile_binds, env_file_args, cred_args, command)
+        exec_args = build_netns_args(work, proxy_port, profile_binds, env_file_args, cred_args, command)
     else:
-        exec_args = build_unrestricted_args(work, profile_binds, env_file_args, cred_args, command)
+        exec_args = build_host_network_args(work, profile_binds, env_file_args, cred_args, command)
 
     os.execvp(exec_args[0], exec_args)
