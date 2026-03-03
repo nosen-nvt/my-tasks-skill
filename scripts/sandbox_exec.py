@@ -3,8 +3,13 @@
 import fcntl
 import json
 import os
+import signal
+import socket
 import subprocess
+import sys
 import tempfile
+import threading
+import uuid
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -178,6 +183,91 @@ def _cred_env() -> list[str]:
     return args
 
 
+# --- 組み込み Credential Broker -----------------------------------------------
+
+class EmbeddedCredBroker:
+    """CRED_TOKEN 未設定時に自動起動するフォールバック Credential Broker."""
+
+    def __init__(self, sock_path: str, token: str, allowed: list[str] | str):
+        self._sock_path = sock_path
+        self._token = token
+        self._allowed = allowed
+        self._running = False
+        self._server_sock: socket.socket | None = None
+
+    def start(self) -> None:
+        os.makedirs(os.path.dirname(self._sock_path), exist_ok=True)
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(self._sock_path)
+        os.chmod(self._sock_path, 0o600)
+        srv.listen(4)
+        srv.settimeout(1.0)
+        self._server_sock = srv
+        self._running = True
+        t = threading.Thread(target=self._serve, daemon=True)
+        t.start()
+
+    def _serve(self) -> None:
+        srv = self._server_sock
+        assert srv is not None
+        while self._running:
+            try:
+                conn, _ = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+
+    def _handle(self, conn: socket.socket) -> None:
+        try:
+            data = b""
+            while b"\n" not in data:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            if not data:
+                return
+            request = json.loads(data.decode())
+            token = request.get("token", "")
+            entry = request.get("entry", "")
+            response = self._process(token, entry)
+            conn.sendall(json.dumps(response, ensure_ascii=False).encode() + b"\n")
+        except Exception:
+            try:
+                conn.sendall(json.dumps({"ok": False, "error": "internal error"}).encode() + b"\n")
+            except Exception:
+                pass
+        finally:
+            conn.close()
+
+    def _process(self, token: str, entry: str) -> dict:
+        if not token or token != self._token:
+            return {"ok": False, "error": "invalid token"}
+        if self._allowed != "*" and entry not in self._allowed:
+            return {"ok": False, "error": f"entry not allowed: {entry}"}
+        try:
+            proc = subprocess.run(
+                ["/usr/bin/pass", "show", entry],
+                capture_output=True,
+            )
+            if proc.returncode != 0:
+                return {"ok": False, "error": "credential retrieval failed"}
+            return {"ok": True, "value": proc.stdout.decode()}
+        except Exception:
+            return {"ok": False, "error": "credential retrieval failed"}
+
+    def stop(self) -> None:
+        self._running = False
+        if self._server_sock:
+            self._server_sock.close()
+        try:
+            os.unlink(self._sock_path)
+        except FileNotFoundError:
+            pass
+
+
 # --- モード別 bwrap 引数 ------------------------------------------------------
 
 def build_netns_args(
@@ -271,10 +361,28 @@ def run(
     env_file_args = load_env_files(env_files or [])
     cred_args = _cred_env()
 
+    broker = None
+    if not os.environ.get("CRED_TOKEN"):
+        allowed = profile.get("allowed_credentials", "*")
+        if allowed:
+            sock_path = f"/run/user/{UID}/my-tasks-dispatch/cred-broker-{os.getpid()}.sock"
+            token = uuid.uuid4().hex
+            broker = EmbeddedCredBroker(sock_path, token, allowed)
+            broker.start()
+            cred_args = ["--setenv", "CRED_TOKEN", token, "--setenv", "CRED_BROKER_SOCK", sock_path]
+
     if network_protected:
         ensure_netns()
         exec_args = build_netns_args(work, proxy_port, profile_binds, env_file_args, cred_args, command)
     else:
         exec_args = build_host_network_args(work, profile_binds, env_file_args, cred_args, command)
 
-    os.execvp(exec_args[0], exec_args)
+    if broker:
+        proc = subprocess.Popen(exec_args)
+        signal.signal(signal.SIGTERM, lambda *_: proc.terminate())
+        signal.signal(signal.SIGINT, lambda *_: proc.send_signal(signal.SIGINT))
+        proc.wait()
+        broker.stop()
+        sys.exit(proc.returncode)
+    else:
+        os.execvp(exec_args[0], exec_args)
