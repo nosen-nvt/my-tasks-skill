@@ -34,8 +34,9 @@ ensure_netns() {
 WORK=$(pwd)
 MODE="restricted"
 PROXY_PORT=3128
+SANDBOX_PROFILE=""
 
-# 引数解析: --mode, --env-file, --proxy-port を抽出し、残りをコマンドとして扱う
+# 引数解析: --mode, --env-file, --proxy-port, --sandbox-profile を抽出し、残りをコマンドとして扱う
 ENV_FILES=()
 REMAINING_ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -64,12 +65,60 @@ while [[ $# -gt 0 ]]; do
       PROXY_PORT="$2"
       shift 2
       ;;
+    --sandbox-profile)
+      if [[ $# -lt 2 ]]; then
+        echo "エラー: --sandbox-profile にはファイルパスが必要です" >&2
+        exit 1
+      fi
+      SANDBOX_PROFILE="$2"
+      shift 2
+      ;;
     *)
       REMAINING_ARGS+=("$1")
       shift
       ;;
   esac
 done
+
+# --sandbox-profile 指定時: JSON からモードと extra_binds を解決
+EXTRA_BIND_ARGS=()
+if [[ -n "$SANDBOX_PROFILE" ]]; then
+  if [[ ! -f "$SANDBOX_PROFILE" ]]; then
+    echo "エラー: サンドボックスプロファイルが見つかりません: $SANDBOX_PROFILE" >&2
+    exit 1
+  fi
+
+  # proxy_profile の有無で restricted/unrestricted を判定
+  PROFILE_PROXY=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('proxy_profile') or '')" "$SANDBOX_PROFILE")
+  if [[ -n "$PROFILE_PROXY" ]]; then
+    MODE="restricted"
+  else
+    MODE="unrestricted"
+  fi
+
+  # extra_binds を bwrap 引数に変換
+  EXTRA_BIND_ARGS_STR=$(python3 -c "
+import json, sys, os
+d = json.load(open(sys.argv[1]))
+home = os.environ['HOME']
+for bind in d.get('extra_binds', []):
+    src = bind['source'].replace('\$HOME', home)
+    tgt = bind['target'].replace('\$HOME', home)
+    mode = bind.get('mode', 'rw')
+    if mode == 'ro':
+        print(f'--ro-bind {src} {tgt}')
+    else:
+        print(f'--bind {src} {tgt}')
+" "$SANDBOX_PROFILE")
+
+  # 改行区切りの文字列を配列に変換
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    # スペース区切りで配列に追加
+    read -ra parts <<< "$line"
+    EXTRA_BIND_ARGS+=("${parts[@]}")
+  done <<< "$EXTRA_BIND_ARGS_STR"
+fi
 
 # モードバリデーション
 if [[ "$MODE" != "restricted" && "$MODE" != "unrestricted" ]]; then
@@ -135,6 +184,19 @@ if [[ "$MODE" == "restricted" ]]; then
   echo "nameserver 10.200.1.1" > "$RESOLV_CONF"
   trap "rm -f '$RESOLV_CONF'" EXIT
 
+  # --sandbox-profile 指定時は extra_binds を使用、未指定時はハードコードバインド
+  if [[ -n "$SANDBOX_PROFILE" ]]; then
+    PROFILE_BINDS=("${EXTRA_BIND_ARGS[@]}")
+  else
+    PROFILE_BINDS=(
+      --bind $HOME/.nuget $HOME/.nuget
+      --bind $HOME/.dotnet $HOME/.dotnet
+      --bind $HOME/.azcopy $HOME/.azcopy
+      --bind $HOME/.cache $HOME/.cache
+      --bind $HOME/go $HOME/go
+    )
+  fi
+
   sudo ip netns exec ai-ns \
     sudo -u "$USER" \
     bwrap --unshare-pid --unshare-ipc --unshare-uts --die-with-parent \
@@ -159,11 +221,7 @@ if [[ "$MODE" == "restricted" ]]; then
       --bind $HOME/.claude/ $HOME/.claude \
       --bind $WORK $WORK \
       --bind $HOME/.local/share/my-tasks $HOME/.local/share/my-tasks \
-      --bind $HOME/.nuget $HOME/.nuget \
-      --bind $HOME/.dotnet $HOME/.dotnet \
-      --bind $HOME/.azcopy $HOME/.azcopy \
-      --bind $HOME/.cache $HOME/.cache \
-      --bind $HOME/go $HOME/go \
+      "${PROFILE_BINDS[@]}" \
       --chdir $WORK \
       --clearenv \
       "${ENV_FILE_ARGS[@]}" \
@@ -183,6 +241,21 @@ if [[ "$MODE" == "restricted" ]]; then
 
 elif [[ "$MODE" == "unrestricted" ]]; then
   # --- unrestricted モード: netns なし、最小バインドの bwrap ---
+
+  # --sandbox-profile 指定時は extra_binds を使用、未指定時はハードコードバインド
+  if [[ -n "$SANDBOX_PROFILE" ]]; then
+    PROFILE_BINDS=("${EXTRA_BIND_ARGS[@]}")
+  else
+    PROFILE_BINDS=(
+      --bind $HOME/.local $HOME/.local
+      --bind $HOME/.claude.json $HOME/.claude.json
+      --bind $HOME/.cache $HOME/.cache
+      --ro-bind $HOME/.volta $HOME/.volta
+      --ro-bind /opt/google/chrome /opt/google/chrome
+      --bind $HOME/go $HOME/go
+    )
+  fi
+
   bwrap --unshare-pid --unshare-ipc --unshare-uts --die-with-parent \
     --ro-bind /etc /etc \
     --ro-bind /usr /usr \
@@ -198,19 +271,14 @@ elif [[ "$MODE" == "unrestricted" ]]; then
     "${DISPATCH_BIND[@]}" \
     "${COMM_BIND[@]}" \
     "${PLAYWRIGHT_BIND[@]}" \
-    --bind $HOME/.local $HOME/.local \
     --bind $HOME/.claude $HOME/.claude \
     --ro-bind $HOME/src/github.com/nosen-nvt/my-tasks-skill $HOME/src/github.com/nosen-nvt/my-tasks-skill \
-    --bind $HOME/.claude.json $HOME/.claude.json \
     --bind $WORK $WORK \
-    --bind $HOME/.cache $HOME/.cache \
-    --ro-bind $HOME/.volta $HOME/.volta \
-    --ro-bind /opt/google/chrome /opt/google/chrome \
+    "${PROFILE_BINDS[@]}" \
     --chdir $WORK \
     --clearenv \
     "${ENV_FILE_ARGS[@]}" \
     "${CRED_ENV_ARGS[@]}" \
-    --bind $HOME/go $HOME/go \
     --setenv PATH "/usr/bin:$HOME/.local/bin:$HOME/.volta/bin:$HOME/go/bin" \
     --setenv HOME $HOME \
     --setenv TERM "xterm-256color" \

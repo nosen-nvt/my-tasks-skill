@@ -1,0 +1,32 @@
+{
+  "profile_id": "restricted-default",
+  "proxy_profile": "default",
+  "allowed_credentials": "*",
+  "extra_binds": [
+    {
+      "source": "$HOME/.nuget",
+      "target": "$HOME/.nuget",
+      "mode": "rw"
+    },
+    {
+      "source": "$HOME/.dotnet",
+      "target": "$HOME/.dotnet",
+      "mode": "rw"
+    },
+    {
+      "source": "$HOME/.azcopy",
+      "target": "$HOME/.azcopy",
+      "mode": "rw"
+    },
+    {
+      "source": "$HOME/.cache",
+      "target": "$HOME/.cache",
+      "mode": "rw"
+    },
+    {
+      "source": "$HOME/go",
+      "target": "$HOME/go",
+      "mode": "rw"
+    }
+  ]
+}

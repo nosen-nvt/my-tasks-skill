@@ -97,7 +97,7 @@ queued ──→ running ──→ done
 3. スロットに空きがあれば `execute_job()` で即実行
 4. スロット満杯なら queue に追加し `queued` で応答
 5. `execute_job()`:
-   - プロジェクト設定から `sandbox_mode` と `working_directory` を取得
+   - プロジェクト設定から `sandbox_profile` (または従来の `sandbox_mode`) と `working_directory` を取得
    - `$XDG_RUNTIME_DIR/my-tasks-dispatch/{dispatch_id}.log` にログファイルを作成
    - `asyncio.create_subprocess_exec("sandbox", "--mode", mode, "claude", "-p", prompt, ...)` でジョブ実行（stdout/stderr をログファイルに出力）
    - `proc.wait()` で完了検知
@@ -110,7 +110,7 @@ queued ──→ running ──→ done
 対話的セッションは引き続き tmux を使用する。ジョブ管理の対象外。
 
 1. クライアントから `open` コマンドを受信
-2. `projects/{project_id}.json` から `sandbox_mode` と `working_directory` を取得
+2. `projects/{project_id}.json` から `sandbox_profile` (または従来の `sandbox_mode`) と `working_directory` を取得
 3. 指定された tmux セッション（またはデフォルトセッション）にウィンドウを作成
 4. ウィンドウ内で `sandbox --mode {sandbox_mode} claude --permission-mode bypassPermissions` を実行
 5. ウィンドウ名: `{project_id}-interactive`
@@ -308,7 +308,7 @@ dispatcher.sock と同じディレクトリに配置。sandbox で既に bind-mo
 
 ### ライフサイクル
 
-1. **ジョブ開始**: `allowed_credentials` が非空の場合、`uuid4().hex` でトークン生成 → `CredentialBroker.register(token, entries)`
+1. **ジョブ開始**: `allowed_credentials` が設定されている場合、`uuid4().hex` でトークン生成 → `CredentialBroker.register(token, entries)`
 2. **ジョブ実行中**: 環境変数 `CRED_TOKEN` と `CRED_BROKER_SOCK` がサンドボックスに渡される
 3. **認証情報取得**: サンドボックス内で `pass show <entry>` → pass-shim → cred-get → broker socket → `/usr/bin/pass show <entry>` (ホスト側)
 4. **ジョブ終了**: `CredentialBroker.revoke(token)` でトークン無効化
@@ -333,7 +333,7 @@ pass jira/api-token
 ```json
 {
   "project_id": "ubs-mgmt-tool",
-  "allowed_credentials": ["jira/api-token", "bitbucket/app-password"]
+  "allowed_credentials": "*"
 }
 ```
 

@@ -37,6 +37,7 @@ DEFAULT_MAX_SLOTS = 3
 DEFAULT_REPO = "~/.local/share/my-tasks"
 DEFAULT_SESSION_NAME = "dispatch"
 DEFAULT_PROXY_PROFILES_DIR = "~/.local/share/my-tasks/proxy-profiles"
+DEFAULT_SANDBOX_PROFILES_DIR = "~/.local/share/my-tasks/sandbox-profiles"
 
 SOCKET_DIR_NAME = "my-tasks-dispatch"
 SOCKET_FILE_NAME = "dispatcher.sock"
@@ -83,6 +84,20 @@ def load_proxy_profile(profile_id: str, profiles_dir: str = DEFAULT_PROXY_PROFIL
     return load_json(profiles_path / f"{profile_id}.json")
 
 
+
+def load_sandbox_profile(profile_id: str, profiles_dir: str = DEFAULT_SANDBOX_PROFILES_DIR) -> dict | None:
+    profiles_path = Path(profiles_dir).expanduser().resolve()
+    return load_json(profiles_path / f"{profile_id}.json")
+
+
+def resolve_sandbox_profile(project: dict) -> dict | None:
+    """プロジェクトの sandbox_profile からプロファイルを解決する."""
+    profile_id = project.get("sandbox_profile")
+    if not profile_id:
+        return None
+    return load_sandbox_profile(profile_id)
+
+
 def get_proxy_port(project: dict) -> int:
     """プロジェクトの proxy_profile からポート番号を取得する."""
     profile_id = project.get("proxy_profile", "default")
@@ -104,11 +119,14 @@ class CredentialBroker:
     """ジョブ単位でスコープされた認証情報アクセスを提供するブローカー。"""
 
     def __init__(self):
-        self._registry: dict[str, list[str]] = {}  # token → allowed entries
+        self._registry: dict[str, list[str] | str] = {}  # token → allowed entries
 
-    def register(self, token: str, allowed_entries: list[str]) -> None:
+    def register(self, token: str, allowed_entries: list[str] | str) -> None:
         self._registry[token] = allowed_entries
-        log.info(f"Credential broker: registered token {token[:8]}... ({len(allowed_entries)} entries)")
+        if allowed_entries == "*":
+            log.info(f"Credential broker: registered token {token[:8]}... (all entries)")
+        else:
+            log.info(f"Credential broker: registered token {token[:8]}... ({len(allowed_entries)} entries)")
 
     def revoke(self, token: str) -> None:
         if token in self._registry:
@@ -146,7 +164,7 @@ class CredentialBroker:
             return {"ok": False, "error": "invalid token"}
 
         allowed = self._registry[token]
-        if entry not in allowed:
+        if allowed != "*" and entry not in allowed:
             log.warning(f"Credential broker: entry not allowed: {entry} (token {token[:8]}...)")
             return {"ok": False, "error": f"entry not allowed: {entry}"}
 
@@ -180,7 +198,8 @@ class Job:
     working_dir: str
     sandbox_mode: str
     proxy_port: int = 3128
-    allowed_credentials: list[str] = field(default_factory=list)
+    allowed_credentials: list[str] | str = field(default_factory=list)
+    sandbox_profile_path: str = ""
     status: str = "queued"
     pid: int | None = None
     exit_code: int | None = None
@@ -293,9 +312,29 @@ class DispatchServer:
         if not Path(working_dir).is_dir():
             return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
 
-        sandbox_mode = project.get("sandbox_mode", "restricted")
-        allowed_credentials = project.get("allowed_credentials", [])
-        proxy_port = get_proxy_port(project)
+        sandbox_profile_data = resolve_sandbox_profile(project)
+        if sandbox_profile_data:
+            proxy_profile_id = sandbox_profile_data.get("proxy_profile")
+            if proxy_profile_id:
+                sandbox_mode = "restricted"
+                profile = load_proxy_profile(proxy_profile_id)
+                proxy_port = profile["port"] if profile and "port" in profile else 3128
+            else:
+                sandbox_mode = "unrestricted"
+                proxy_port = 3128
+            allowed_credentials = sandbox_profile_data.get("allowed_credentials", "*")
+            sandbox_profile_path = str(
+                Path(DEFAULT_SANDBOX_PROFILES_DIR).expanduser().resolve()
+                / f"{project.get('sandbox_profile')}.json"
+            )
+        else:
+            sandbox_mode = project.get("sandbox_mode", "restricted")
+            allowed_credentials = project.get("allowed_credentials", [])
+            if not allowed_credentials:
+                allowed_credentials = "*"
+            proxy_port = get_proxy_port(project)
+            sandbox_profile_path = ""
+
         dispatch_id = self.generate_dispatch_id(project_id)
 
         job = Job(
@@ -307,6 +346,7 @@ class DispatchServer:
             sandbox_mode=sandbox_mode,
             proxy_port=proxy_port,
             allowed_credentials=allowed_credentials,
+            sandbox_profile_path=sandbox_profile_path,
         )
         self.jobs[dispatch_id] = job
 
@@ -336,16 +376,35 @@ class DispatchServer:
         if not Path(working_dir).is_dir():
             return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
 
-        sandbox_mode = project.get("sandbox_mode", "restricted")
+        sandbox_profile_data = resolve_sandbox_profile(project)
+        if sandbox_profile_data:
+            proxy_profile_id = sandbox_profile_data.get("proxy_profile")
+            if proxy_profile_id:
+                sandbox_mode = "restricted"
+                profile = load_proxy_profile(proxy_profile_id)
+                proxy_port = profile["port"] if profile and "port" in profile else 3128
+            else:
+                sandbox_mode = "unrestricted"
+                proxy_port = 3128
+            sandbox_profile_path = str(
+                Path(DEFAULT_SANDBOX_PROFILES_DIR).expanduser().resolve()
+                / f"{project.get('sandbox_profile')}.json"
+            )
+        else:
+            sandbox_mode = project.get("sandbox_mode", "restricted")
+            proxy_port = get_proxy_port(project)
+            sandbox_profile_path = ""
 
         # tmux セッション決定
         session_name, is_caller = _detect_tmux_session(session)
         if not _ensure_tmux_session(session_name, is_caller):
             return {"ok": False, "error": f"tmux session '{session_name}' not available"}
 
-        proxy_port = get_proxy_port(project)
         window_name = f"{project_id}-interactive"
-        cmd = f"cd '{working_dir}' && sandbox --mode {sandbox_mode} --proxy-port {proxy_port} claude --permission-mode bypassPermissions"
+        if sandbox_profile_path:
+            cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_path}' --proxy-port {proxy_port} claude --permission-mode bypassPermissions"
+        else:
+            cmd = f"cd '{working_dir}' && sandbox --mode {sandbox_mode} --proxy-port {proxy_port} claude --permission-mode bypassPermissions"
 
         result = subprocess.run(
             ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, "bash", "-c", cmd],
@@ -430,9 +489,21 @@ class DispatchServer:
                 env["CRED_BROKER_SOCK"] = get_cred_broker_socket_path()
 
             log_file = open(log_path, "w", encoding="utf-8")
+            if job.sandbox_profile_path:
+                sandbox_args = [
+                    "sandbox",
+                    "--sandbox-profile", job.sandbox_profile_path,
+                    "--proxy-port", str(job.proxy_port),
+                ]
+            else:
+                sandbox_args = [
+                    "sandbox",
+                    "--mode", job.sandbox_mode,
+                    "--proxy-port", str(job.proxy_port),
+                ]
+
             proc = await asyncio.create_subprocess_exec(
-                "sandbox", "--mode", job.sandbox_mode,
-                "--proxy-port", str(job.proxy_port),
+                *sandbox_args,
                 "claude", "-p", job.prompt,
                 "--append-system-prompt", system_prompt,
                 cwd=job.working_dir,
@@ -508,8 +579,14 @@ class DispatchServer:
 
         cred_desc = ""
         if job.allowed_credentials:
-            entries = "\n".join(f"  - {e}" for e in job.allowed_credentials)
-            cred_desc = f"""
+            if job.allowed_credentials == "*":
+                cred_desc = """
+
+認証情報:
+- `cred-get <entry>` または `pass show <entry>` で全ての認証情報を取得できます"""
+            else:
+                entries = "\n".join(f"  - {e}" for e in job.allowed_credentials)
+                cred_desc = f"""
 
 認証情報:
 - `cred-get <entry>` または `pass show <entry>` で以下の認証情報を取得できます:

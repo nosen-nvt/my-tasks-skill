@@ -233,8 +233,9 @@ deferred
 | `description` | string | No | プロジェクトの説明 |
 | `repositories` | array | No | 関連するリポジトリURLの配列 |
 | `working_directory` | string | No | ディスパッチャーが使用する作業ディレクトリ（未設定の場合 manual プロジェクト扱い） |
-| `sandbox_mode` | string | No | サンドボックスモード（`restricted` or `unrestricted`、デフォルト: `restricted`） |
-| `allowed_credentials` | array | No | Credential Broker 経由でアクセス可能な `pass` エントリパスの配列（デフォルト: `[]`） |
+| `sandbox_profile` | string | No | サンドボックスプロファイル ID（`sandbox-profiles/{id}.json` を参照） |
+| `sandbox_mode` | string | No | **(非推奨: sandbox_profile を使用)** サンドボックスモード（`restricted` or `unrestricted`、デフォルト: `restricted`） |
+| `allowed_credentials` | array | No | **(非推奨: sandbox_profile を使用)** Credential Broker 経由でアクセス可能な `pass` エントリパスの配列（デフォルト: `[]`） |
 
 ### 例
 
@@ -247,10 +248,65 @@ deferred
     "https://github.com/example/ubs-mgmt-tool"
   ],
   "working_directory": "/home/nosen/src/github.com/example/ubs-mgmt-tool",
-  "sandbox_mode": "restricted",
-  "allowed_credentials": ["jira/api-token", "bitbucket/app-password"]
+  "sandbox_profile": "restricted-default"
 }
 ```
+
+
+## 4.1. サンドボックスプロファイル (`sandbox-profiles/{profile_id}.json`)
+
+サンドボックスの構成（FS バインド、Proxy プロファイル、認証情報スコープ）を定義する。
+
+### スキーマ
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `profile_id` | string | Yes | プロファイル識別子（ファイル名と一致） |
+| `proxy_profile` | string or null | Yes | 参照する Proxy プロファイル ID。設定ありの場合は restricted モード。`null` の場合は unrestricted モード |
+| `allowed_credentials` | string or array | Yes | `"*"`（全 pass エントリ許可）or エントリパスの配列 |
+| `extra_binds` | array | No | ベースマウントに追加する bind mount のリスト |
+
+### `extra_binds` 要素
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `source` | string | Yes | ソースパス（`$HOME` 変数使用可） |
+| `target` | string | Yes | ターゲットパス（`$HOME` 変数使用可） |
+| `mode` | string | No | `"rw"`（デフォルト）or `"ro"` |
+
+### 例
+
+```json
+{
+  "profile_id": "restricted-default",
+  "proxy_profile": "default",
+  "allowed_credentials": "*",
+  "extra_binds": [
+    {"source": "$HOME/.nuget", "target": "$HOME/.nuget", "mode": "rw"},
+    {"source": "$HOME/.dotnet", "target": "$HOME/.dotnet", "mode": "rw"},
+    {"source": "$HOME/.azcopy", "target": "$HOME/.azcopy", "mode": "rw"},
+    {"source": "$HOME/.cache", "target": "$HOME/.cache", "mode": "rw"},
+    {"source": "$HOME/go", "target": "$HOME/go", "mode": "rw"}
+  ]
+}
+```
+
+```json
+{
+  "profile_id": "unrestricted-browser",
+  "proxy_profile": null,
+  "allowed_credentials": "*",
+  "extra_binds": [
+    {"source": "$HOME/.local", "target": "$HOME/.local", "mode": "rw"},
+    {"source": "$HOME/.claude.json", "target": "$HOME/.claude.json", "mode": "rw"},
+    {"source": "$HOME/.cache", "target": "$HOME/.cache", "mode": "rw"},
+    {"source": "$HOME/.volta", "target": "$HOME/.volta", "mode": "ro"},
+    {"source": "/opt/google/chrome", "target": "/opt/google/chrome", "mode": "ro"},
+    {"source": "$HOME/go", "target": "$HOME/go", "mode": "rw"}
+  ]
+}
+```
+
 
 ---
 

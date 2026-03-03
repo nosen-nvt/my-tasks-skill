@@ -1,0 +1,37 @@
+{
+  "profile_id": "unrestricted-browser",
+  "proxy_profile": null,
+  "allowed_credentials": "*",
+  "extra_binds": [
+    {
+      "source": "$HOME/.local",
+      "target": "$HOME/.local",
+      "mode": "rw"
+    },
+    {
+      "source": "$HOME/.claude.json",
+      "target": "$HOME/.claude.json",
+      "mode": "rw"
+    },
+    {
+      "source": "$HOME/.cache",
+      "target": "$HOME/.cache",
+      "mode": "rw"
+    },
+    {
+      "source": "$HOME/.volta",
+      "target": "$HOME/.volta",
+      "mode": "ro"
+    },
+    {
+      "source": "/opt/google/chrome",
+      "target": "/opt/google/chrome",
+      "mode": "ro"
+    },
+    {
+      "source": "$HOME/go",
+      "target": "$HOME/go",
+      "mode": "rw"
+    }
+  ]
+}
