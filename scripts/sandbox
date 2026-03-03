@@ -5,15 +5,20 @@
   sandbox [オプション...] [-- コマンド [引数...]]
 
 オプション:
+  --project PROJECT_ID            プロジェクトID (プロジェクトのディレクトリ・プロファイルで実行)
   --proxy-port PORT               プロキシポート番号 (デフォルト: 3128)
   --sandbox-profile NAME|PATH     サンドボックスプロファイル (デフォルト: default)
   --env-file PATH                 環境変数ファイル (複数指定可)
 """
 
 import argparse
+import json
 import sys
+from pathlib import Path
 
 import sandbox_exec
+
+PROJECTS_DIR = Path("~/.local/share/my-tasks/projects").expanduser()
 
 
 def main() -> None:
@@ -21,18 +26,39 @@ def main() -> None:
         description="bwrap + netns によるサンドボックス実行環境",
         usage="sandbox [オプション...] [-- コマンド [引数...]]",
     )
+    parser.add_argument("--project", default=None,
+                        help="プロジェクトID (プロジェクトのディレクトリ・プロファイルで実行)")
     parser.add_argument("--proxy-port", type=int, default=3128)
-    parser.add_argument("--sandbox-profile", default="default")
+    parser.add_argument("--sandbox-profile", default=None)
     parser.add_argument("--env-file", action="append", default=[])
     parser.add_argument("command", nargs="*")
     args = parser.parse_args()
 
+    working_dir = None
+    sandbox_profile = args.sandbox_profile  # None or 明示値
+
+    if args.project:
+        project_file = PROJECTS_DIR / f"{args.project}.json"
+        if not project_file.is_file():
+            sys.exit(f"エラー: プロジェクトが見つかりません: {args.project}")
+        with open(project_file, encoding="utf-8") as f:
+            project = json.load(f)
+        working_dir = project.get("working_directory", "")
+        if not working_dir or not Path(working_dir).is_dir():
+            sys.exit(f"エラー: プロジェクトの working_directory が無効です: {working_dir!r}")
+        if sandbox_profile is None:
+            sandbox_profile = project.get("sandbox_profile", "default")
+
+    if sandbox_profile is None:
+        sandbox_profile = "default"
+
     try:
         sandbox_exec.run(
             proxy_port=args.proxy_port,
-            sandbox_profile=args.sandbox_profile,
+            sandbox_profile=sandbox_profile,
             env_files=args.env_file,
             command=args.command or None,
+            working_dir=working_dir,
         )
     except FileNotFoundError as e:
         sys.exit(f"エラー: {e}")

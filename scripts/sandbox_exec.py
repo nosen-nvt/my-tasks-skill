@@ -347,9 +347,10 @@ def run(
     sandbox_profile: str = "default",
     env_files: list[str] | None = None,
     command: list[str] | None = None,
+    working_dir: str | None = None,
 ) -> None:
     """サンドボックスを構築し、exec で置き換える."""
-    work = os.getcwd()
+    work = working_dir or os.getcwd()
 
     profile = resolve_profile(sandbox_profile)
     network_protected = uses_network_protection(profile)
