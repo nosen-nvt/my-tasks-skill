@@ -40,7 +40,7 @@ JSON over Unix ドメインソケット。改行区切り（1行1メッセージ
 
 | コマンド | フィールド | 説明 |
 |---------|-----------|------|
-| `run` | `task_id?`, `project_id`, `prompt` | ジョブを実行（sandbox_mode はプロジェクト設定から自動解決） |
+| `run` | `task_id?`, `project_id`, `prompt` | ジョブを実行（sandbox_profile はプロジェクト設定から自動解決） |
 | `open` | `project_id`, `session?` | 対話的セッションを tmux で開く |
 | `status` | | 全ジョブのステータスを返す |
 | `cancel` | `dispatch_id` | キュー内ジョブを取消 |
@@ -97,9 +97,9 @@ queued ──→ running ──→ done
 3. スロットに空きがあれば `execute_job()` で即実行
 4. スロット満杯なら queue に追加し `queued` で応答
 5. `execute_job()`:
-   - プロジェクト設定から `sandbox_profile` (または従来の `sandbox_mode`) と `working_directory` を取得
+   - プロジェクト設定から `sandbox_profile`（デフォルト: `"default"`）と `working_directory` を取得
    - `$XDG_RUNTIME_DIR/my-tasks-dispatch/{dispatch_id}.log` にログファイルを作成
-   - `asyncio.create_subprocess_exec("sandbox", "--mode", mode, "claude", "-p", prompt, ...)` でジョブ実行（stdout/stderr をログファイルに出力）
+   - `asyncio.create_subprocess_exec("sandbox", "--sandbox-profile", profile, "claude", "-p", prompt, ...)` でジョブ実行（stdout/stderr をログファイルに出力）
    - `proc.wait()` で完了検知
    - `done` or `failed` に更新
    - waiter に通知
@@ -110,9 +110,9 @@ queued ──→ running ──→ done
 対話的セッションは引き続き tmux を使用する。ジョブ管理の対象外。
 
 1. クライアントから `open` コマンドを受信
-2. `projects/{project_id}.json` から `sandbox_profile` (または従来の `sandbox_mode`) と `working_directory` を取得
+2. `projects/{project_id}.json` から `sandbox_profile`（デフォルト: `"default"`）と `working_directory` を取得
 3. 指定された tmux セッション（またはデフォルトセッション）にウィンドウを作成
-4. ウィンドウ内で `sandbox --mode {sandbox_mode} claude --permission-mode bypassPermissions` を実行
+4. ウィンドウ内で `sandbox --sandbox-profile {profile} claude --permission-mode bypassPermissions` を実行
 5. ウィンドウ名: `{project_id}-interactive`
 
 ### `log` コマンド
@@ -328,11 +328,12 @@ pass jira/api-token
 
 ### プロジェクト設定
 
-`projects/{project_id}.json` の `allowed_credentials` フィールドで、そのプロジェクトのジョブがアクセス可能な `pass` エントリを指定する。
+サンドボックスプロファイルの `allowed_credentials` フィールドで、そのプロジェクトのジョブがアクセス可能な `pass` エントリを指定する。
 
 ```json
 {
-  "project_id": "ubs-mgmt-tool",
+  "profile_id": "restricted-default",
+  "proxy_profile": "dev",
   "allowed_credentials": "*"
 }
 ```

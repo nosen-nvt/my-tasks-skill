@@ -233,9 +233,7 @@ deferred
 | `description` | string | No | プロジェクトの説明 |
 | `repositories` | array | No | 関連するリポジトリURLの配列 |
 | `working_directory` | string | No | ディスパッチャーが使用する作業ディレクトリ（未設定の場合 manual プロジェクト扱い） |
-| `sandbox_profile` | string | No | サンドボックスプロファイル ID（`sandbox-profiles/{id}.json` を参照） |
-| `sandbox_mode` | string | No | **(非推奨: sandbox_profile を使用)** サンドボックスモード（`restricted` or `unrestricted`、デフォルト: `restricted`） |
-| `allowed_credentials` | array | No | **(非推奨: sandbox_profile を使用)** Credential Broker 経由でアクセス可能な `pass` エントリパスの配列（デフォルト: `[]`） |
+| `sandbox_profile` | string | No | サンドボックスプロファイル ID（デフォルト: `"default"`）。ファイルベース（`sandbox-profiles/{id}.json`）または組み込みプロファイル（`default`, `unrestricted`）を参照 |
 
 ### 例
 
@@ -253,9 +251,20 @@ deferred
 ```
 
 
-## 4.1. サンドボックスプロファイル (`sandbox-profiles/{profile_id}.json`)
+## 4.1. サンドボックスプロファイル
 
 サンドボックスの構成（FS バインド、Proxy プロファイル、認証情報スコープ）を定義する。
+
+### 組み込みプロファイル
+
+コード内に定義された組み込みプロファイル。ファイルベースのプロファイルが見つからない場合に使用される。
+
+| ID | proxy_profile | 説明 |
+|---|---|---|
+| `default` | `"dev"` | restricted モード。netns + proxy 経由。通常のコーディングタスク用 |
+| `unrestricted` | `null` | unrestricted モード。ホストネットワーク直接。ブラウザオートメーション等 |
+
+### ファイルベースプロファイル (`sandbox-profiles/{profile_id}.json`)
 
 ### スキーマ
 

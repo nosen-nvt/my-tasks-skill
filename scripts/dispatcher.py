@@ -85,26 +85,36 @@ def load_proxy_profile(profile_id: str, profiles_dir: str = DEFAULT_PROXY_PROFIL
 
 
 
+BUILTIN_SANDBOX_PROFILES: dict[str, dict] = {
+    "default": {
+        "profile_id": "default",
+        "proxy_profile": "dev",
+        "allowed_credentials": "*",
+    },
+    "unrestricted": {
+        "profile_id": "unrestricted",
+        "proxy_profile": None,
+        "allowed_credentials": "*",
+    },
+}
+
+
 def load_sandbox_profile(profile_id: str, profiles_dir: str = DEFAULT_SANDBOX_PROFILES_DIR) -> dict | None:
+    """サンドボックスプロファイルを解決する。ファイル → 組み込み の順。"""
     profiles_path = Path(profiles_dir).expanduser().resolve()
-    return load_json(profiles_path / f"{profile_id}.json")
+    result = load_json(profiles_path / f"{profile_id}.json")
+    if result:
+        return result
+    return BUILTIN_SANDBOX_PROFILES.get(profile_id)
 
 
-def resolve_sandbox_profile(project: dict) -> dict | None:
-    """プロジェクトの sandbox_profile からプロファイルを解決する."""
-    profile_id = project.get("sandbox_profile")
-    if not profile_id:
-        return None
-    return load_sandbox_profile(profile_id)
-
-
-def get_proxy_port(project: dict) -> int:
-    """プロジェクトの proxy_profile からポート番号を取得する."""
-    profile_id = project.get("proxy_profile", "default")
-    profile = load_proxy_profile(profile_id)
-    if profile and "port" in profile:
-        return profile["port"]
-    return 3128
+def _resolve_sandbox_profile_arg(profile_id: str, profiles_dir: str = DEFAULT_SANDBOX_PROFILES_DIR) -> str:
+    """sandbox コマンドに渡す引数を決定する。ファイル存在時はパス、なければ名前。"""
+    profiles_path = Path(profiles_dir).expanduser().resolve()
+    file_path = profiles_path / f"{profile_id}.json"
+    if file_path.is_file():
+        return str(file_path)
+    return profile_id
 
 
 def is_inside_sandbox() -> bool:
@@ -196,10 +206,10 @@ class Job:
     task_id: str | None
     prompt: str
     working_dir: str
-    sandbox_mode: str
+    sandbox_profile_arg: str = "default"
+    sandbox_mode: str = "restricted"
     proxy_port: int = 3128
     allowed_credentials: list[str] | str = field(default_factory=list)
-    sandbox_profile_path: str = ""
     status: str = "queued"
     pid: int | None = None
     exit_code: int | None = None
@@ -312,28 +322,21 @@ class DispatchServer:
         if not Path(working_dir).is_dir():
             return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
 
-        sandbox_profile_data = resolve_sandbox_profile(project)
-        if sandbox_profile_data:
-            proxy_profile_id = sandbox_profile_data.get("proxy_profile")
-            if proxy_profile_id:
-                sandbox_mode = "restricted"
-                profile = load_proxy_profile(proxy_profile_id)
-                proxy_port = profile["port"] if profile and "port" in profile else 3128
-            else:
-                sandbox_mode = "unrestricted"
-                proxy_port = 3128
-            allowed_credentials = sandbox_profile_data.get("allowed_credentials", "*")
-            sandbox_profile_path = str(
-                Path(DEFAULT_SANDBOX_PROFILES_DIR).expanduser().resolve()
-                / f"{project.get('sandbox_profile')}.json"
-            )
+        profile_id = project.get("sandbox_profile", "default")
+        sandbox_profile_data = load_sandbox_profile(profile_id)
+        if not sandbox_profile_data:
+            return {"ok": False, "error": f"Sandbox profile not found: {profile_id}"}
+
+        proxy_profile_id = sandbox_profile_data.get("proxy_profile")
+        if proxy_profile_id:
+            sandbox_mode = "restricted"
+            proxy_profile = load_proxy_profile(proxy_profile_id)
+            proxy_port = proxy_profile["port"] if proxy_profile and "port" in proxy_profile else 3128
         else:
-            sandbox_mode = project.get("sandbox_mode", "restricted")
-            allowed_credentials = project.get("allowed_credentials", [])
-            if not allowed_credentials:
-                allowed_credentials = "*"
-            proxy_port = get_proxy_port(project)
-            sandbox_profile_path = ""
+            sandbox_mode = "unrestricted"
+            proxy_port = 3128
+        allowed_credentials = sandbox_profile_data.get("allowed_credentials", "*")
+        sandbox_profile_arg = _resolve_sandbox_profile_arg(profile_id)
 
         dispatch_id = self.generate_dispatch_id(project_id)
 
@@ -343,10 +346,10 @@ class DispatchServer:
             task_id=task_id,
             prompt=prompt,
             working_dir=working_dir,
+            sandbox_profile_arg=sandbox_profile_arg,
             sandbox_mode=sandbox_mode,
             proxy_port=proxy_port,
             allowed_credentials=allowed_credentials,
-            sandbox_profile_path=sandbox_profile_path,
         )
         self.jobs[dispatch_id] = job
 
@@ -376,24 +379,18 @@ class DispatchServer:
         if not Path(working_dir).is_dir():
             return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
 
-        sandbox_profile_data = resolve_sandbox_profile(project)
-        if sandbox_profile_data:
-            proxy_profile_id = sandbox_profile_data.get("proxy_profile")
-            if proxy_profile_id:
-                sandbox_mode = "restricted"
-                profile = load_proxy_profile(proxy_profile_id)
-                proxy_port = profile["port"] if profile and "port" in profile else 3128
-            else:
-                sandbox_mode = "unrestricted"
-                proxy_port = 3128
-            sandbox_profile_path = str(
-                Path(DEFAULT_SANDBOX_PROFILES_DIR).expanduser().resolve()
-                / f"{project.get('sandbox_profile')}.json"
-            )
+        profile_id = project.get("sandbox_profile", "default")
+        sandbox_profile_data = load_sandbox_profile(profile_id)
+        if not sandbox_profile_data:
+            return {"ok": False, "error": f"Sandbox profile not found: {profile_id}"}
+
+        proxy_profile_id = sandbox_profile_data.get("proxy_profile")
+        if proxy_profile_id:
+            proxy_profile = load_proxy_profile(proxy_profile_id)
+            proxy_port = proxy_profile["port"] if proxy_profile and "port" in proxy_profile else 3128
         else:
-            sandbox_mode = project.get("sandbox_mode", "restricted")
-            proxy_port = get_proxy_port(project)
-            sandbox_profile_path = ""
+            proxy_port = 3128
+        sandbox_profile_arg = _resolve_sandbox_profile_arg(profile_id)
 
         # tmux セッション決定
         session_name, is_caller = _detect_tmux_session(session)
@@ -401,10 +398,7 @@ class DispatchServer:
             return {"ok": False, "error": f"tmux session '{session_name}' not available"}
 
         window_name = f"{project_id}-interactive"
-        if sandbox_profile_path:
-            cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_path}' --proxy-port {proxy_port} claude --permission-mode bypassPermissions"
-        else:
-            cmd = f"cd '{working_dir}' && sandbox --mode {sandbox_mode} --proxy-port {proxy_port} claude --permission-mode bypassPermissions"
+        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_arg}' --proxy-port {proxy_port} claude --permission-mode bypassPermissions"
 
         result = subprocess.run(
             ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, "bash", "-c", cmd],
@@ -489,18 +483,11 @@ class DispatchServer:
                 env["CRED_BROKER_SOCK"] = get_cred_broker_socket_path()
 
             log_file = open(log_path, "w", encoding="utf-8")
-            if job.sandbox_profile_path:
-                sandbox_args = [
-                    "sandbox",
-                    "--sandbox-profile", job.sandbox_profile_path,
-                    "--proxy-port", str(job.proxy_port),
-                ]
-            else:
-                sandbox_args = [
-                    "sandbox",
-                    "--mode", job.sandbox_mode,
-                    "--proxy-port", str(job.proxy_port),
-                ]
+            sandbox_args = [
+                "sandbox",
+                "--sandbox-profile", job.sandbox_profile_arg,
+                "--proxy-port", str(job.proxy_port),
+            ]
 
             proc = await asyncio.create_subprocess_exec(
                 *sandbox_args,

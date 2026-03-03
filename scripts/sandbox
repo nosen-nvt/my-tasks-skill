@@ -1,291 +1,42 @@
-#!/bin/bash
-set -euo pipefail
+#!/usr/bin/env python3
+"""sandbox - bwrap + netns によるサンドボックス実行環境.
 
-# --- 定数 ---
-SCRIPT_DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
-NS_NAME=ai-ns
-LOCK_FILE=/tmp/sandbox-netns.lock
+使い方:
+  sandbox [オプション...] [-- コマンド [引数...]]
 
-# --- ensure_netns: netns が存在しなければ自動作成 ---
-ensure_netns() {
-  # 高速パス: 既に存在すればロック不要
-  if ip netns list 2>/dev/null | grep -qw "$NS_NAME"; then
-    return 0
-  fi
+オプション:
+  --proxy-port PORT               プロキシポート番号 (デフォルト: 3128)
+  --sandbox-profile NAME|PATH     サンドボックスプロファイル (デフォルト: default)
+  --env-file PATH                 環境変数ファイル (複数指定可)
+"""
 
-  echo "ネットワーク名前空間を初期化中..."
+import argparse
+import sys
 
-  # ロック取得 → 再確認 → 初期化 (ダブルチェックロック)
-  (
-    flock -x 9
+import sandbox_exec
 
-    # ロック取得後に再確認
-    if ip netns list 2>/dev/null | grep -qw "$NS_NAME"; then
-      exit 0
-    fi
 
-    sudo "$SCRIPT_DIR/setup-netns"
-
-    echo "ネットワーク名前空間の初期化が完了しました"
-  ) 9>"$LOCK_FILE"
-}
-
-# --- メイン ---
-WORK=$(pwd)
-MODE="restricted"
-PROXY_PORT=3128
-SANDBOX_PROFILE=""
-
-# 引数解析: --mode, --env-file, --proxy-port, --sandbox-profile を抽出し、残りをコマンドとして扱う
-ENV_FILES=()
-REMAINING_ARGS=()
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --mode)
-      if [[ $# -lt 2 ]]; then
-        echo "エラー: --mode には restricted または unrestricted を指定してください" >&2
-        exit 1
-      fi
-      MODE="$2"
-      shift 2
-      ;;
-    --env-file)
-      if [[ $# -lt 2 ]]; then
-        echo "エラー: --env-file にはファイルパスが必要です" >&2
-        exit 1
-      fi
-      ENV_FILES+=("$2")
-      shift 2
-      ;;
-    --proxy-port)
-      if [[ $# -lt 2 ]]; then
-        echo "エラー: --proxy-port にはポート番号が必要です" >&2
-        exit 1
-      fi
-      PROXY_PORT="$2"
-      shift 2
-      ;;
-    --sandbox-profile)
-      if [[ $# -lt 2 ]]; then
-        echo "エラー: --sandbox-profile にはファイルパスが必要です" >&2
-        exit 1
-      fi
-      SANDBOX_PROFILE="$2"
-      shift 2
-      ;;
-    *)
-      REMAINING_ARGS+=("$1")
-      shift
-      ;;
-  esac
-done
-
-# --sandbox-profile 指定時: JSON からモードと extra_binds を解決
-EXTRA_BIND_ARGS=()
-if [[ -n "$SANDBOX_PROFILE" ]]; then
-  if [[ ! -f "$SANDBOX_PROFILE" ]]; then
-    echo "エラー: サンドボックスプロファイルが見つかりません: $SANDBOX_PROFILE" >&2
-    exit 1
-  fi
-
-  # proxy_profile の有無で restricted/unrestricted を判定
-  PROFILE_PROXY=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('proxy_profile') or '')" "$SANDBOX_PROFILE")
-  if [[ -n "$PROFILE_PROXY" ]]; then
-    MODE="restricted"
-  else
-    MODE="unrestricted"
-  fi
-
-  # extra_binds を bwrap 引数に変換
-  EXTRA_BIND_ARGS_STR=$(python3 -c "
-import json, sys, os
-d = json.load(open(sys.argv[1]))
-home = os.environ['HOME']
-for bind in d.get('extra_binds', []):
-    src = bind['source'].replace('\$HOME', home)
-    tgt = bind['target'].replace('\$HOME', home)
-    mode = bind.get('mode', 'rw')
-    if mode == 'ro':
-        print(f'--ro-bind {src} {tgt}')
-    else:
-        print(f'--bind {src} {tgt}')
-" "$SANDBOX_PROFILE")
-
-  # 改行区切りの文字列を配列に変換
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    # スペース区切りで配列に追加
-    read -ra parts <<< "$line"
-    EXTRA_BIND_ARGS+=("${parts[@]}")
-  done <<< "$EXTRA_BIND_ARGS_STR"
-fi
-
-# モードバリデーション
-if [[ "$MODE" != "restricted" && "$MODE" != "unrestricted" ]]; then
-  echo "エラー: --mode は restricted または unrestricted を指定してください (指定値: $MODE)" >&2
-  exit 1
-fi
-
-# 引数が指定されていればそれを実行、なければ claude を起動
-if [[ ${#REMAINING_ARGS[@]} -gt 0 ]]; then
-  SANDBOX_CMD=("${REMAINING_ARGS[@]}")
-else
-  SANDBOX_CMD=("$HOME/.local/bin/claude" --permission-mode "bypassPermissions")
-fi
-
-# --env-file から --setenv 引数を構築
-ENV_FILE_ARGS=()
-for env_file in "${ENV_FILES[@]}"; do
-  if [[ ! -f "$env_file" ]]; then
-    echo "エラー: env ファイルが見つかりません: $env_file" >&2
-    exit 1
-  fi
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    # 空行とコメント行をスキップ
-    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-    # KEY=VALUE を分割
-    key="${line%%=*}"
-    value="${line#*=}"
-    ENV_FILE_ARGS+=(--setenv "$key" "$value")
-  done < "$env_file"
-done
-
-# Credential Broker 環境変数パススルー
-CRED_ENV_ARGS=()
-if [[ -n "${CRED_TOKEN:-}" ]]; then
-  CRED_ENV_ARGS+=(--setenv CRED_TOKEN "$CRED_TOKEN")
-fi
-if [[ -n "${CRED_BROKER_SOCK:-}" ]]; then
-  CRED_ENV_ARGS+=(--setenv CRED_BROKER_SOCK "$CRED_BROKER_SOCK")
-fi
-
-# dispatcher ソケット用バインドマウント
-DISPATCH_DIR="/run/user/$(id -u)/my-tasks-dispatch"
-mkdir -p "$DISPATCH_DIR"
-DISPATCH_BIND=(--bind "$DISPATCH_DIR" "$DISPATCH_DIR")
-
-# communicator Unix ソケット用バインドマウント
-COMM_DIR="/run/user/$(id -u)/communicator"
-mkdir -p "$COMM_DIR"
-COMM_BIND=(--bind "$COMM_DIR" "$COMM_DIR")
-
-# playwright-cli デーモンソケット用バインドマウント
-# ソケットは /tmp/playwright-cli/ に作成されるが、--tmpfs /tmp で隔離されるため
-# ホスト側のデーモンを共有するにはバインドマウントが必要
-PLAYWRIGHT_SOCK_DIR="/tmp/playwright-cli"
-mkdir -p "$PLAYWRIGHT_SOCK_DIR"
-PLAYWRIGHT_BIND=(--bind "$PLAYWRIGHT_SOCK_DIR" "$PLAYWRIGHT_SOCK_DIR")
-
-if [[ "$MODE" == "restricted" ]]; then
-  # --- restricted モード: ai-ns namespace + 既存の bwrap 構成 ---
-  ensure_netns
-
-  RESOLV_CONF=$(mktemp /tmp/sandbox-resolv.XXXXXX)
-  echo "nameserver 10.200.1.1" > "$RESOLV_CONF"
-  trap "rm -f '$RESOLV_CONF'" EXIT
-
-  # --sandbox-profile 指定時は extra_binds を使用、未指定時はハードコードバインド
-  if [[ -n "$SANDBOX_PROFILE" ]]; then
-    PROFILE_BINDS=("${EXTRA_BIND_ARGS[@]}")
-  else
-    PROFILE_BINDS=(
-      --bind $HOME/.nuget $HOME/.nuget
-      --bind $HOME/.dotnet $HOME/.dotnet
-      --bind $HOME/.azcopy $HOME/.azcopy
-      --bind $HOME/.cache $HOME/.cache
-      --bind $HOME/go $HOME/go
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="bwrap + netns によるサンドボックス実行環境",
+        usage="sandbox [オプション...] [-- コマンド [引数...]]",
     )
-  fi
+    parser.add_argument("--proxy-port", type=int, default=3128)
+    parser.add_argument("--sandbox-profile", default="default")
+    parser.add_argument("--env-file", action="append", default=[])
+    parser.add_argument("command", nargs="*")
+    args = parser.parse_args()
 
-  sudo ip netns exec ai-ns \
-    sudo -u "$USER" \
-    bwrap --unshare-pid --unshare-ipc --unshare-uts --die-with-parent \
-      --ro-bind /etc /etc \
-      --ro-bind /usr /usr \
-      --ro-bind "$SCRIPT_DIR/pass-shim" /usr/bin/pass \
-      --ro-bind /opt/microsoft/powershell /opt/microsoft/powershell \
-      --ro-bind /opt/google/chrome /opt/google/chrome \
-      --symlink usr/bin /bin \
-      --symlink usr/lib /lib \
-      --symlink usr/lib64 /lib64 \
-      --proc /proc \
-      --dev /dev \
-      --tmpfs /tmp \
-      --tmpfs /run \
-      --ro-bind "$RESOLV_CONF" /run/systemd/resolve/stub-resolv.conf \
-      "${DISPATCH_BIND[@]}" \
-      "${COMM_BIND[@]}" \
-      "${PLAYWRIGHT_BIND[@]}" \
-      --bind $HOME $HOME \
-      --ro-bind $HOME/src $HOME/src \
-      --bind $HOME/.claude/ $HOME/.claude \
-      --bind $WORK $WORK \
-      --bind $HOME/.local/share/my-tasks $HOME/.local/share/my-tasks \
-      "${PROFILE_BINDS[@]}" \
-      --chdir $WORK \
-      --clearenv \
-      "${ENV_FILE_ARGS[@]}" \
-      "${CRED_ENV_ARGS[@]}" \
-      --setenv PATH "/usr/bin:$HOME/.local/bin/:$HOME/go/bin:$HOME/.bun/bin:$HOME/.volta/bin" \
-      --setenv HOME $HOME \
-      --setenv http_proxy http://10.200.1.1:$PROXY_PORT \
-      --setenv https_proxy http://10.200.1.1:$PROXY_PORT \
-      --setenv TERM "xterm-256color" \
-      --setenv COLORTERM "truecolor" \
-      --setenv XDG_RUNTIME_DIR "/run/user/1000" \
-      --setenv WORKDIR $WORK \
-      --setenv SANDBOX "1" \
-      --setenv GOOGLE_CHAT_WEBHOOK_URL "${GOOGLE_CHAT_WEBHOOK_URL:-}" \
-      --cap-drop ALL \
-      "${SANDBOX_CMD[@]}"
+    try:
+        sandbox_exec.run(
+            proxy_port=args.proxy_port,
+            sandbox_profile=args.sandbox_profile,
+            env_files=args.env_file,
+            command=args.command or None,
+        )
+    except FileNotFoundError as e:
+        sys.exit(f"エラー: {e}")
 
-elif [[ "$MODE" == "unrestricted" ]]; then
-  # --- unrestricted モード: netns なし、最小バインドの bwrap ---
 
-  # --sandbox-profile 指定時は extra_binds を使用、未指定時はハードコードバインド
-  if [[ -n "$SANDBOX_PROFILE" ]]; then
-    PROFILE_BINDS=("${EXTRA_BIND_ARGS[@]}")
-  else
-    PROFILE_BINDS=(
-      --bind $HOME/.local $HOME/.local
-      --bind $HOME/.claude.json $HOME/.claude.json
-      --bind $HOME/.cache $HOME/.cache
-      --ro-bind $HOME/.volta $HOME/.volta
-      --ro-bind /opt/google/chrome /opt/google/chrome
-      --bind $HOME/go $HOME/go
-    )
-  fi
-
-  bwrap --unshare-pid --unshare-ipc --unshare-uts --die-with-parent \
-    --ro-bind /etc /etc \
-    --ro-bind /usr /usr \
-    --ro-bind "$SCRIPT_DIR/pass-shim" /usr/bin/pass \
-    --symlink usr/bin /bin \
-    --symlink usr/lib /lib \
-    --symlink usr/lib64 /lib64 \
-    --proc /proc \
-    --dev /dev \
-    --tmpfs /tmp \
-    --tmpfs /run \
-    --ro-bind /run/systemd/resolve /run/systemd/resolve \
-    "${DISPATCH_BIND[@]}" \
-    "${COMM_BIND[@]}" \
-    "${PLAYWRIGHT_BIND[@]}" \
-    --bind $HOME/.claude $HOME/.claude \
-    --ro-bind $HOME/src/github.com/nosen-nvt/my-tasks-skill $HOME/src/github.com/nosen-nvt/my-tasks-skill \
-    --bind $WORK $WORK \
-    "${PROFILE_BINDS[@]}" \
-    --chdir $WORK \
-    --clearenv \
-    "${ENV_FILE_ARGS[@]}" \
-    "${CRED_ENV_ARGS[@]}" \
-    --setenv PATH "/usr/bin:$HOME/.local/bin:$HOME/.volta/bin:$HOME/go/bin" \
-    --setenv HOME $HOME \
-    --setenv TERM "xterm-256color" \
-    --setenv COLORTERM "truecolor" \
-    --setenv XDG_RUNTIME_DIR "/run/user/1000" \
-    --setenv WORKDIR $WORK \
-    --setenv SANDBOX "1" \
-    --cap-drop ALL \
-    "${SANDBOX_CMD[@]}"
-fi
+if __name__ == "__main__":
+    main()
