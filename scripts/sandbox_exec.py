@@ -66,6 +66,7 @@ BUILTIN_PROFILES: dict[str, dict] = {
             {"source": "$HOME/.volta",        "target": "$HOME/.volta",       "mode": "ro"},
             {"source": "/opt/google/chrome",  "target": "/opt/google/chrome", "mode": "ro"},
             {"source": "$HOME/go",            "target": "$HOME/go",           "mode": "rw"},
+            {"source": "/tmp/playwright-cli",  "target": "/tmp/playwright-cli", "mode": "rw"},
         ],
     },
 }
@@ -107,6 +108,8 @@ def resolve_extra_binds(profile: dict) -> list[str]:
         src = bind["source"].replace("$HOME", home)
         tgt = bind["target"].replace("$HOME", home)
         flag = "--ro-bind" if bind.get("mode") == "ro" else "--bind"
+        if not os.path.exists(src):
+            os.makedirs(src, exist_ok=True)
         args += [flag, src, tgt]
     return args
 
@@ -147,16 +150,10 @@ def _base_binds() -> list[str]:
 
 
 def _socket_binds() -> list[str]:
-    """dispatcher / communicator / playwright のソケットバインド."""
-    args: list[str] = []
-    for name in ("my-tasks-dispatch", "communicator"):
-        d = f"/run/user/{UID}/{name}"
-        os.makedirs(d, exist_ok=True)
-        args += ["--bind", d, d]
-    pw_dir = "/tmp/playwright-cli"
-    os.makedirs(pw_dir, exist_ok=True)
-    args += ["--bind", pw_dir, pw_dir]
-    return args
+    """dispatcher ソケットバインド."""
+    d = f"/run/user/{UID}/my-tasks-dispatch"
+    os.makedirs(d, exist_ok=True)
+    return ["--bind", d, d]
 
 
 def _env_args(env_file_args: list[str], cred_args: list[str]) -> list[str]:
