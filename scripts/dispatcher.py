@@ -492,7 +492,8 @@ class DispatchServer:
 
             proc = await asyncio.create_subprocess_exec(
                 *sandbox_args,
-                "claude", "-p", job.prompt,
+                "claude", "--permission-mode", "bypassPermissions",
+                "-p", job.prompt,
                 "--append-system-prompt", system_prompt,
                 cwd=job.working_dir,
                 env=env,
