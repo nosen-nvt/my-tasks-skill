@@ -38,6 +38,7 @@ DEFAULT_REPO = "~/.local/share/my-tasks"
 DEFAULT_SESSION_NAME = "dispatch"
 DEFAULT_PROXY_PROFILES_DIR = "~/.local/share/my-tasks/proxy-profiles"
 DEFAULT_SANDBOX_PROFILES_DIR = "~/.local/share/my-tasks/sandbox-profiles"
+DEFAULT_CREDENTIAL_PROFILES_DIR = "~/.local/share/my-tasks/credential-profiles"
 
 SOCKET_DIR_NAME = "my-tasks-dispatch"
 SOCKET_FILE_NAME = "dispatcher.sock"
@@ -85,18 +86,60 @@ def load_proxy_profile(profile_id: str, profiles_dir: str = DEFAULT_PROXY_PROFIL
 
 
 
+BUILTIN_CREDENTIAL_PROFILES: dict[str, dict] = {
+    "full-access": {
+        "credential_profile_id": "full-access",
+        "allowed_credentials": "*",
+    },
+    "none": {
+        "credential_profile_id": "none",
+        "allowed_credentials": [],
+    },
+}
+
+
 BUILTIN_SANDBOX_PROFILES: dict[str, dict] = {
     "default": {
         "profile_id": "default",
         "proxy_profile": "full",
-        "allowed_credentials": "*",
+        "credential_profile": "full-access",
     },
     "unrestricted": {
         "profile_id": "unrestricted",
         "proxy_profile": None,
-        "allowed_credentials": "*",
+        "credential_profile": "full-access",
     },
 }
+
+
+def load_credential_profile(profile_id: str, profiles_dir: str = DEFAULT_CREDENTIAL_PROFILES_DIR) -> dict | None:
+    """クレデンシャルプロファイルを解決する。ファイル → 組み込み の順。"""
+    profiles_path = Path(profiles_dir).expanduser().resolve()
+    result = load_json(profiles_path / f"{profile_id}.json")
+    if result:
+        return result
+    return BUILTIN_CREDENTIAL_PROFILES.get(profile_id)
+
+
+def resolve_allowed_credentials(sandbox_profile: dict) -> list[str] | str:
+    """サンドボックスプロファイルから allowed_credentials を解決する。
+
+    解決優先順位:
+    1. allowed_credentials が直接存在 → そのまま返す（後方互換）
+    2. credential_profile が指定 → credential profile を読み込んで返す
+    3. どちらも未指定 → "*"（デフォルト全許可）
+    """
+    if "allowed_credentials" in sandbox_profile:
+        return sandbox_profile["allowed_credentials"]
+
+    credential_profile_id = sandbox_profile.get("credential_profile")
+    if credential_profile_id:
+        cred_profile = load_credential_profile(credential_profile_id)
+        if not cred_profile:
+            raise ValueError(f"Credential profile not found: {credential_profile_id}")
+        return cred_profile["allowed_credentials"]
+
+    return "*"
 
 
 def load_sandbox_profile(profile_id: str, profiles_dir: str = DEFAULT_SANDBOX_PROFILES_DIR) -> dict | None:
@@ -335,7 +378,10 @@ class DispatchServer:
         else:
             network_protected = False
             proxy_port = 3128
-        allowed_credentials = sandbox_profile_data.get("allowed_credentials", "*")
+        try:
+            allowed_credentials = resolve_allowed_credentials(sandbox_profile_data)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
         sandbox_profile_arg = _resolve_sandbox_profile_arg(profile_id)
 
         dispatch_id = self.generate_dispatch_id(project_id)

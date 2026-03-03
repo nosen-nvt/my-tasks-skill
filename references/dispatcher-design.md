@@ -334,7 +334,7 @@ pass jira/api-token
 {
   "profile_id": "restricted-default",
   "proxy_profile": "dev",
-  "allowed_credentials": "*"
+  "credential_profile": "full-access"
 }
 ```
 

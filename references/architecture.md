@@ -31,6 +31,8 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 ├── sandbox-profiles/                # git 管理
 │   ├── restricted-default.json
 │   └── unrestricted-browser.json
+├── credential-profiles/             # git 管理
+│   └── {credential_profile_id}.json
 ├── tasks/                           # gitignored
 │   ├── index.jsonl                  # タスクインデックス
 │   └── {task_id}.md                 # タスク実体（Markdown）

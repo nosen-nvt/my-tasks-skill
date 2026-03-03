@@ -47,11 +47,25 @@ def ensure_netns() -> None:
 
 # --- 組み込みプロファイル -----------------------------------------------------
 
+CREDENTIAL_PROFILES_DIR = Path("~/.local/share/my-tasks/credential-profiles").expanduser()
+
+BUILTIN_CREDENTIAL_PROFILES: dict[str, dict] = {
+    "full-access": {
+        "credential_profile_id": "full-access",
+        "allowed_credentials": "*",
+    },
+    "none": {
+        "credential_profile_id": "none",
+        "allowed_credentials": [],
+    },
+}
+
+
 BUILTIN_PROFILES: dict[str, dict] = {
     "default": {
         "profile_id": "default",
         "proxy_profile": "full",
-        "allowed_credentials": "*",
+        "credential_profile": "full-access",
         "extra_binds": [
             {"source": "$HOME/.nuget",  "target": "$HOME/.nuget",  "mode": "rw"},
             {"source": "$HOME/.dotnet", "target": "$HOME/.dotnet", "mode": "rw"},
@@ -63,7 +77,7 @@ BUILTIN_PROFILES: dict[str, dict] = {
     "unrestricted": {
         "profile_id": "unrestricted",
         "proxy_profile": None,
-        "allowed_credentials": "*",
+        "credential_profile": "full-access",
         "extra_binds": [
             {"source": "$HOME/.local",       "target": "$HOME/.local",       "mode": "rw"},
             {"source": "$HOME/.claude.json",  "target": "$HOME/.claude.json", "mode": "rw"},
@@ -77,6 +91,38 @@ BUILTIN_PROFILES: dict[str, dict] = {
 }
 
 SANDBOX_PROFILES_DIR = Path("~/.local/share/my-tasks/sandbox-profiles").expanduser()
+
+
+# --- クレデンシャルプロファイル解決 -------------------------------------------
+
+def resolve_credential_profile(profile_id: str) -> dict | None:
+    """クレデンシャルプロファイルを解決する。ファイル → 組み込み の順。"""
+    sp = CREDENTIAL_PROFILES_DIR / f"{profile_id}.json"
+    if sp.is_file():
+        with open(sp, encoding="utf-8") as f:
+            return json.load(f)
+    return BUILTIN_CREDENTIAL_PROFILES.get(profile_id)
+
+
+def resolve_allowed_credentials(profile: dict) -> list[str] | str:
+    """サンドボックスプロファイルから allowed_credentials を解決する。
+
+    解決優先順位:
+    1. allowed_credentials が直接存在 → そのまま返す（後方互換）
+    2. credential_profile が指定 → credential profile を読み込んで返す
+    3. どちらも未指定 → "*"（デフォルト全許可）
+    """
+    if "allowed_credentials" in profile:
+        return profile["allowed_credentials"]
+
+    credential_profile_id = profile.get("credential_profile")
+    if credential_profile_id:
+        cred_profile = resolve_credential_profile(credential_profile_id)
+        if not cred_profile:
+            raise FileNotFoundError(f"Credential profile not found: {credential_profile_id}")
+        return cred_profile["allowed_credentials"]
+
+    return "*"
 
 
 # --- プロファイル解決 ---------------------------------------------------------
@@ -364,7 +410,7 @@ def run(
 
     broker = None
     if not os.environ.get("CRED_TOKEN"):
-        allowed = profile.get("allowed_credentials", "*")
+        allowed = resolve_allowed_credentials(profile)
         if allowed:
             sock_path = f"/run/user/{UID}/my-tasks-dispatch/cred-broker-{os.getpid()}.sock"
             token = uuid.uuid4().hex

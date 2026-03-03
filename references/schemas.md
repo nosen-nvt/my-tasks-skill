@@ -272,7 +272,8 @@ deferred
 |---|---|---|---|
 | `profile_id` | string | Yes | プロファイル識別子（ファイル名と一致） |
 | `proxy_profile` | string or null | Yes | 参照する Proxy プロファイル ID。設定ありの場合はネットワーク保護あり（netns + proxy）。`null` の場合はホストネットワーク直接 |
-| `allowed_credentials` | string or array | Yes | `"*"`（全 pass エントリ許可）or エントリパスの配列 |
+| `credential_profile` | string | No | 参照する Credential プロファイル ID。ファイルベース（`credential-profiles/{id}.json`）または組み込み（`full-access`, `none`）を参照 |
+| `allowed_credentials` | string or array | No | **Deprecated**: `credential_profile` を使用すること。後方互換性のため残存。直接指定した場合は `credential_profile` より優先される |
 | `extra_binds` | array | No | ベースマウントに追加する bind mount のリスト |
 
 ### `extra_binds` 要素
@@ -289,7 +290,7 @@ deferred
 {
   "profile_id": "restricted-default",
   "proxy_profile": "default",
-  "allowed_credentials": "*",
+  "credential_profile": "full-access",
   "extra_binds": [
     {"source": "$HOME/.nuget", "target": "$HOME/.nuget", "mode": "rw"},
     {"source": "$HOME/.dotnet", "target": "$HOME/.dotnet", "mode": "rw"},
@@ -304,7 +305,7 @@ deferred
 {
   "profile_id": "unrestricted-browser",
   "proxy_profile": null,
-  "allowed_credentials": "*",
+  "credential_profile": "full-access",
   "extra_binds": [
     {"source": "$HOME/.local", "target": "$HOME/.local", "mode": "rw"},
     {"source": "$HOME/.claude.json", "target": "$HOME/.claude.json", "mode": "rw"},
@@ -316,6 +317,50 @@ deferred
 }
 ```
 
+
+## 4.2. クレデンシャルプロファイル
+
+サンドボックス内のジョブがアクセス可能な認証情報のスコープを定義する。
+サンドボックスプロファイルの `credential_profile` フィールドから ID で参照される。
+
+### 組み込みプロファイル
+
+| ID | allowed_credentials | 説明 |
+|---|---|---|
+| `full-access` | `"*"` | 全 pass エントリ許可 |
+| `none` | `[]` | アクセス不可 |
+
+### ファイルベースプロファイル (`credential-profiles/{credential_profile_id}.json`)
+
+### スキーマ
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `credential_profile_id` | string | Yes | プロファイル識別子（ファイル名と一致） |
+| `description` | string | No | プロファイルの説明 |
+| `allowed_credentials` | string or array | Yes | `"*"`（全 pass エントリ許可）or エントリパスの配列 |
+
+### 解決優先順位
+
+サンドボックスプロファイルの `allowed_credentials` 解決は以下の優先順位で行われる:
+
+1. `allowed_credentials` が直接存在 → そのまま使用（後方互換）
+2. `credential_profile` が指定 → credential profile を読み込んで `allowed_credentials` を返す
+3. どちらも未指定 → `"*"`（デフォルト全許可）
+
+### 例
+
+```json
+{
+  "credential_profile_id": "dev-tools",
+  "description": "開発ツール用クレデンシャル",
+  "allowed_credentials": [
+    "jira/api-token",
+    "bitbucket/app-password",
+    "azure/devops-pat"
+  ]
+}
+```
 
 ---
 
