@@ -36,6 +36,7 @@ JST = timezone(timedelta(hours=9))
 DEFAULT_MAX_SLOTS = 3
 DEFAULT_REPO = "~/.local/share/my-tasks"
 DEFAULT_SESSION_NAME = "dispatch"
+DEFAULT_PROXY_PROFILES_DIR = "~/.local/share/my-tasks/proxy-profiles"
 
 SOCKET_DIR_NAME = "my-tasks-dispatch"
 SOCKET_FILE_NAME = "dispatcher.sock"
@@ -75,6 +76,20 @@ def load_json(path: Path) -> dict | None:
 
 def load_project(repo_dir: Path, project_id: str) -> dict | None:
     return load_json(repo_dir / "projects" / f"{project_id}.json")
+
+
+def load_proxy_profile(profile_id: str, profiles_dir: str = DEFAULT_PROXY_PROFILES_DIR) -> dict | None:
+    profiles_path = Path(profiles_dir).expanduser().resolve()
+    return load_json(profiles_path / f"{profile_id}.json")
+
+
+def get_proxy_port(project: dict) -> int:
+    """プロジェクトの proxy_profile からポート番号を取得する."""
+    profile_id = project.get("proxy_profile", "default")
+    profile = load_proxy_profile(profile_id)
+    if profile and "port" in profile:
+        return profile["port"]
+    return 3128
 
 
 def is_inside_sandbox() -> bool:
@@ -164,6 +179,7 @@ class Job:
     prompt: str
     working_dir: str
     sandbox_mode: str
+    proxy_port: int = 3128
     allowed_credentials: list[str] = field(default_factory=list)
     status: str = "queued"
     pid: int | None = None
@@ -279,6 +295,7 @@ class DispatchServer:
 
         sandbox_mode = project.get("sandbox_mode", "restricted")
         allowed_credentials = project.get("allowed_credentials", [])
+        proxy_port = get_proxy_port(project)
         dispatch_id = self.generate_dispatch_id(project_id)
 
         job = Job(
@@ -288,6 +305,7 @@ class DispatchServer:
             prompt=prompt,
             working_dir=working_dir,
             sandbox_mode=sandbox_mode,
+            proxy_port=proxy_port,
             allowed_credentials=allowed_credentials,
         )
         self.jobs[dispatch_id] = job
@@ -325,8 +343,9 @@ class DispatchServer:
         if not _ensure_tmux_session(session_name, is_caller):
             return {"ok": False, "error": f"tmux session '{session_name}' not available"}
 
+        proxy_port = get_proxy_port(project)
         window_name = f"{project_id}-interactive"
-        cmd = f"cd '{working_dir}' && sandbox --mode {sandbox_mode} claude --permission-mode bypassPermissions"
+        cmd = f"cd '{working_dir}' && sandbox --mode {sandbox_mode} --proxy-port {proxy_port} claude --permission-mode bypassPermissions"
 
         result = subprocess.run(
             ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, "bash", "-c", cmd],
@@ -413,6 +432,7 @@ class DispatchServer:
             log_file = open(log_path, "w", encoding="utf-8")
             proc = await asyncio.create_subprocess_exec(
                 "sandbox", "--mode", job.sandbox_mode,
+                "--proxy-port", str(job.proxy_port),
                 "claude", "-p", job.prompt,
                 "--append-system-prompt", system_prompt,
                 cwd=job.working_dir,

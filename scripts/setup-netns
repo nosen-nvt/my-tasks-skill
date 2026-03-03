@@ -8,7 +8,24 @@ VETH_HOST=veth-host
 VETH_AI=veth-ai
 HOST_IP=10.200.1.1/24
 AI_IP=10.200.1.2/24
-PROXY_PORT=3128
+PROFILES_DIR="${PROFILES_DIR:-$HOME/.local/share/my-tasks/proxy-profiles}"
+
+# proxy-profiles からポート番号を収集
+PROXY_PORTS=()
+if [[ -d "$PROFILES_DIR" ]]; then
+  for profile_json in "$PROFILES_DIR"/*.json; do
+    [[ -f "$profile_json" ]] || continue
+    port=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['port'])" "$profile_json" 2>/dev/null || true)
+    if [[ -n "$port" ]]; then
+      PROXY_PORTS+=("$port")
+    fi
+  done
+fi
+
+# フォールバック: プロファイルが読めない場合はデフォルトポート 3128
+if [[ ${#PROXY_PORTS[@]} -eq 0 ]]; then
+  PROXY_PORTS=(3128)
+fi
 
 # 1. netns 作成
 ip netns add "$NS_NAME"
@@ -60,7 +77,9 @@ ip netns exec "$NS_NAME" nft 'add chain inet filter output { type filter hook ou
 ip netns exec "$NS_NAME" nft add rule inet filter output oifname "lo" accept
 ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "${HOST_IP%/*}" udp dport 53 accept
 ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "${HOST_IP%/*}" tcp dport 53 accept
-ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "${HOST_IP%/*}" tcp dport "$PROXY_PORT" accept
+for proxy_port in "${PROXY_PORTS[@]}"; do
+  ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "${HOST_IP%/*}" tcp dport "$proxy_port" accept
+done
 
 # SSH 許可 (GitHub / Bitbucket)
 for domain in github.com bitbucket.org; do
