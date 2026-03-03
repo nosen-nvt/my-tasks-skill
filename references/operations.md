@@ -123,7 +123,13 @@
    - 回答済みの項目を `[x]` に更新し、回答を追記
    - 全項目が `[x]` になったら次のステップへ
 
-6. **manual プロジェクト判定**: タスクの `project_id` に対応する `projects/{project_id}.json` を確認し、`working_directory` が未設定かどうかを判定:
+6. **達成条件の記述ルール**（`manual` 以外のプロジェクト）:
+   - `manual` 以外のプロジェクトのタスクは AI エージェントが実装・実行する前提
+   - **達成条件は AI エージェント自身がローカルで検証可能な内容** にすること
+   - OK: ファイル内容の確認、YAML/JSON のパース検証、テスト実行（`dotnet test`, `npm test` 等）、ビルド成功、`az pipelines run` + 結果確認
+   - NG: ブラウザでの手動確認、外部サービスの目視確認など、エージェントが実行できない操作
+
+7. **manual プロジェクト判定**: タスクの `project_id` に対応する `projects/{project_id}.json` を確認し、`working_directory` が未設定かどうかを判定:
    - **`working_directory` あり（通常フロー）**: `scoped` に遷移
    - **`working_directory` なし（manual 短縮フロー）**: `scoped` / `approved` / `running` をスキップし `done` に直接遷移。完了時アクション（操作9）を実行する
 

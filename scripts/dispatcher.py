@@ -25,7 +25,8 @@ import os
 import signal
 import subprocess
 import sys
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,7 @@ DEFAULT_SESSION_NAME = "dispatch"
 
 SOCKET_DIR_NAME = "my-tasks-dispatch"
 SOCKET_FILE_NAME = "dispatcher.sock"
+CRED_BROKER_SOCK_NAME = "cred-broker.sock"
 
 log = logging.getLogger("dispatcher")
 
@@ -53,6 +55,11 @@ def now_iso() -> str:
 def get_socket_path() -> str:
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}")
     return os.path.join(runtime_dir, SOCKET_DIR_NAME, SOCKET_FILE_NAME)
+
+
+def get_cred_broker_socket_path() -> str:
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}")
+    return os.path.join(runtime_dir, SOCKET_DIR_NAME, CRED_BROKER_SOCK_NAME)
 
 
 def get_repo_dir(repo: str = DEFAULT_REPO) -> Path:
@@ -75,6 +82,77 @@ def is_inside_sandbox() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Credential Broker
+# ---------------------------------------------------------------------------
+
+class CredentialBroker:
+    """ジョブ単位でスコープされた認証情報アクセスを提供するブローカー。"""
+
+    def __init__(self):
+        self._registry: dict[str, list[str]] = {}  # token → allowed entries
+
+    def register(self, token: str, allowed_entries: list[str]) -> None:
+        self._registry[token] = allowed_entries
+        log.info(f"Credential broker: registered token {token[:8]}... ({len(allowed_entries)} entries)")
+
+    def revoke(self, token: str) -> None:
+        if token in self._registry:
+            del self._registry[token]
+            log.info(f"Credential broker: revoked token {token[:8]}...")
+
+    async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        try:
+            data = await reader.readline()
+            if not data:
+                return
+            request = json.loads(data.decode())
+            token = request.get("token", "")
+            entry = request.get("entry", "")
+            response = await self._process_request(token, entry)
+            writer.write(json.dumps(response, ensure_ascii=False).encode() + b"\n")
+            await writer.drain()
+        except Exception as e:
+            log.error(f"Credential broker client error: {e}")
+            try:
+                writer.write(json.dumps({"ok": False, "error": "internal error"}).encode() + b"\n")
+                await writer.drain()
+            except Exception:
+                pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def _process_request(self, token: str, entry: str) -> dict:
+        if not token or token not in self._registry:
+            log.warning(f"Credential broker: invalid token {token[:8]}..." if token else "Credential broker: empty token")
+            return {"ok": False, "error": "invalid token"}
+
+        allowed = self._registry[token]
+        if entry not in allowed:
+            log.warning(f"Credential broker: entry not allowed: {entry} (token {token[:8]}...)")
+            return {"ok": False, "error": f"entry not allowed: {entry}"}
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "/usr/bin/pass", "show", entry,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                log.error(f"Credential broker: pass failed for {entry}: {stderr.decode().strip()}")
+                return {"ok": False, "error": "credential retrieval failed"}
+            log.info(f"Credential broker: served {entry} (token {token[:8]}...)")
+            return {"ok": True, "value": stdout.decode()}
+        except Exception as e:
+            log.error(f"Credential broker: pass execution error: {e}")
+            return {"ok": False, "error": "credential retrieval failed"}
+
+
+# ---------------------------------------------------------------------------
 # Job dataclass
 # ---------------------------------------------------------------------------
 
@@ -86,6 +164,7 @@ class Job:
     prompt: str
     working_dir: str
     sandbox_mode: str
+    allowed_credentials: list[str] = field(default_factory=list)
     status: str = "queued"
     pid: int | None = None
     exit_code: int | None = None
@@ -118,6 +197,7 @@ class DispatchServer:
         self.waiters: dict[str, list[asyncio.Future]] = {}
         self._counter: dict[str, int] = {}
         self._processes: dict[str, asyncio.subprocess.Process] = {}
+        self.cred_broker = CredentialBroker()
 
     def _log_path(self, dispatch_id: str) -> Path:
         runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}")
@@ -198,6 +278,7 @@ class DispatchServer:
             return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
 
         sandbox_mode = project.get("sandbox_mode", "restricted")
+        allowed_credentials = project.get("allowed_credentials", [])
         dispatch_id = self.generate_dispatch_id(project_id)
 
         job = Job(
@@ -207,6 +288,7 @@ class DispatchServer:
             prompt=prompt,
             working_dir=working_dir,
             sandbox_mode=sandbox_mode,
+            allowed_credentials=allowed_credentials,
         )
         self.jobs[dispatch_id] = job
 
@@ -313,17 +395,28 @@ class DispatchServer:
         job.status = "running"
         job.started_at = now_iso()
 
+        # Credential Broker: トークン生成・登録
+        cred_token = None
+        if job.allowed_credentials:
+            cred_token = uuid.uuid4().hex
+            self.cred_broker.register(cred_token, job.allowed_credentials)
+
         system_prompt = self._build_system_prompt(job)
         log_path = self._log_path(job.dispatch_id)
         log_file = None
         try:
+            env = {**os.environ, "SANDBOX": "1"}
+            if cred_token:
+                env["CRED_TOKEN"] = cred_token
+                env["CRED_BROKER_SOCK"] = get_cred_broker_socket_path()
+
             log_file = open(log_path, "w", encoding="utf-8")
             proc = await asyncio.create_subprocess_exec(
                 "sandbox", "--mode", job.sandbox_mode,
                 "claude", "-p", job.prompt,
                 "--append-system-prompt", system_prompt,
                 cwd=job.working_dir,
-                env={**os.environ, "SANDBOX": "1"},
+                env=env,
                 stdout=log_file,
                 stderr=log_file,
             )
@@ -339,6 +432,8 @@ class DispatchServer:
             job.status = "failed"
             job.exit_code = -1
         finally:
+            if cred_token:
+                self.cred_broker.revoke(cred_token)
             if log_file:
                 log_file.close()
             job.finished_at = now_iso()
@@ -390,12 +485,22 @@ class DispatchServer:
 制約事項 (restricted モード):
 - ネットワーク: GitHub/Bitbucket SSH と HTTP プロキシ経由の HTTPS のみ利用可能
 - ファイル: 作業ディレクトリ内のファイルのみ変更可能"""
+
+        cred_desc = ""
+        if job.allowed_credentials:
+            entries = "\n".join(f"  - {e}" for e in job.allowed_credentials)
+            cred_desc = f"""
+
+認証情報:
+- `cred-get <entry>` または `pass show <entry>` で以下の認証情報を取得できます:
+{entries}"""
+
         return f"""あなたはサンドボックス環境で実行されています。
 
 実行環境:
 - 作業ディレクトリ: {job.working_dir}
 - ネットワークモード: {job.sandbox_mode}
-{mode_desc}
+{mode_desc}{cred_desc}
 
 作業が完了したら、変更をコミットしてください。
 プロセスの終了がジョブ完了の通知になります（シグナルファイルは不要です）。"""
@@ -503,27 +608,36 @@ async def run_server(max_slots: int, repo: str):
     if os.path.exists(socket_path):
         os.unlink(socket_path)
 
+    cred_broker_path = get_cred_broker_socket_path()
+    if os.path.exists(cred_broker_path):
+        os.unlink(cred_broker_path)
+
     server = DispatchServer(max_slots=max_slots, repo_dir=repo_dir)
 
     loop = asyncio.get_event_loop()
-    loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(_shutdown(server, srv)))
-    loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(_shutdown(server, srv)))
+    loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(_shutdown(server, srv, cred_srv)))
+    loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(_shutdown(server, srv, cred_srv)))
 
     srv = await asyncio.start_unix_server(server.handle_client, path=socket_path)
     os.chmod(socket_path, 0o600)
 
-    log.info(f"Dispatch server started: socket={socket_path} max_slots={max_slots} repo={repo_dir}")
+    cred_srv = await asyncio.start_unix_server(server.cred_broker.handle_client, path=cred_broker_path)
+    os.chmod(cred_broker_path, 0o600)
+
+    log.info(f"Dispatch server started: socket={socket_path} cred_broker={cred_broker_path} max_slots={max_slots} repo={repo_dir}")
 
     asyncio.create_task(server.cleanup_old_logs())
 
-    async with srv:
+    async with srv, cred_srv:
         await srv.serve_forever()
 
 
-async def _shutdown(server: DispatchServer, srv):
+async def _shutdown(server: DispatchServer, srv, cred_srv):
     await server.shutdown()
     srv.close()
     await srv.wait_closed()
+    cred_srv.close()
+    await cred_srv.wait_closed()
     asyncio.get_event_loop().stop()
 
 

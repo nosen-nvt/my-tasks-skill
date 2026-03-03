@@ -1,0 +1,24 @@
+#!/bin/bash
+# pass shim for sandbox - routes "pass show" to cred-get
+set -euo pipefail
+
+# pass show <entry> または pass <entry>（show 省略形）を cred-get に委譲
+case "${1:-}" in
+  show)
+    shift
+    exec cred-get "$@"
+    ;;
+  -*)
+    echo "Error: pass options are not supported in sandbox" >&2
+    exit 1
+    ;;
+  "")
+    echo "Error: pass is running in sandbox mode (credential broker)" >&2
+    echo "Usage: pass show <entry> or pass <entry>" >&2
+    exit 1
+    ;;
+  *)
+    # pass <entry> は pass show <entry> の省略形
+    exec cred-get "$@"
+    ;;
+esac

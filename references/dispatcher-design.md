@@ -237,6 +237,110 @@ dispatcher.py server [--max-slots 3]
 - ネットワーク: GitHub/Bitbucket SSH と HTTP プロキシ経由の HTTPS のみ利用可能
 - ファイル: 作業ディレクトリ内のファイルのみ変更可能
 
+認証情報:
+- `cred-get <entry>` または `pass show <entry>` で以下の認証情報を取得できます:
+  - {allowed_credentials のエントリ一覧}
+
 作業が完了したら、変更をコミットしてください。
 プロセスの終了がジョブ完了の通知になります（シグナルファイルは不要です）。
 ```
+
+（認証情報セクションは `allowed_credentials` が設定されている場合のみ追加される）
+
+## Credential Broker
+
+### 概要
+
+サンドボックス内のジョブが `~/.password-store` や `~/.gnupg` に直接アクセスすることを防ぎ、
+プロジェクト単位でスコープされた認証情報アクセスを提供する仕組み。
+
+### アーキテクチャ
+
+```
+┌─ ホスト ──────────────────────────────────────────────┐
+│                                                        │
+│  dispatcher.py server                                  │
+│    ├─ DispatchServer (dispatcher.sock)                 │
+│    └─ CredentialBroker (cred-broker.sock)              │
+│         ├─ token registry: {token → [entries]}         │
+│         └─ /usr/bin/pass show <entry> で取得           │
+│                                                        │
+│  ┌─ サンドボックス ──────────────────────────────────┐ │
+│  │                                                    │ │
+│  │  pass show <entry>                                 │ │
+│  │    → /usr/bin/pass (pass-shim)                     │ │
+│  │      → cred-get <entry>                            │ │
+│  │        → connect(cred-broker.sock)                 │ │
+│  │          → CredentialBroker (ホスト側)              │ │
+│  │            → /usr/bin/pass show <entry> (実体)     │ │
+│  │                                                    │ │
+│  └────────────────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────────┘
+```
+
+### ソケットパス
+
+`$XDG_RUNTIME_DIR/my-tasks-dispatch/cred-broker.sock`
+
+dispatcher.sock と同じディレクトリに配置。sandbox で既に bind-mount 済みのため追加設定不要。
+
+### JSON プロトコル
+
+改行区切りの JSON line。
+
+**リクエスト:**
+
+```json
+{"token": "<job-token>", "entry": "jira/api-token"}
+```
+
+**レスポンス（成功）:**
+
+```json
+{"ok": true, "value": "<credential-value>"}
+```
+
+**レスポンス（エラー）:**
+
+```json
+{"ok": false, "error": "entry not allowed: secret/other"}
+```
+
+### ライフサイクル
+
+1. **ジョブ開始**: `allowed_credentials` が非空の場合、`uuid4().hex` でトークン生成 → `CredentialBroker.register(token, entries)`
+2. **ジョブ実行中**: 環境変数 `CRED_TOKEN` と `CRED_BROKER_SOCK` がサンドボックスに渡される
+3. **認証情報取得**: サンドボックス内で `pass show <entry>` → pass-shim → cred-get → broker socket → `/usr/bin/pass show <entry>` (ホスト側)
+4. **ジョブ終了**: `CredentialBroker.revoke(token)` でトークン無効化
+
+### cred-get CLI
+
+サンドボックス内で使用する軽量クライアント。
+
+```bash
+# 直接呼び出し
+cred-get jira/api-token
+
+# pass 互換（pass-shim 経由で自動委譲）
+pass show jira/api-token
+pass jira/api-token
+```
+
+### プロジェクト設定
+
+`projects/{project_id}.json` の `allowed_credentials` フィールドで、そのプロジェクトのジョブがアクセス可能な `pass` エントリを指定する。
+
+```json
+{
+  "project_id": "ubs-mgmt-tool",
+  "allowed_credentials": ["jira/api-token", "bitbucket/app-password"]
+}
+```
+
+### セキュリティ特性
+
+- **スコープ制限**: 各ジョブは自プロジェクトの `allowed_credentials` に列挙されたエントリのみ取得可能
+- **トークン有効期限**: ジョブ終了時に自動 revoke
+- **並行安全**: 各ジョブが固有トークンを持つため、複数ジョブ並行でも問題なし
+- **ホスト側影響なし**: pass-shim は bwrap の `--ro-bind` でサンドボックス内のみに適用。ホスト側の `/usr/bin/pass` は変更されない
+- **ログ**: トークンは先頭 8 文字のみ記録（`token[:8]...`）

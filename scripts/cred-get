@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""cred-get - Credential Broker クライアント CLI
+
+サンドボックス内で使用する軽量 CLI。
+Unix socket 経由で Credential Broker に接続し、credential を stdout に出力する。
+
+使い方:
+  cred-get <entry>
+
+環境変数:
+  CRED_TOKEN        - ジョブ固有の認証トークン
+  CRED_BROKER_SOCK  - Credential Broker の Unix socket パス
+"""
+
+import json
+import os
+import socket
+import sys
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: cred-get <entry>", file=sys.stderr)
+        sys.exit(1)
+
+    entry = sys.argv[1]
+
+    token = os.environ.get("CRED_TOKEN")
+    if not token:
+        print("Error: CRED_TOKEN is not set", file=sys.stderr)
+        sys.exit(1)
+
+    sock_path = os.environ.get("CRED_BROKER_SOCK")
+    if not sock_path:
+        print("Error: CRED_BROKER_SOCK is not set", file=sys.stderr)
+        sys.exit(1)
+
+    request = json.dumps({"token": token, "entry": entry}) + "\n"
+
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(sock_path)
+        sock.sendall(request.encode())
+
+        # レスポンスを読み取り（改行まで）
+        data = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if b"\n" in data:
+                break
+        sock.close()
+
+        response = json.loads(data.decode().strip())
+        if response.get("ok"):
+            # pass show 互換: 末尾改行なしで出力
+            sys.stdout.write(response["value"])
+        else:
+            print(f"Error: {response.get('error', 'unknown error')}", file=sys.stderr)
+            sys.exit(1)
+
+    except FileNotFoundError:
+        print(f"Error: broker socket not found: {sock_path}", file=sys.stderr)
+        sys.exit(1)
+    except ConnectionRefusedError:
+        print(f"Error: broker connection refused: {sock_path}", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError:
+        print("Error: invalid response from broker", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

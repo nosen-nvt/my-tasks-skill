@@ -234,6 +234,7 @@ deferred
 | `repositories` | array | No | 関連するリポジトリURLの配列 |
 | `working_directory` | string | No | ディスパッチャーが使用する作業ディレクトリ（未設定の場合 manual プロジェクト扱い） |
 | `sandbox_mode` | string | No | サンドボックスモード（`restricted` or `unrestricted`、デフォルト: `restricted`） |
+| `allowed_credentials` | array | No | Credential Broker 経由でアクセス可能な `pass` エントリパスの配列（デフォルト: `[]`） |
 
 ### 例
 
@@ -246,7 +247,8 @@ deferred
     "https://github.com/example/ubs-mgmt-tool"
   ],
   "working_directory": "/home/nosen/src/github.com/example/ubs-mgmt-tool",
-  "sandbox_mode": "restricted"
+  "sandbox_mode": "restricted",
+  "allowed_credentials": ["jira/api-token", "bitbucket/app-password"]
 }
 ```
 
