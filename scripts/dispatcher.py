@@ -398,7 +398,7 @@ class DispatchServer:
             return {"ok": False, "error": f"tmux session '{session_name}' not available"}
 
         window_name = f"{project_id}-interactive"
-        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_arg}' --proxy-port {proxy_port} claude --permission-mode bypassPermissions"
+        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_arg}' --proxy-port {proxy_port} -- claude --permission-mode bypassPermissions"
 
         result = subprocess.run(
             ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, "bash", "-c", cmd],
@@ -487,6 +487,7 @@ class DispatchServer:
                 "sandbox",
                 "--sandbox-profile", job.sandbox_profile_arg,
                 "--proxy-port", str(job.proxy_port),
+                "--",
             ]
 
             proc = await asyncio.create_subprocess_exec(
