@@ -278,7 +278,9 @@ class EmbeddedCredBroker:
             request = json.loads(data.decode())
             token = request.get("token", "")
             entry = request.get("entry", "")
-            response = self._process(token, entry)
+            operation = request.get("operation", "show")
+            value = request.get("value", "")
+            response = self._process(token, entry, operation, value)
             conn.sendall(json.dumps(response, ensure_ascii=False).encode() + b"\n")
         except Exception:
             try:
@@ -288,21 +290,31 @@ class EmbeddedCredBroker:
         finally:
             conn.close()
 
-    def _process(self, token: str, entry: str) -> dict:
+    def _process(self, token: str, entry: str, operation: str = "show", value: str = "") -> dict:
         if not token or token != self._token:
             return {"ok": False, "error": "invalid token"}
         if self._allowed != "*" and entry not in self._allowed:
             return {"ok": False, "error": f"entry not allowed: {entry}"}
         try:
-            proc = subprocess.run(
-                ["/usr/bin/pass", "show", entry],
-                capture_output=True,
-            )
-            if proc.returncode != 0:
-                return {"ok": False, "error": "credential retrieval failed"}
-            return {"ok": True, "value": proc.stdout.decode()}
+            if operation == "insert":
+                proc = subprocess.run(
+                    ["/usr/bin/pass", "insert", "--force", "--echo", entry],
+                    input=value.encode(),
+                    capture_output=True,
+                )
+                if proc.returncode != 0:
+                    return {"ok": False, "error": "credential insert failed"}
+                return {"ok": True}
+            else:
+                proc = subprocess.run(
+                    ["/usr/bin/pass", "show", entry],
+                    capture_output=True,
+                )
+                if proc.returncode != 0:
+                    return {"ok": False, "error": "credential retrieval failed"}
+                return {"ok": True, "value": proc.stdout.decode()}
         except Exception:
-            return {"ok": False, "error": "credential retrieval failed"}
+            return {"ok": False, "error": "credential operation failed"}
 
     def stop(self) -> None:
         self._running = False

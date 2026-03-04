@@ -8,6 +8,11 @@ case "${1:-}" in
     shift
     exec cred-get "$@"
     ;;
+  insert)
+    shift
+    while [[ "${1:-}" == -* ]]; do shift; done
+    exec cred-set "$@"
+    ;;
   -*)
     echo "Error: pass options are not supported in sandbox" >&2
     exit 1
