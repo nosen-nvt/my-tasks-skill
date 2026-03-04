@@ -460,7 +460,11 @@ class DispatchServer:
             return {"ok": False, "error": f"tmux session '{session_name}' not available"}
 
         window_name = f"{project_id}-interactive"
-        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_arg}' --proxy-port {proxy_port} -- claude --permission-mode bypassPermissions"
+        env_file_arg = ""
+        env_file = Path(working_dir) / ".env"
+        if env_file.is_file():
+            env_file_arg = f" --env-file '{env_file}'"
+        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_arg}'{env_file_arg} --proxy-port {proxy_port} -- claude --permission-mode bypassPermissions"
 
         result = subprocess.run(
             ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, "bash", "-c", cmd],
@@ -548,6 +552,11 @@ class DispatchServer:
             sandbox_args = [
                 "sandbox",
                 "--sandbox-profile", job.sandbox_profile_arg,
+            ]
+            env_file = Path(job.working_dir) / ".env"
+            if env_file.is_file():
+                sandbox_args += ["--env-file", str(env_file)]
+            sandbox_args += [
                 "--proxy-port", str(job.proxy_port),
                 "--",
             ]
