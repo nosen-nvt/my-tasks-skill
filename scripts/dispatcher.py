@@ -381,7 +381,7 @@ class DispatchServer:
         if not Path(working_dir).is_dir():
             return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
 
-        profile_id = project.get("sandbox_profile", "default")
+        profile_id = request.get("sandbox_profile") or project.get("sandbox_profile", "default")
         sandbox_profile_data = load_sandbox_profile(profile_id)
         if not sandbox_profile_data:
             return {"ok": False, "error": f"Sandbox profile not found: {profile_id}"}
@@ -441,7 +441,7 @@ class DispatchServer:
         if not Path(working_dir).is_dir():
             return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
 
-        profile_id = project.get("sandbox_profile", "default")
+        profile_id = request.get("sandbox_profile") or project.get("sandbox_profile", "default")
         sandbox_profile_data = load_sandbox_profile(profile_id)
         if not sandbox_profile_data:
             return {"ok": False, "error": f"Sandbox profile not found: {profile_id}"}
@@ -954,6 +954,9 @@ def cmd_run(args: argparse.Namespace) -> None:
             "prompt": prompt,
         }
 
+    if args.sandbox_profile:
+        request["sandbox_profile"] = args.sandbox_profile
+
     response = asyncio.run(client_send(request))
     if response.get("ok"):
         print(f"{response.get('message', 'OK')}: {response.get('dispatch_id', '')}", file=sys.stderr)
@@ -969,6 +972,8 @@ def cmd_open(args: argparse.Namespace) -> None:
     }
     if args.session:
         request["session"] = args.session
+    if args.sandbox_profile:
+        request["sandbox_profile"] = args.sandbox_profile
 
     response = asyncio.run(client_send(request))
     if response.get("ok"):
@@ -1089,12 +1094,14 @@ def main() -> None:
         "--repo", default=DEFAULT_REPO, metavar="PATH",
         help=f"タスク管理リポジトリのパス（デフォルト: {DEFAULT_REPO}）",
     )
+    p_run.add_argument("--sandbox-profile", help="サンドボックスプロファイルを上書き指定")
     p_run.set_defaults(func=cmd_run)
 
     # open
     p_open = subparsers.add_parser("open", help="対話セッションを起動する")
     p_open.add_argument("--project", required=True, help="プロジェクト ID")
     p_open.add_argument("--session", default=None, help="tmux セッション名を明示指定")
+    p_open.add_argument("--sandbox-profile", help="サンドボックスプロファイルを上書き指定")
     p_open.set_defaults(func=cmd_open)
 
     # status

@@ -127,6 +127,12 @@ echo "バグを修正してください" | python3 ~/.claude/skills/my-tasks/scr
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --session main
 
+# プロファイルを上書きしてジョブ投入（例: unrestricted で調査タスクを実行）
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py run --task 20260301-001 --sandbox-profile unrestricted
+
+# open でも同様
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --sandbox-profile unrestricted
+
 # ステータス確認
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status --json

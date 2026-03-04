@@ -180,6 +180,9 @@
 
    # プロジェクト ID + stdin プロンプト指定
    echo "..." | python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py run --project bo
+
+   # サンドボックスプロファイルを上書き指定（例: unrestricted で調査タスクを実行）
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py run --task 20260301-001 --sandbox-profile unrestricted
    ```
 
 3. `index.jsonl` と `.md` の status を `running` に更新
@@ -189,6 +192,9 @@
 ジョブ管理の対象外で対話セッションを起動する場合:
 ```bash
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo [--session main]
+
+# サンドボックスプロファイルを上書きして対話セッションを起動
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --sandbox-profile unrestricted
 ```
 
 ---
