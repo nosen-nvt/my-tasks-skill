@@ -153,6 +153,11 @@ def uses_network_protection(profile: dict) -> bool:
     return bool(profile.get("proxy_profile"))
 
 
+def resolve_host_forward_ports(profile: dict) -> list[int]:
+    """プロファイルから host_forward_ports を取得する。"""
+    return [int(p) for p in profile.get("host_forward_ports", [])]
+
+
 def resolve_extra_binds(profile: dict) -> list[str]:
     args: list[str] = []
     home = str(HOME)
@@ -220,6 +225,32 @@ def load_env_files(paths: list[str]) -> list[str]:
             key, _, value = line.partition("=")
             args += ["--setenv", key, value]
     return args
+
+
+# --- ホストポートフォワーディング -----------------------------------------------
+
+def setup_host_port_forwarding(ports: list[int]) -> None:
+    """ai-ns からホスト側 127.0.0.1 のポートへアクセスできるよう nft ルールを追加する。
+
+    - ホスト側: prerouting DNAT (10.200.1.1:port → 127.0.0.1:port)
+    - ai-ns 側: output allow (10.200.1.1:port への TCP を許可)
+    """
+    for port in ports:
+        # ホスト側 DNAT (冪等: 重複ルールは無害)
+        subprocess.run([
+            "sudo", "nft", "add", "rule", "ip", "nat", "prerouting",
+            "iifname", "veth-host",
+            "tcp", "dport", str(port),
+            "dnat", "to", "127.0.0.1",
+        ], check=True)
+        # ai-ns 側 output 許可
+        subprocess.run([
+            "sudo", "ip", "netns", "exec", NS_NAME,
+            "nft", "add", "rule", "inet", "filter", "output",
+            "ip", "daddr", LISTEN_ADDR,
+            "tcp", "dport", str(port),
+            "accept",
+        ], check=True)
 
 
 # --- bwrap 引数構築 -----------------------------------------------------------
@@ -375,6 +406,7 @@ def build_netns_args(
     env_file_args: list[str],
     cred_args: list[str],
     command: list[str],
+    host_forward_ports: list[int] | None = None,
 ) -> list[str]:
     resolv = tempfile.NamedTemporaryFile(
         prefix="sandbox-resolv.", dir="/tmp", mode="w", delete=False,
@@ -403,6 +435,8 @@ def build_netns_args(
         "--setenv", "PATH", f"/usr/bin:{HOME}/.local/bin:{HOME}/go/bin:{HOME}/.bun/bin:{HOME}/.volta/bin",
         "--setenv", "http_proxy", f"http://{LISTEN_ADDR}:{proxy_port}",
         "--setenv", "https_proxy", f"http://{LISTEN_ADDR}:{proxy_port}",
+        *(["--setenv", "no_proxy", f"{LISTEN_ADDR},localhost,127.0.0.1"] if host_forward_ports else []),
+        "--setenv", "SANDBOX_HOST", LISTEN_ADDR,
         "--setenv", "WORKDIR", work,
         "--setenv", "GOOGLE_CHAT_WEBHOOK_URL", os.environ.get("GOOGLE_CHAT_WEBHOOK_URL", ""),
         "--cap-drop", "ALL",
@@ -470,9 +504,13 @@ def run(
             broker.start()
             cred_args = ["--setenv", "CRED_TOKEN", token, "--setenv", "CRED_BROKER_SOCK", sock_path]
 
+    host_forward_ports = resolve_host_forward_ports(profile)
+
     if network_protected:
         ensure_netns()
-        exec_args = build_netns_args(work, proxy_port, profile_binds, env_file_args, cred_args, command)
+        if host_forward_ports:
+            setup_host_port_forwarding(host_forward_ports)
+        exec_args = build_netns_args(work, proxy_port, profile_binds, env_file_args, cred_args, command, host_forward_ports)
     else:
         exec_args = build_host_network_args(work, profile_binds, env_file_args, cred_args, command)
 
