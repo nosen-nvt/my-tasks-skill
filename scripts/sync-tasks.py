@@ -225,7 +225,7 @@ def process_datasource(
     index_entries はインプレースで変更される（新規追加・消失削除）。
 
     datasource 設定の sync_mode に応じて動作を切り替える:
-    - "full": 消失検出を実施（deferred 消失時は done に遷移）
+    - "full": 消失検出を実施（消失タスクはインデックスと Markdown から削除）
     - "append": 消失検出をスキップ、done タスクの GC を実施
 
     Returns:
@@ -233,7 +233,6 @@ def process_datasource(
             "added": [...],
             "updated": [...],
             "vanished": [...],
-            "completed": [...],
             "gc": [...],
             "auto_assigned": [...],
             "needs_review": [...],
@@ -330,22 +329,10 @@ def process_datasource(
 
     # 消失検出は full モードのみ
     vanished = []
-    completed = []
     if sync_mode == "full":
         vanished_ids = set()
         for remote_id, entry in existing_entries.items():
             if remote_id not in incoming_ids:
-                if entry.get("status") == "deferred":
-                    # deferred タスクが消失 → done に遷移
-                    entry["status"] = "done"
-                    update_task_markdown_metadata(tasks_dir, entry)
-                    completed.append({
-                        "datasource_id": datasource_id,
-                        "remote_id": remote_id,
-                        "title": entry.get("title", ""),
-                        "id": entry["id"],
-                    })
-                    continue
                 vanished.append({
                     "datasource_id": datasource_id,
                     "remote_id": remote_id,
@@ -363,7 +350,6 @@ def process_datasource(
         "added": added,
         "updated": updated,
         "vanished": vanished,
-        "completed": completed,
         "gc": gc,
         "auto_assigned": auto_assigned,
         "needs_review": needs_review,
@@ -444,7 +430,6 @@ def main() -> None:
     total_added = []
     total_updated = []
     total_vanished = []
-    total_completed = []
     total_gc = []
     total_auto_assigned = []
     total_needs_review = []
@@ -456,10 +441,25 @@ def main() -> None:
         total_added.extend(result["added"])
         total_updated.extend(result["updated"])
         total_vanished.extend(result["vanished"])
-        total_completed.extend(result["completed"])
         total_gc.extend(result["gc"])
         total_auto_assigned.extend(result["auto_assigned"])
         total_needs_review.extend(result["needs_review"])
+
+    # 全 datasource 横断の GC: done タスクを除去（manual 等、同期対象外も含む）
+    gc_all_ids = set()
+    for entry in index_entries:
+        if entry.get("status") == "done":
+            total_gc.append({
+                "datasource_id": entry.get("datasource_id", ""),
+                "remote_id": entry.get("remote_id", ""),
+                "title": entry.get("title", ""),
+                "id": entry["id"],
+            })
+            gc_all_ids.add(entry["id"])
+            delete_task(tasks_dir, entry["id"])
+    if gc_all_ids:
+        index_entries[:] = [e for e in index_entries
+                            if e.get("id") not in gc_all_ids]
 
     # index を保存
     save_index(tasks_dir, index_entries)
@@ -470,7 +470,6 @@ def main() -> None:
             "added": len(total_added),
             "updated": len(total_updated),
             "vanished": len(total_vanished),
-            "completed": len(total_completed),
             "gc": len(total_gc),
             "auto_assigned": len(total_auto_assigned),
             "needs_review": len(total_needs_review),
@@ -478,7 +477,6 @@ def main() -> None:
         "added": total_added,
         "updated": total_updated,
         "vanished": total_vanished,
-        "completed": total_completed,
         "gc": total_gc,
         "auto_assigned": total_auto_assigned,
         "needs_review": total_needs_review,
