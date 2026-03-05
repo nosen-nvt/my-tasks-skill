@@ -113,7 +113,7 @@ queued ──→ running ──→ done
 2. `projects/{project_id}.json` から `sandbox_profile`（デフォルト: `"default"`）と `working_directory` を取得
 3. 指定された tmux セッション（またはデフォルトセッション）にウィンドウを作成
 4. ウィンドウ内で `sandbox --sandbox-profile {profile} claude --permission-mode bypassPermissions` を実行
-5. ウィンドウ名: `{project_id}-interactive`
+5. ウィンドウ名: `{project_id}`
 
 ### `log` コマンド
 

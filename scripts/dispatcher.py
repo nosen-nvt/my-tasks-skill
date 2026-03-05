@@ -520,7 +520,7 @@ class DispatchServer:
         if not _ensure_tmux_session(session_name, is_caller):
             return {"ok": False, "error": f"tmux session '{session_name}' not available"}
 
-        window_name = f"{project_id}-interactive"
+        window_name = project_id
         env_file_args = ""
         if project_env_file:
             env_file_args += f" --env-file '{project_env_file}'"
