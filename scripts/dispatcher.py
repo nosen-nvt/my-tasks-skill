@@ -34,7 +34,7 @@ from typing import Any
 
 JST = timezone(timedelta(hours=9))
 
-DEFAULT_MAX_SLOTS = 3
+DEFAULT_MAX_SLOTS = 8
 DEFAULT_REPO = "~/.local/share/my-tasks"
 DEFAULT_SESSION_NAME = "dispatch"
 DEFAULT_PROXY_PROFILES_DIR = "~/.local/share/my-tasks/proxy-profiles"
@@ -367,6 +367,9 @@ class DispatchServer:
     def count_running(self) -> int:
         return sum(1 for j in self.jobs.values() if j.status == "running")
 
+    def running_project_ids(self) -> set[str]:
+        return {j.project_id for j in self.jobs.values() if j.status == "running"}
+
     # --- コマンドハンドラ ---
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -470,14 +473,15 @@ class DispatchServer:
         )
         self.jobs[dispatch_id] = job
 
-        if self.count_running() < self.max_slots:
+        if self.count_running() < self.max_slots and project_id not in self.running_project_ids():
             asyncio.create_task(self.execute_job(job))
             log.info(f"Job started: {dispatch_id}")
             return {"ok": True, "dispatch_id": dispatch_id, "message": "Job started"}
         else:
             self.queue.append(job)
-            log.info(f"Job queued: {dispatch_id}")
-            return {"ok": True, "dispatch_id": dispatch_id, "message": "Job queued (slot full)"}
+            reason = "project busy" if project_id in self.running_project_ids() else "slot full"
+            log.info(f"Job queued ({reason}): {dispatch_id}")
+            return {"ok": True, "dispatch_id": dispatch_id, "message": f"Job queued ({reason})"}
 
     async def cmd_open(self, request: dict) -> dict:
         project_id = request.get("project_id", "")
@@ -662,7 +666,12 @@ class DispatchServer:
 
     async def drain_queue(self):
         while self.queue and self.count_running() < self.max_slots:
-            job = self.queue.pop(0)
+            running_projects = self.running_project_ids()
+            # キューから、プロジェクトが空いている最初のジョブを探す
+            idx = next((i for i, j in enumerate(self.queue) if j.project_id not in running_projects), None)
+            if idx is None:
+                break
+            job = self.queue.pop(idx)
             asyncio.create_task(self.execute_job(job))
 
     async def _kill_job(self, job: Job):

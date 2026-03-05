@@ -214,7 +214,7 @@ python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py wait --id "$DISP"
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py log --id bo-1
 
 # サーバ起動（通常は systemd 経由）
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py server [--max-slots 3]
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py server [--max-slots 8]
 ```
 
 ### 前提条件

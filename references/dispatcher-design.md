@@ -94,8 +94,8 @@ queued ──→ running ──→ done
 
 1. `cmd_run`: リクエスト受信
 2. `dispatch_id` を生成（`{project_id}-{連番}`）
-3. スロットに空きがあれば `execute_job()` で即実行
-4. スロット満杯なら queue に追加し `queued` で応答
+3. スロットに空きがあり、かつ同一プロジェクトのジョブが実行中でなければ `execute_job()` で即実行
+4. スロット満杯、または同一プロジェクトが実行中なら queue に追加し `queued` で応答（理由: `slot full` or `project busy`）
 5. `execute_job()`:
    - プロジェクト設定から `sandbox_profile`（デフォルト: `"default"`）と `working_directory` を取得
    - `$XDG_RUNTIME_DIR/my-tasks-dispatch/{dispatch_id}.log` にログファイルを作成
@@ -187,7 +187,7 @@ dispatcher.py wait --id ubs-mgmt-tool-1
 dispatcher.py log --id ubs-mgmt-tool-1
 
 # サーバ起動（通常は systemd 経由）
-dispatcher.py server [--max-slots 3]
+dispatcher.py server [--max-slots 8]
 ```
 
 ### `run --task` の処理
