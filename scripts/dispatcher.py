@@ -25,6 +25,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -43,6 +44,7 @@ DEFAULT_CREDENTIAL_PROFILES_DIR = "~/.local/share/my-tasks/credential-profiles"
 SOCKET_DIR_NAME = "my-tasks-dispatch"
 SOCKET_FILE_NAME = "dispatcher.sock"
 CRED_BROKER_SOCK_NAME = "cred-broker.sock"
+CACHE_DIR = Path("~/.local/share/my-tasks/.cache").expanduser()
 
 log = logging.getLogger("dispatcher")
 
@@ -164,6 +166,55 @@ def is_inside_sandbox() -> bool:
     return os.environ.get("SANDBOX") == "1"
 
 
+async def resolve_project_env(project: dict, dest_dir: Path | None = None) -> Path | None:
+    """プロジェクトの env フィールドを解決し、env ファイルに書き出す。
+
+    Args:
+        project: プロジェクト定義 dict
+        dest_dir: 書き出し先ディレクトリ。指定時は永続ファイル、None 時は一時ファイル。
+
+    Returns:
+        生成した env ファイルのパス。env フィールドが無い場合は None。
+    """
+    env_dict = project.get("env")
+    if not env_dict:
+        return None
+
+    resolved: dict[str, str] = {}
+    for key, value in env_dict.items():
+        if isinstance(value, dict) and "pass" in value:
+            proc = await asyncio.create_subprocess_exec(
+                "pass", "show", value["pass"],
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                log.error(f"pass show failed for {value['pass']}: {stderr.decode().strip()}")
+                continue
+            resolved[key] = stdout.decode().splitlines()[0]
+        else:
+            resolved[key] = str(value)
+
+    if not resolved:
+        return None
+
+    if dest_dir is not None:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        env_path = dest_dir / f"env-{project['project_id']}.env"
+    else:
+        fd, tmp_path = tempfile.mkstemp(prefix="env-", suffix=".env")
+        os.close(fd)
+        env_path = Path(tmp_path)
+
+    env_path.write_text(
+        "\n".join(f"{k}={v}" for k, v in resolved.items()) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(env_path, 0o600)
+    return env_path
+
+
 # ---------------------------------------------------------------------------
 # Credential Broker
 # ---------------------------------------------------------------------------
@@ -269,6 +320,7 @@ class Job:
     network_protected: bool = True
     proxy_port: int = 3128
     allowed_credentials: list[str] | str = field(default_factory=list)
+    project_env_file: Path | None = None
     status: str = "queued"
     pid: int | None = None
     exit_code: int | None = None
@@ -400,6 +452,8 @@ class DispatchServer:
             return {"ok": False, "error": str(e)}
         sandbox_profile_arg = _resolve_sandbox_profile_arg(profile_id)
 
+        project_env_file = await resolve_project_env(project)
+
         dispatch_id = self.generate_dispatch_id(project_id)
 
         job = Job(
@@ -412,6 +466,7 @@ class DispatchServer:
             network_protected=network_protected,
             proxy_port=proxy_port,
             allowed_credentials=allowed_credentials,
+            project_env_file=project_env_file,
         )
         self.jobs[dispatch_id] = job
 
@@ -454,17 +509,21 @@ class DispatchServer:
             proxy_port = 3128
         sandbox_profile_arg = _resolve_sandbox_profile_arg(profile_id)
 
+        project_env_file = await resolve_project_env(project, dest_dir=CACHE_DIR)
+
         # tmux セッション決定
         session_name, is_caller = _detect_tmux_session(session)
         if not _ensure_tmux_session(session_name, is_caller):
             return {"ok": False, "error": f"tmux session '{session_name}' not available"}
 
         window_name = f"{project_id}-interactive"
-        env_file_arg = ""
+        env_file_args = ""
+        if project_env_file:
+            env_file_args += f" --env-file '{project_env_file}'"
         env_file = Path(working_dir) / ".env"
         if env_file.is_file():
-            env_file_arg = f" --env-file '{env_file}'"
-        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_arg}'{env_file_arg} --proxy-port {proxy_port} -- claude --permission-mode bypassPermissions"
+            env_file_args += f" --env-file '{env_file}'"
+        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_arg}'{env_file_args} --proxy-port {proxy_port} -- claude --permission-mode bypassPermissions"
 
         result = subprocess.run(
             ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, "bash", "-c", cmd],
@@ -553,6 +612,8 @@ class DispatchServer:
                 "sandbox",
                 "--sandbox-profile", job.sandbox_profile_arg,
             ]
+            if job.project_env_file:
+                sandbox_args += ["--env-file", str(job.project_env_file)]
             env_file = Path(job.working_dir) / ".env"
             if env_file.is_file():
                 sandbox_args += ["--env-file", str(env_file)]
@@ -585,6 +646,11 @@ class DispatchServer:
         finally:
             if cred_token:
                 self.cred_broker.revoke(cred_token)
+            if job.project_env_file:
+                try:
+                    job.project_env_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
             if log_file:
                 log_file.close()
             job.finished_at = now_iso()

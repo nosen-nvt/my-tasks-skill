@@ -48,6 +48,9 @@ def main() -> None:
             sys.exit(f"エラー: プロジェクトの working_directory が無効です: {working_dir!r}")
         if sandbox_profile is None:
             sandbox_profile = project.get("sandbox_profile", "default")
+        project_env_file = sandbox_exec.resolve_project_env_sync(project)
+        if project_env_file:
+            args.env_file.insert(0, str(project_env_file))
 
     if sandbox_profile is None:
         sandbox_profile = "default"

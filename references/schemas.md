@@ -234,6 +234,7 @@ deferred
 | `repositories` | array | No | 関連するリポジトリURLの配列 |
 | `working_directory` | string | No | ディスパッチャーが使用する作業ディレクトリ（未設定の場合 manual プロジェクト扱い） |
 | `sandbox_profile` | string | No | サンドボックスプロファイル ID（デフォルト: `"default"`）。ファイルベース（`sandbox-profiles/{id}.json`）または組み込みプロファイル（`default`, `unrestricted`）を参照 |
+| `env` | object | No | サンドボックス内で設定する環境変数。値は plain string または `{"pass": "entry"}` 形式（後者は `pass show` で解決）。`.env` ファイルより低優先度 |
 
 ### 例
 
@@ -246,9 +247,26 @@ deferred
     "https://github.com/example/ubs-mgmt-tool"
   ],
   "working_directory": "/home/nosen/src/github.com/example/ubs-mgmt-tool",
-  "sandbox_profile": "restricted-default"
+  "sandbox_profile": "restricted-default",
+  "env": {
+    "ATL_SITE": "ubs",
+    "GITHUB_TOKEN": {"pass": "github/fine-grained-pat"}
+  }
 }
 ```
+
+### `env`
+
+サンドボックス内で設定する環境変数をキーバリューで定義する。
+
+| 値の形式 | 説明 |
+|---|---|
+| `"plain string"` | そのまま環境変数に設定 |
+| `{"pass": "entry/path"}` | `pass show entry/path` で解決し、出力の1行目を使用 |
+
+**優先順位**: project env < `.env` ファイル（`.env` がオーバーライド）。
+ディスパッチャーは project env を先に `--env-file` で渡し、`.env` を後に渡す。
+bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 
 
 ## 4.1. サンドボックスプロファイル

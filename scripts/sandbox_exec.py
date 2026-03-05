@@ -18,6 +18,7 @@ LOCK_FILE = "/tmp/sandbox-netns.lock"
 LISTEN_ADDR = "10.200.1.1"
 HOME = Path.home()
 UID = os.getuid()
+CACHE_DIR = Path("~/.local/share/my-tasks/.cache").expanduser()
 
 
 # --- netns -------------------------------------------------------------------
@@ -163,6 +164,45 @@ def resolve_extra_binds(profile: dict) -> list[str]:
             os.makedirs(src, exist_ok=True)
         args += [flag, src, tgt]
     return args
+
+
+# --- プロジェクト env 解決 ----------------------------------------------------
+
+def resolve_project_env_sync(project: dict) -> Path | None:
+    """プロジェクトの env フィールドを同期的に解決し、キャッシュディレクトリに書き出す。
+
+    Returns:
+        生成した env ファイルのパス。env フィールドが無い場合は None。
+    """
+    env_dict = project.get("env")
+    if not env_dict:
+        return None
+
+    resolved: dict[str, str] = {}
+    for key, value in env_dict.items():
+        if isinstance(value, dict) and "pass" in value:
+            proc = subprocess.run(
+                ["pass", "show", value["pass"]],
+                capture_output=True,
+            )
+            if proc.returncode != 0:
+                print(f"警告: pass show failed for {value['pass']}: {proc.stderr.decode().strip()}", file=sys.stderr)
+                continue
+            resolved[key] = proc.stdout.decode().splitlines()[0]
+        else:
+            resolved[key] = str(value)
+
+    if not resolved:
+        return None
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    env_path = CACHE_DIR / f"env-{project['project_id']}.env"
+    env_path.write_text(
+        "\n".join(f"{k}={v}" for k, v in resolved.items()) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(env_path, 0o600)
+    return env_path
 
 
 # --- env ファイル読み込み -----------------------------------------------------
