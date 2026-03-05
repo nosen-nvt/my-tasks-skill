@@ -7,7 +7,7 @@ description: |
   「実行して」「ディスパッチして」「ステータスを確認して」「タスクを操作して」
   「完了処理を実行して」「プロジェクトを追加して」「データソースを追加して」
   「メールをチェックして」「ジョブの状態を確認して」
-  「今はやらない」「先送りして」「後回しにして」「やっぱりやる」「pending に戻して」など、
+  「これを精査して」「次にやる」など、
   タスク管理リポジトリ（~/.local/share/my-tasks/）への操作を依頼された場合に使用。
 ---
 
@@ -22,15 +22,15 @@ JIRA・Microsoft To Do・メール等の外部データソースからタスク�
 
 1. **タスク収集** - 全データソースからタスクを取得し、index.jsonl + Markdown を更新
 2. **メールトリアージ** - メールデータソースからアクションアイテムを収集
-3. **タスク精査** - pending タスクに対して質問リストを生成（needs_clarification）
-4. **プロンプト生成** - scoped タスクの実行プロンプトを生成
+3. **タスク精査** - refine.py で1タスク1ジョブとして精査をディスパッチ（scoped 遷移時にプロンプトも同時生成）
+4. **プロンプト再生成** - scoped タスクの実行プロンプトを再生成（通常は操作3で自動生成）
 5. **プロンプト承認** - 生成されたプロンプトを確認し approved に遷移
 6. **タスク実行** - approved タスクをディスパッチャー経由で実行
 7. **ステータス確認** - タスク一覧、ジョブ状況の表示
 8. **タスク操作** - データソース側のタスクを操作（ステータス変更等）
 9. **完了時アクション** - done タスクの後処理実行
 10. **設定管理** - プロジェクト・データソースの CRUD、リポジトリ初期化
-11. **タスク先送り** - pending タスクを deferred にする、または pending に戻す
+11. **精査対象選択** - pending タスクを triaging にする（精査対象として選択）
 
 ## 詳細リファレンス
 
@@ -79,10 +79,10 @@ python3 ~/.claude/skills/my-tasks/scripts/sync-tasks.py \
 
 datasource 設定の `sync_mode` フィールドに応じて同期動作が異なる:
 
-| sync_mode | 消失検出 | deferred 消失時 | done タスクの GC | 用途 |
-|---|---|---|---|---|
-| `full`（デフォルト） | あり | `done` に遷移 | なし | JIRA、To Do 等の状態型データソース |
-| `append` | なし | - | あり（sync 時に除去） | メール等のイベント型データソース |
+| sync_mode | 消失検出 | done タスクの GC | 用途 |
+|---|---|---|---|
+| `full`（デフォルト） | あり | なし | JIRA、To Do 等の状態型データソース |
+| `append` | なし | あり（sync 時に除去） | メール等のイベント型データソース |
 
 ### 出力（JSON レポート）
 
@@ -92,7 +92,6 @@ datasource 設定の `sync_mode` フィールドに応じて同期動作が異�
     "added": 3,
     "updated": 1,
     "vanished": 1,
-    "completed": 0,
     "gc": 2,
     "auto_assigned": 2,
     "needs_review": 1
@@ -100,7 +99,6 @@ datasource 設定の `sync_mode` フィールドに応じて同期動作が異�
   "added": [...],
   "updated": [...],
   "vanished": [...],
-  "completed": [...],
   "gc": [...],
   "auto_assigned": [...],
   "needs_review": [...]
@@ -109,8 +107,70 @@ datasource 設定の `sync_mode` フィールドに応じて同期動作が異�
 
 - `auto_assigned`: `project_mapping` で自動割り当て成功したタスク
 - `needs_review`: プロジェクトが特定できなかったタスク → ユーザーに確認が必要
-- `completed`: deferred から done に遷移したタスク（full モード: リモート側で完了済み）
 - `gc`: GC で除去された done タスク（append モード）
+
+## refine.py の使い方
+
+タスク精査を1タスク1ジョブとしてディスパッチャーに投入するスクリプト。
+各ジョブは専用のコンテキストでタスクを精査し、scoped 遷移時には実行プロンプトも同時に生成する。
+
+```bash
+# 全 triaging タスクを精査ジョブとして投入
+python3 ~/.claude/skills/my-tasks/scripts/refine.py \
+  --repo ~/.local/share/my-tasks
+
+# 特定タスクのみ
+python3 ~/.claude/skills/my-tasks/scripts/refine.py \
+  --repo ~/.local/share/my-tasks \
+  --task 20260301-001
+
+# 全回答済み needs_clarification タスクも含める
+python3 ~/.claude/skills/my-tasks/scripts/refine.py \
+  --repo ~/.local/share/my-tasks \
+  --include-clarified
+
+# ドライラン（プロンプトを表示するだけで投入しない）
+python3 ~/.claude/skills/my-tasks/scripts/refine.py \
+  --repo ~/.local/share/my-tasks \
+  --dry-run
+```
+
+### 引数
+
+| 引数 | 必須 | 説明 |
+|---|---|---|
+| `--repo PATH` | No | タスク管理リポジトリのパス（デフォルト: `~/.local/share/my-tasks`） |
+| `--task ID` | No | 特定タスク ID のみ処理 |
+| `--include-clarified` | No | 全回答済みの `needs_clarification` タスクも対象にする |
+| `--sandbox-profile PROFILE` | No | サンドボックスプロファイルを上書き指定 |
+| `--dry-run` | No | 投入せずにプロンプトを表示するだけ |
+
+### 出力（JSON レポート）
+
+```json
+{
+  "dispatched": 2,
+  "failed": 0,
+  "skipped": 1,
+  "details": [...],
+  "skipped_details": [{"task_id": "20260301-003", "reason": "manual プロジェクト (manual)"}]
+}
+```
+
+### 対象タスクとプロンプト
+
+| ステータス | 対象条件 | ジョブの動作 |
+|---|---|---|
+| `triaging` | 常に対象 | 精査 → `needs_clarification` or `scoped`（+ 実行プロンプト生成） |
+| `needs_clarification` | `--include-clarified` 指定時、かつ全チェックボックスが `[x]` | 再精査 → `scoped`（+ 実行プロンプト生成） |
+
+### 注意
+
+- manual プロジェクト（`working_directory` なし）はスキップされる。メインセッションで直接処理すること
+- 各ジョブはプロジェクトの作業ディレクトリで実行されるため、ソースコードの調査が可能
+- ジョブは `tasks/{id}.md` と `tasks/index.jsonl` を直接更新する
+
+---
 
 ## dispatcher.py の使い方
 

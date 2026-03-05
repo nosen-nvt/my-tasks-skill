@@ -64,15 +64,15 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 ## タスクのステータスフロー
 
 ```
-pending → needs_clarification → scoped → approved → running → done
-  ↕              └→ done (manual)                          └→ failed
-deferred
+pending → triaging → scoped              → approved → running → done
+                   → needs_clarification → scoped                └→ failed
+                         └→ done (manual 短縮フロー)
 ```
 
 - `pending`: データソースから取り込まれた初期状態
-- `deferred`: 精査を先送りしたタスク（pending からのみ遷移可、取り消しで pending に戻る）
+- `triaging`: ユーザが精査対象として選択。精査プロセス中
 - `needs_clarification`: 質問が生成されたが未回答の項目がある
-- `scoped`: 前提条件・達成条件が明確で、実行プロンプトが生成済み
+- `scoped`: 前提条件・達成条件が明確で、実行プロンプトが生成済み（精査ジョブが scoped 遷移時に同時生成）
 - `approved`: ユーザがプロンプトを承認し、実行待ち
 - `running`: ディスパッチャーで実行中
 - `done` / `failed`: 完了 / 失敗

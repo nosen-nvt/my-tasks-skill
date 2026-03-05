@@ -22,7 +22,7 @@
 
 | 値 | 説明 |
 |---|---|
-| `"full"` | 全量同期。JSONL に含まれないタスクを「消失」として検出・削除する。deferred タスクが消失した場合は `done` に遷移する。JIRA・To Do などの状態型データソース向け |
+| `"full"` | 全量同期。JSONL に含まれないタスクを「消失」として検出・削除する。JIRA・To Do などの状態型データソース向け |
 | `"append"` | 追記同期。消失検出をスキップし、新規追加と既存更新のみ行う。sync 実行時に `done` タスクを GC（インデックス除去 + md 削除）する。メールなどのイベント型データソース向け |
 
 デフォルト値は `"full"`（後方互換性）。
@@ -132,18 +132,17 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 ### ステータス定義
 
 ```
-pending ──→ needs_clarification ──→ scoped ──→ approved ──→ running ──→ done
-  │           ↑    │     │                                          └──→ failed
-  ↓ ↑         └────┘     └──→ done (manual)
-deferred
+pending → triaging → scoped              → approved → running → done
+                   → needs_clarification → scoped                └→ failed
+                         └→ done (manual 短縮フロー)
 ```
 
 | ステータス | 意味 |
 |-----------|------|
 | `pending` | データソースから取り込まれた初期状態 |
-| `deferred` | 精査を先送りしたタスク（pending からのみ遷移可） |
+| `triaging` | ユーザが精査対象として選択。精査プロセス中 |
 | `needs_clarification` | 質問が生成されたが、未回答の項目がある（manual プロジェクトでは全回答後 `done` へ直接遷移） |
-| `scoped` | 前提条件・達成条件が明確で、実行プロンプトが生成済み |
+| `scoped` | 前提条件・達成条件が明確で、実行プロンプトが生成済み（精査ジョブが scoped 遷移時に同時生成） |
 | `approved` | ユーザがプロンプトを承認し、実行待ち |
 | `running` | ディスパッチャーで実行中 |
 | `done` | 完了 |
@@ -151,9 +150,9 @@ deferred
 
 ### 遷移ルール補足
 
-- `pending` → `deferred`: 精査前（pending）のタスクのみ先送り可
-- `deferred` → `pending`: 先送りを取り消し、精査待ちに戻す
-- `deferred` からは `needs_clarification` へ直接遷移しない（必ず `pending` を経由）
+- `pending` → `triaging`: ユーザが精査対象として選択したとき
+- `triaging` → `scoped`: 未決事項がなく達成条件が明確な場合
+- `triaging` → `needs_clarification`: 未決事項がある場合
 - **manual プロジェクト短縮フロー**: プロジェクト定義に `working_directory` がないプロジェクトは manual 扱い。`needs_clarification` で全未決事項が `[x]` になったら `scoped` / `approved` / `running` をスキップし `done` へ直接遷移する。完了時アクション（操作9）は通常通り実行する
 
 ### ID 生成規則
@@ -410,7 +409,7 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 ### 規約
 
 - 収集スクリプトは完了済みタスクを出力しない（未完了タスクのみ出力）
-- `sync_mode=full` のデータソース: JSONL に含まれないが `tasks/index.jsonl` に存在するタスクは「消失タスク」として扱い、インデックスと Markdown ファイルから削除する（deferred タスクが消失した場合は `done` に遷移）
+- `sync_mode=full` のデータソース: JSONL に含まれないが `tasks/index.jsonl` に存在するタスクは「消失タスク」として扱い、インデックスと Markdown ファイルから削除する
 - `sync_mode=append` のデータソース: 消失検出をスキップし、新規追加と既存更新のみ行う。sync 実行時に `done` タスクを GC する
 - フィールドが存在しない場合はデフォルト値を使用（`null`）
 

@@ -33,7 +33,6 @@
    - `auto_assigned`: `project_mapping` でプロジェクトが特定できたタスク
    - `needs_review`: プロジェクトが特定できなかったタスク → ユーザーに確認
    - `vanished`: 消失タスク（full モード: インデックスと Markdown から削除済み）
-   - `completed`: deferred から done に遷移したタスク（full モード: リモート側で完了）
    - `gc`: GC で除去された done タスク（append モード）
 
 4. 要確認タスクに対してユーザーと対話:
@@ -101,43 +100,76 @@
 
 ## 3. タスク精査
 
-`pending` タスクに対して質問リストを生成し、`needs_clarification` に遷移する。
+`triaging` タスクの精査、および全回答済み `needs_clarification` タスクの再精査を行う。
+`refine.py` を使い、**1タスク1ジョブ**としてディスパッチャーに投入する。
+各ジョブは専用のコンテキストでタスクを精査し、`scoped` 遷移時には実行プロンプトも同時に生成する。
 
 ### 手順
 
-1. `tasks/index.jsonl` から `status=pending` のタスクを一覧（`deferred` タスクは精査対象外）
+1. `refine.py` を実行してジョブを投入:
+   ```bash
+   # 全 triaging タスクを精査ジョブとして投入
+   python3 ~/.claude/skills/my-tasks/scripts/refine.py \
+     --repo ~/.local/share/my-tasks
 
-2. 対象タスクの `tasks/{id}.md` を読み込み
+   # 特定タスクのみ
+   python3 ~/.claude/skills/my-tasks/scripts/refine.py \
+     --repo ~/.local/share/my-tasks \
+     --task 20260301-001
 
-3. タスクの内容を分析し、「未決事項」セクションに質問リストを生成:
-   ```markdown
-   ## 未決事項
+   # 全回答済み needs_clarification タスクも含める
+   python3 ~/.claude/skills/my-tasks/scripts/refine.py \
+     --repo ~/.local/share/my-tasks \
+     --include-clarified
 
-   - [ ] 認証方式は OAuth2 でよいか？
-   - [ ] テストカバレッジの目標は？
+   # ドライラン（プロンプトを表示するだけで投入しない）
+   python3 ~/.claude/skills/my-tasks/scripts/refine.py \
+     --repo ~/.local/share/my-tasks \
+     --dry-run
    ```
 
-4. `index.jsonl` と `.md` の status を `needs_clarification` に更新
+2. ジョブ完了を待機（必要に応じて）:
+   ```bash
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status
+   ```
 
-5. ユーザーに質問を提示し、回答を収集:
+3. 結果を確認:
+   - `needs_clarification` に遷移したタスク → ユーザーに質問を提示し、回答を収集
+   - `scoped` に遷移したタスク → 実行プロンプトが生成済み。操作5（承認）へ
+
+4. ユーザーが `needs_clarification` タスクの質問に回答したら:
    - 回答済みの項目を `[x]` に更新し、回答を追記
-   - 全項目が `[x]` になったら次のステップへ
+   - 全項目が `[x]` になったら `refine.py --include-clarified` で再精査
 
-6. **達成条件の記述ルール**（`manual` 以外のプロジェクト）:
-   - `manual` 以外のプロジェクトのタスクは AI エージェントが実装・実行する前提
-   - **達成条件は AI エージェント自身がローカルで検証可能な内容** にすること
-   - OK: ファイル内容の確認、YAML/JSON のパース検証、テスト実行（`dotnet test`, `npm test` 等）、ビルド成功、`az pipelines run` + 結果確認
-   - NG: ブラウザでの手動確認、外部サービスの目視確認など、エージェントが実行できない操作
+### 精査ジョブの動作
 
-7. **manual プロジェクト判定**: タスクの `project_id` に対応する `projects/{project_id}.json` を確認し、`working_directory` が未設定かどうかを判定:
-   - **`working_directory` あり（通常フロー）**: `scoped` に遷移
-   - **`working_directory` なし（manual 短縮フロー）**: `scoped` / `approved` / `running` をスキップし `done` に直接遷移。完了時アクション（操作9）を実行する
+各ジョブは以下を実行する（`refine.py` がプロンプトを自動組み立て）:
+
+1. タスク md とプロジェクト定義を読み込み
+2. 必要に応じて作業ディレクトリ配下のソースコードを調査
+3. 未決事項を分析:
+   - **未決事項がある場合**: `## 未決事項` にチェックボックス形式で質問を記載し、`needs_clarification` に遷移
+   - **未決事項がない場合**: `## 概要`、`## 事前条件`、`## 達成条件`、`## 完了時アクション` を記載し、`scoped` に遷移。`## 実行プロンプト` も同時に生成
+4. `tasks/{id}.md` と `tasks/index.jsonl` を更新
+
+### 達成条件の記述ルール
+
+- `manual` 以外のプロジェクトのタスクは AI エージェントが実装・実行する前提
+- **達成条件は AI エージェント自身がローカルで検証可能な内容** にすること
+- OK: ファイル内容の確認、YAML/JSON のパース検証、テスト実行（`dotnet test`, `npm test` 等）、ビルド成功、`az pipelines run` + 結果確認
+- NG: ブラウザでの手動確認、外部サービスの目視確認など、エージェントが実行できない操作
+
+### manual プロジェクト
+
+`working_directory` が未設定のプロジェクトは manual 扱い。`refine.py` はスキップし、メインセッションで直接処理する:
+- `scoped` / `approved` / `running` をスキップし `done` に直接遷移
+- 完了時アクション（操作9）を実行する
 
 ---
 
-## 4. プロンプト生成
+## 4. プロンプト再生成
 
-`scoped` タスクの実行プロンプトを生成する。
+`scoped` タスクの実行プロンプトを再生成する。通常は操作3（精査）で自動生成されるため、このステップは修正が必要な場合にのみ使用する。
 
 ### 手順
 
@@ -145,7 +177,7 @@
 
 2. 対象タスクの `tasks/{id}.md` を読み込み
 
-3. 未決事項の回答、事前条件、達成条件を元に実行プロンプトを生成
+3. 未決事項の回答、事前条件、達成条件を元に実行プロンプトを再生成
 
 4. `## 実行プロンプト` セクションにプロンプトを書き込み
 
@@ -332,33 +364,23 @@ python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --sand
 
 ---
 
-## 11. タスク先送り / 先送り取消
+## 11. 精査対象選択
 
-`pending` タスクを `deferred`（先送り）にする、またはその取り消しを行う。
+`pending` タスクを `triaging`（精査対象）にする。ユーザが明示的に精査対象を選択するステップ。
 
-### 先送り（pending → deferred）
+### 手順（pending → triaging）
 
 1. 対象タスクの `tasks/index.jsonl` エントリを確認し、`status` が `pending` であることを確認
 
-2. `index.jsonl` の当該エントリの `status` を `deferred` に更新
+2. `index.jsonl` の当該エントリの `status` を `triaging` に更新
 
-3. `tasks/{id}.md` の `- Status:` 行を `deferred` に更新
-
-### 先送り取消（deferred → pending）
-
-1. 対象タスクの `tasks/index.jsonl` エントリを確認し、`status` が `deferred` であることを確認
-
-2. `index.jsonl` の当該エントリの `status` を `pending` に更新
-
-3. `tasks/{id}.md` の `- Status:` 行を `pending` に更新
+3. `tasks/{id}.md` の `- Status:` 行を `triaging` に更新
 
 ### 制約
 
-- `pending` → `deferred` 遷移は `status=pending` のタスクのみ可
-- `deferred` からは `pending` にのみ戻せる（`needs_clarification` への直接遷移は不可）
+- `pending` → `triaging` 遷移は `status=pending` のタスクのみ可
 - git commit は不要（tasks/ は gitignore 対象）
 
 ### 例
 
-- 「[タスク名] を先送りして」→ `pending` → `deferred`
-- 「やっぱりやる」「pending に戻して」→ `deferred` → `pending`
+- 「これを精査して」「次にやる」→ `pending` → `triaging`（その後、操作3 タスク精査を実行）
