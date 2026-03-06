@@ -20,6 +20,18 @@ LISTEN_ADDR = "10.200.1.1"
 HOME = Path.home()
 UID = os.getuid()
 CACHE_DIR = Path("~/.local/share/my-tasks/.cache").expanduser()
+DEFAULT_REPO = Path("~/.local/share/my-tasks").expanduser()
+PROXY_PROFILES_DIR = Path("~/.local/share/my-tasks/proxy-profiles").expanduser()
+
+
+# --- プロジェクト読み込み -----------------------------------------------------
+
+def load_project(project_id: str, repo_dir: Path = DEFAULT_REPO) -> dict | None:
+    path = repo_dir / "projects" / f"{project_id}.json"
+    if path.is_file():
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    return None
 
 
 # --- netns -------------------------------------------------------------------
@@ -172,6 +184,18 @@ def resolve_profile(name_or_path: str) -> dict:
 
 def uses_network_protection(profile: dict) -> bool:
     return bool(profile.get("proxy_profile"))
+
+
+def resolve_proxy_port(profile: dict) -> int | None:
+    """サンドボックスプロファイルの proxy_profile からポートを解決する。"""
+    proxy_profile_id = profile.get("proxy_profile")
+    if not proxy_profile_id:
+        return None
+    pp = PROXY_PROFILES_DIR / f"{proxy_profile_id}.json"
+    if pp.is_file():
+        with open(pp, encoding="utf-8") as f:
+            return json.load(f).get("port")
+    return None
 
 
 def resolve_host_forward_ports(profile: dict) -> list[int]:
@@ -382,15 +406,6 @@ def _env_args(env_file_args: list[str], cred_args: list[str]) -> list[str]:
     ]
 
 
-def _cred_env() -> list[str]:
-    args: list[str] = []
-    for var in ("CRED_TOKEN", "CRED_BROKER_SOCK"):
-        val = os.environ.get(var)
-        if val:
-            args += ["--setenv", var, val]
-    return args
-
-
 # --- 組み込み Credential Broker -----------------------------------------------
 
 class EmbeddedCredBroker:
@@ -564,15 +579,43 @@ def build_host_network_args(
 
 # --- 公開 API ----------------------------------------------------------------
 
-def run(
+def resolve_project_sandbox_params(
+    project: dict,
     *,
-    proxy_port: int = 3128,
+    sandbox_profile_override: str | None = None,
+) -> tuple[str, list[str], list[str] | str]:
+    """プロジェクト dict からサンドボックス実行に必要なパラメータを解決する。
+
+    Returns:
+        (sandbox_profile_id, env_files, allowed_credentials)
+    """
+    sandbox_profile_id = sandbox_profile_override or project.get("sandbox_profile", "default")
+    profile = resolve_profile(sandbox_profile_id)
+
+    env_files: list[str] = []
+    project_env_file = resolve_project_env_sync(project)
+    if project_env_file:
+        env_files.append(str(project_env_file))
+    working_dir = project.get("working_directory", "")
+    if working_dir:
+        dotenv = Path(working_dir) / ".env"
+        if dotenv.is_file():
+            env_files.append(str(dotenv))
+
+    allowed_credentials = resolve_allowed_credentials(profile)
+    return sandbox_profile_id, env_files, allowed_credentials
+
+
+def build_exec_args(
+    *,
     sandbox_profile: str = "default",
+    proxy_port: int | None = None,
     env_files: list[str] | None = None,
+    cred_env: dict[str, str] | None = None,
     command: list[str] | None = None,
     working_dir: str | None = None,
-) -> None:
-    """サンドボックスを構築し、exec で置き換える."""
+) -> list[str]:
+    """bwrap 実行コマンド引数を構築して返す。netns の準備も行う。"""
     work = working_dir or os.getcwd()
 
     profile = resolve_profile(sandbox_profile)
@@ -583,8 +626,39 @@ def run(
         command = [f"{HOME}/.local/bin/claude", "--permission-mode", "bypassPermissions"]
 
     env_file_args = load_env_files(env_files or [])
-    cred_args = _cred_env()
 
+    cred_args: list[str] = []
+    if cred_env:
+        for k, v in cred_env.items():
+            cred_args += ["--setenv", k, v]
+
+    if proxy_port is None:
+        proxy_port = resolve_proxy_port(profile) or 3128
+
+    host_forward_ports = resolve_host_forward_ports(profile)
+
+    if network_protected:
+        ensure_netns()
+        if host_forward_ports:
+            setup_host_port_forwarding(host_forward_ports)
+        return build_netns_args(work, proxy_port, profile_binds, env_file_args, cred_args, command, host_forward_ports)
+    else:
+        return build_host_network_args(work, profile_binds, env_file_args, cred_args, command)
+
+
+def run(
+    *,
+    proxy_port: int | None = None,
+    sandbox_profile: str = "default",
+    env_files: list[str] | None = None,
+    command: list[str] | None = None,
+    working_dir: str | None = None,
+) -> None:
+    """サンドボックスを構築し、exec で置き換える."""
+    profile = resolve_profile(sandbox_profile)
+
+    # dispatcher 経由でない場合: 組み込み Credential Broker を起動
+    cred_env: dict[str, str] | None = None
     broker = None
     if not os.environ.get("CRED_TOKEN"):
         allowed = resolve_allowed_credentials(profile)
@@ -593,17 +667,18 @@ def run(
             token = uuid.uuid4().hex
             broker = EmbeddedCredBroker(sock_path, token, allowed)
             broker.start()
-            cred_args = ["--setenv", "CRED_TOKEN", token, "--setenv", "CRED_BROKER_SOCK", sock_path]
-
-    host_forward_ports = resolve_host_forward_ports(profile)
-
-    if network_protected:
-        ensure_netns()
-        if host_forward_ports:
-            setup_host_port_forwarding(host_forward_ports)
-        exec_args = build_netns_args(work, proxy_port, profile_binds, env_file_args, cred_args, command, host_forward_ports)
+            cred_env = {"CRED_TOKEN": token, "CRED_BROKER_SOCK": sock_path}
     else:
-        exec_args = build_host_network_args(work, profile_binds, env_file_args, cred_args, command)
+        cred_env = {k: os.environ[k] for k in ("CRED_TOKEN", "CRED_BROKER_SOCK") if k in os.environ}
+
+    exec_args = build_exec_args(
+        sandbox_profile=sandbox_profile,
+        proxy_port=proxy_port,
+        env_files=env_files,
+        cred_env=cred_env,
+        command=command,
+        working_dir=working_dir,
+    )
 
     if broker:
         proc = subprocess.Popen(exec_args)

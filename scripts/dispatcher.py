@@ -26,26 +26,24 @@ import os
 import signal
 import subprocess
 import sys
-import tempfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sandbox_exec
+
 JST = timezone(timedelta(hours=9))
 
 DEFAULT_MAX_SLOTS = 8
 DEFAULT_REPO = "~/.local/share/my-tasks"
 DEFAULT_SESSION_NAME = "dispatch"
-DEFAULT_PROXY_PROFILES_DIR = "~/.local/share/my-tasks/proxy-profiles"
-DEFAULT_SANDBOX_PROFILES_DIR = "~/.local/share/my-tasks/sandbox-profiles"
-DEFAULT_CREDENTIAL_PROFILES_DIR = "~/.local/share/my-tasks/credential-profiles"
 
 SOCKET_DIR_NAME = "my-tasks-dispatch"
 SOCKET_FILE_NAME = "dispatcher.sock"
 CRED_BROKER_SOCK_NAME = "cred-broker.sock"
-CACHE_DIR = Path("~/.local/share/my-tasks/.cache").expanduser()
 
 log = logging.getLogger("dispatcher")
 
@@ -72,148 +70,8 @@ def get_repo_dir(repo: str = DEFAULT_REPO) -> Path:
     return Path(repo).expanduser().resolve()
 
 
-def load_json(path: Path) -> dict | None:
-    if path.exists():
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    return None
-
-
-def load_project(repo_dir: Path, project_id: str) -> dict | None:
-    return load_json(repo_dir / "projects" / f"{project_id}.json")
-
-
-def load_proxy_profile(profile_id: str, profiles_dir: str = DEFAULT_PROXY_PROFILES_DIR) -> dict | None:
-    profiles_path = Path(profiles_dir).expanduser().resolve()
-    return load_json(profiles_path / f"{profile_id}.json")
-
-
-
-BUILTIN_CREDENTIAL_PROFILES: dict[str, dict] = {
-    "full-access": {
-        "credential_profile_id": "full-access",
-        "allowed_credentials": "*",
-    },
-    "none": {
-        "credential_profile_id": "none",
-        "allowed_credentials": [],
-    },
-}
-
-
-BUILTIN_SANDBOX_PROFILES: dict[str, dict] = {
-    "default": {
-        "profile_id": "default",
-        "proxy_profile": "full",
-        "credential_profile": "full-access",
-    },
-    "unrestricted": {
-        "profile_id": "unrestricted",
-        "proxy_profile": None,
-        "credential_profile": "full-access",
-    },
-}
-
-
-def load_credential_profile(profile_id: str, profiles_dir: str = DEFAULT_CREDENTIAL_PROFILES_DIR) -> dict | None:
-    """クレデンシャルプロファイルを解決する。ファイル → 組み込み の順。"""
-    profiles_path = Path(profiles_dir).expanduser().resolve()
-    result = load_json(profiles_path / f"{profile_id}.json")
-    if result:
-        return result
-    return BUILTIN_CREDENTIAL_PROFILES.get(profile_id)
-
-
-def resolve_allowed_credentials(sandbox_profile: dict) -> list[str] | str:
-    """サンドボックスプロファイルから allowed_credentials を解決する。
-
-    解決優先順位:
-    1. allowed_credentials が直接存在 → そのまま返す（後方互換）
-    2. credential_profile が指定 → credential profile を読み込んで返す
-    3. どちらも未指定 → "*"（デフォルト全許可）
-    """
-    if "allowed_credentials" in sandbox_profile:
-        return sandbox_profile["allowed_credentials"]
-
-    credential_profile_id = sandbox_profile.get("credential_profile")
-    if credential_profile_id:
-        cred_profile = load_credential_profile(credential_profile_id)
-        if not cred_profile:
-            raise ValueError(f"Credential profile not found: {credential_profile_id}")
-        return cred_profile["allowed_credentials"]
-
-    return "*"
-
-
-def load_sandbox_profile(profile_id: str, profiles_dir: str = DEFAULT_SANDBOX_PROFILES_DIR) -> dict | None:
-    """サンドボックスプロファイルを解決する。ファイル → 組み込み の順。"""
-    profiles_path = Path(profiles_dir).expanduser().resolve()
-    result = load_json(profiles_path / f"{profile_id}.json")
-    if result:
-        return result
-    return BUILTIN_SANDBOX_PROFILES.get(profile_id)
-
-
-def _resolve_sandbox_profile_arg(profile_id: str, profiles_dir: str = DEFAULT_SANDBOX_PROFILES_DIR) -> str:
-    """sandbox コマンドに渡す引数を決定する。ファイル存在時はパス、なければ名前。"""
-    profiles_path = Path(profiles_dir).expanduser().resolve()
-    file_path = profiles_path / f"{profile_id}.json"
-    if file_path.is_file():
-        return str(file_path)
-    return profile_id
-
-
 def is_inside_sandbox() -> bool:
     return os.environ.get("SANDBOX") == "1"
-
-
-async def resolve_project_env(project: dict, dest_dir: Path | None = None) -> Path | None:
-    """プロジェクトの env フィールドを解決し、env ファイルに書き出す。
-
-    Args:
-        project: プロジェクト定義 dict
-        dest_dir: 書き出し先ディレクトリ。指定時は永続ファイル、None 時は一時ファイル。
-
-    Returns:
-        生成した env ファイルのパス。env フィールドが無い場合は None。
-    """
-    env_dict = project.get("env")
-    if not env_dict:
-        return None
-
-    resolved: dict[str, str] = {}
-    for key, value in env_dict.items():
-        if isinstance(value, dict) and "pass" in value:
-            proc = await asyncio.create_subprocess_exec(
-                "pass", "show", value["pass"],
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                log.error(f"pass show failed for {value['pass']}: {stderr.decode().strip()}")
-                continue
-            resolved[key] = stdout.decode().splitlines()[0]
-        else:
-            resolved[key] = str(value)
-
-    if not resolved:
-        return None
-
-    if dest_dir is not None:
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        env_path = dest_dir / f"env-{project['project_id']}.env"
-    else:
-        fd, tmp_path = tempfile.mkstemp(prefix="env-", suffix=".env")
-        os.close(fd)
-        env_path = Path(tmp_path)
-
-    env_path.write_text(
-        "\n".join(f"{k}={v}" for k, v in resolved.items()) + "\n",
-        encoding="utf-8",
-    )
-    os.chmod(env_path, 0o600)
-    return env_path
 
 
 # ---------------------------------------------------------------------------
@@ -317,11 +175,9 @@ class Job:
     task_id: str | None
     prompt: str
     working_dir: str
-    sandbox_profile_arg: str = "default"
-    network_protected: bool = True
-    proxy_port: int = 3128
+    sandbox_profile_id: str = "default"
+    env_files: list[str] = field(default_factory=list)
     allowed_credentials: list[str] | str = field(default_factory=list)
-    project_env_file: Path | None = None
     status: str = "queued"
     pid: int | None = None
     exit_code: int | None = None
@@ -427,7 +283,7 @@ class DispatchServer:
         if not prompt:
             return {"ok": False, "error": "prompt is required"}
 
-        project = load_project(self.repo_dir, project_id)
+        project = sandbox_exec.load_project(project_id, self.repo_dir)
         if not project:
             return {"ok": False, "error": f"Project not found: {project_id}"}
 
@@ -437,26 +293,13 @@ class DispatchServer:
         if not Path(working_dir).is_dir():
             return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
 
-        profile_id = request.get("sandbox_profile") or project.get("sandbox_profile", "default")
-        sandbox_profile_data = load_sandbox_profile(profile_id)
-        if not sandbox_profile_data:
-            return {"ok": False, "error": f"Sandbox profile not found: {profile_id}"}
-
-        proxy_profile_id = sandbox_profile_data.get("proxy_profile")
-        if proxy_profile_id:
-            network_protected = True
-            proxy_profile = load_proxy_profile(proxy_profile_id)
-            proxy_port = proxy_profile["port"] if proxy_profile and "port" in proxy_profile else 3128
-        else:
-            network_protected = False
-            proxy_port = 3128
         try:
-            allowed_credentials = resolve_allowed_credentials(sandbox_profile_data)
-        except ValueError as e:
+            sandbox_profile_id, env_files, allowed_credentials = \
+                sandbox_exec.resolve_project_sandbox_params(
+                    project, sandbox_profile_override=request.get("sandbox_profile"),
+                )
+        except (FileNotFoundError, ValueError) as e:
             return {"ok": False, "error": str(e)}
-        sandbox_profile_arg = _resolve_sandbox_profile_arg(profile_id)
-
-        project_env_file = await resolve_project_env(project)
 
         dispatch_id = self.generate_dispatch_id(project_id)
 
@@ -466,11 +309,9 @@ class DispatchServer:
             task_id=task_id,
             prompt=prompt,
             working_dir=working_dir,
-            sandbox_profile_arg=sandbox_profile_arg,
-            network_protected=network_protected,
-            proxy_port=proxy_port,
+            sandbox_profile_id=sandbox_profile_id,
+            env_files=env_files,
             allowed_credentials=allowed_credentials,
-            project_env_file=project_env_file,
         )
         self.jobs[dispatch_id] = job
 
@@ -491,7 +332,7 @@ class DispatchServer:
         if not project_id:
             return {"ok": False, "error": "project_id is required"}
 
-        project = load_project(self.repo_dir, project_id)
+        project = sandbox_exec.load_project(project_id, self.repo_dir)
         if not project:
             return {"ok": False, "error": f"Project not found: {project_id}"}
 
@@ -501,20 +342,13 @@ class DispatchServer:
         if not Path(working_dir).is_dir():
             return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
 
-        profile_id = request.get("sandbox_profile") or project.get("sandbox_profile", "default")
-        sandbox_profile_data = load_sandbox_profile(profile_id)
-        if not sandbox_profile_data:
-            return {"ok": False, "error": f"Sandbox profile not found: {profile_id}"}
-
-        proxy_profile_id = sandbox_profile_data.get("proxy_profile")
-        if proxy_profile_id:
-            proxy_profile = load_proxy_profile(proxy_profile_id)
-            proxy_port = proxy_profile["port"] if proxy_profile and "port" in proxy_profile else 3128
-        else:
-            proxy_port = 3128
-        sandbox_profile_arg = _resolve_sandbox_profile_arg(profile_id)
-
-        project_env_file = await resolve_project_env(project, dest_dir=CACHE_DIR)
+        try:
+            sandbox_profile_id, env_files, _ = \
+                sandbox_exec.resolve_project_sandbox_params(
+                    project, sandbox_profile_override=request.get("sandbox_profile"),
+                )
+        except (FileNotFoundError, ValueError) as e:
+            return {"ok": False, "error": str(e)}
 
         # tmux セッション決定
         session_name, is_caller = _detect_tmux_session(session)
@@ -522,13 +356,8 @@ class DispatchServer:
             return {"ok": False, "error": f"tmux session '{session_name}' not available"}
 
         window_name = project_id
-        env_file_args = ""
-        if project_env_file:
-            env_file_args += f" --env-file '{project_env_file}'"
-        env_file = Path(working_dir) / ".env"
-        if env_file.is_file():
-            env_file_args += f" --env-file '{env_file}'"
-        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_arg}'{env_file_args} --proxy-port {proxy_port} -- claude --permission-mode bypassPermissions"
+        env_file_args = "".join(f" --env-file '{ef}'" for ef in env_files)
+        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_id}'{env_file_args} -- claude --permission-mode bypassPermissions"
 
         result = subprocess.run(
             ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, "bash", "-c", cmd],
@@ -607,33 +436,28 @@ class DispatchServer:
         log_path = self._log_path(job.dispatch_id)
         log_file = None
         try:
-            env = {**os.environ, "SANDBOX": "1"}
+            cred_env: dict[str, str] | None = None
             if cred_token:
-                env["CRED_TOKEN"] = cred_token
-                env["CRED_BROKER_SOCK"] = get_cred_broker_socket_path()
+                cred_env = {"CRED_TOKEN": cred_token, "CRED_BROKER_SOCK": get_cred_broker_socket_path()}
 
-            log_file = open(log_path, "w", encoding="utf-8")
-            sandbox_args = [
-                "sandbox",
-                "--sandbox-profile", job.sandbox_profile_arg,
-            ]
-            if job.project_env_file:
-                sandbox_args += ["--env-file", str(job.project_env_file)]
-            env_file = Path(job.working_dir) / ".env"
-            if env_file.is_file():
-                sandbox_args += ["--env-file", str(env_file)]
-            sandbox_args += [
-                "--proxy-port", str(job.proxy_port),
-                "--",
-            ]
-
-            proc = await asyncio.create_subprocess_exec(
-                *sandbox_args,
+            command = [
                 "claude", "--permission-mode", "bypassPermissions",
                 "-p", job.prompt,
                 "--append-system-prompt", system_prompt,
+            ]
+
+            exec_args = sandbox_exec.build_exec_args(
+                sandbox_profile=job.sandbox_profile_id,
+                env_files=job.env_files,
+                cred_env=cred_env,
+                command=command,
+                working_dir=job.working_dir,
+            )
+
+            log_file = open(log_path, "w", encoding="utf-8")
+            proc = await asyncio.create_subprocess_exec(
+                *exec_args,
                 cwd=job.working_dir,
-                env=env,
                 stdout=log_file,
                 stderr=log_file,
             )
@@ -651,11 +475,6 @@ class DispatchServer:
         finally:
             if cred_token:
                 self.cred_broker.revoke(cred_token)
-            if job.project_env_file:
-                try:
-                    job.project_env_file.unlink(missing_ok=True)
-                except OSError:
-                    pass
             if log_file:
                 log_file.close()
             job.finished_at = now_iso()
@@ -706,8 +525,11 @@ class DispatchServer:
                 future.set_result(result)
 
     def _build_system_prompt(self, job: Job) -> str:
+        profile = sandbox_exec.resolve_profile(job.sandbox_profile_id)
+        network_protected = sandbox_exec.uses_network_protection(profile)
+
         network_desc = ""
-        if job.network_protected:
+        if network_protected:
             network_desc = """
 制約事項 (ネットワーク保護あり):
 - ネットワーク: GitHub/Bitbucket SSH と HTTP プロキシ経由の HTTPS のみ利用可能
@@ -728,7 +550,7 @@ class DispatchServer:
 - `cred-get <entry>` または `pass show <entry>` で以下の認証情報を取得できます:
 {entries}"""
 
-        network_mode = "保護あり (netns + proxy)" if job.network_protected else "ホストネットワーク直接"
+        network_mode = "保護あり (netns + proxy)" if network_protected else "ホストネットワーク直接"
         return f"""あなたはサンドボックス環境で実行されています。
 
 実行環境:
