@@ -62,10 +62,18 @@ def generate_conf(profiles: list[dict]) -> str:
     lines.append("")
     for profile in profiles:
         pid = profile["profile_id"]
-        domains = " ".join(profile["allowed_domains"])
-        lines.append(f"acl {pid}_domains dstdomain {domains}")
+        # squid 6 は同一 ACL 内に "x" と ".x" の共存を拒否するため
+        # 衝突するベアドメインを別 ACL に分離し、別の http_access ルールで許可する
+        bare = {d for d in profile["allowed_domains"] if not d.startswith(".")}
+        dotted = {d for d in profile["allowed_domains"] if d.startswith(".")}
+        conflicts = {d for d in bare if f".{d}" in dotted}
+        main_domains = [d for d in profile["allowed_domains"] if d not in conflicts]
+        lines.append(f"acl {pid}_domains dstdomain {' '.join(main_domains)}")
         lines.append(f"acl {pid}_port myport {profile['port']}")
         lines.append(f"http_access allow ai_net CONNECT {pid}_domains {pid}_port")
+        if conflicts:
+            lines.append(f"acl {pid}_bare dstdomain {' '.join(sorted(conflicts))}")
+            lines.append(f"http_access allow ai_net CONNECT {pid}_bare {pid}_port")
         lines.append("")
     lines.append(FOOTER)
     return "\n".join(lines)
