@@ -49,8 +49,9 @@ ip netns exec "$NS_NAME" ip route add default via "${HOST_IP%/*}"
 # 4. IP フォワード有効化
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
-# 4b. route_localnet 有効化 (veth-host 経由の DNAT → 127.0.0.1 を許可)
+# 4b. route_localnet 有効化 (veth 経由の 127.0.0.0/8 パケットを許可)
 sysctl -w net.ipv4.conf."$VETH_HOST".route_localnet=1 >/dev/null
+ip netns exec "$NS_NAME" sysctl -w net.ipv4.conf."$VETH_AI".route_localnet=1 >/dev/null
 
 # 5. NAT (nftables masquerade)
 DEFAULT_IF=$(ip route | awk '/^default/{print $5; exit}')
@@ -59,9 +60,9 @@ if [[ -z "$DEFAULT_IF" ]]; then
   exit 1
 fi
 nft add table ip nat
-nft 'add chain ip nat postrouting { type nat hook postrouting priority 100 ; }'
+nft 'add chain ip nat postrouting { type nat hook postrouting priority 100 ; }' 2>/dev/null || true
 nft add rule ip nat postrouting oifname "$DEFAULT_IF" masquerade
-nft 'add chain ip nat prerouting { type nat hook prerouting priority -100 ; }'
+nft 'add chain ip nat prerouting { type nat hook prerouting priority -100 ; }' 2>/dev/null || true
 
 # 5b. DNS リスナー (systemd-resolved を 10.200.1.1 でも待ち受け)
 RESOLVED_DROPIN_DIR=/etc/systemd/resolved.conf.d

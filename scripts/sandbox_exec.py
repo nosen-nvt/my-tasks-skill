@@ -28,17 +28,37 @@ def _netns_exists() -> bool:
     return NS_NAME in result.stdout.split()
 
 
+def _netns_ready() -> bool:
+    """netns が存在し、内部の nft ルールも設定済みか確認する。"""
+    if not _netns_exists():
+        return False
+    result = subprocess.run(
+        ["sudo", "ip", "netns", "exec", NS_NAME, "nft", "list", "table", "inet", "filter"],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def _teardown_netns() -> None:
+    """既存の netns を削除して setup-netns で再作成できるようにする。"""
+    subprocess.run(["sudo", "ip", "netns", "del", NS_NAME], check=True)
+    # veth ペアは netns 削除時に自動削除される
+
+
 def ensure_netns() -> None:
-    """ai-ns ネットワーク名前空間が無ければ作成する (ファイルロック付き)."""
-    if _netns_exists():
+    """ai-ns ネットワーク名前空間を準備する (ファイルロック付き)."""
+    if _netns_ready():
         return
 
     print("ネットワーク名前空間を初期化中...")
     fd = open(LOCK_FILE, "w")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        if _netns_exists():
+        if _netns_ready():
             return
+        if _netns_exists():
+            print("nft ルールが消失しています。再作成します...")
+            _teardown_netns()
         subprocess.run(["sudo", str(SCRIPT_DIR / "setup-netns")], check=True)
         print("ネットワーク名前空間の初期化が完了しました")
     finally:
@@ -229,27 +249,97 @@ def load_env_files(paths: list[str]) -> list[str]:
 
 # --- ホストポートフォワーディング -----------------------------------------------
 
-def setup_host_port_forwarding(ports: list[int]) -> None:
-    """ai-ns からホスト側 127.0.0.1 のポートへアクセスできるよう nft ルールを追加する。
-
-    - ホスト側: prerouting DNAT (10.200.1.1:port → 127.0.0.1:port)
-    - ai-ns 側: output allow (10.200.1.1:port への TCP を許可)
-    """
-    for port in ports:
-        # ホスト側 DNAT (冪等: 重複ルールは無害)
+def _ensure_prerouting_chain() -> None:
+    """nat テーブルに prerouting チェーンが無ければ作成する。"""
+    result = subprocess.run(
+        ["sudo", "nft", "list", "chain", "ip", "nat", "prerouting"],
+        capture_output=True,
+    )
+    if result.returncode != 0:
         subprocess.run([
-            "sudo", "nft", "add", "rule", "ip", "nat", "prerouting",
-            "iifname", "veth-host",
-            "tcp", "dport", str(port),
-            "dnat", "to", "127.0.0.1",
+            "sudo", "nft", "add", "chain", "ip", "nat", "prerouting",
+            "{ type nat hook prerouting priority -100 ; }",
         ], check=True)
-        # ai-ns 側 output 許可
+
+
+def _ensure_ns_nat_chains() -> None:
+    """ai-ns 内の nat テーブルと output/postrouting チェーンが無ければ作成する。"""
+    result = subprocess.run(
+        ["sudo", "ip", "netns", "exec", NS_NAME,
+         "nft", "list", "table", "ip", "nat"],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        subprocess.run([
+            "sudo", "ip", "netns", "exec", NS_NAME,
+            "nft", "add", "table", "ip", "nat",
+        ], check=True)
+    for chain, hook, prio in [
+        ("output", "output", "-100"),
+        ("postrouting", "postrouting", "100"),
+    ]:
+        res = subprocess.run(
+            ["sudo", "ip", "netns", "exec", NS_NAME,
+             "nft", "list", "chain", "ip", "nat", chain],
+            capture_output=True,
+        )
+        if res.returncode != 0:
+            subprocess.run([
+                "sudo", "ip", "netns", "exec", NS_NAME,
+                "nft", "add", "chain", "ip", "nat", chain,
+                f"{{ type nat hook {hook} priority {prio} ; }}",
+            ], check=True)
+
+
+def setup_host_port_forwarding(ports: list[int]) -> None:
+    """ai-ns 内の 127.0.0.1:port をホスト側 localhost に透過転送する。
+
+    3 段階の NAT で実現:
+      ① ai-ns nat OUTPUT:      dst 127.0.0.1 → 10.200.1.1 (DNAT)
+      ② ai-ns nat POSTROUTING: src 127.0.0.1 → 10.200.1.2 (masquerade)
+      ③ ホスト nat PREROUTING:  dst 10.200.1.1 → 127.0.0.1 (DNAT)
+    応答は conntrack が自動逆変換する。
+    """
+    _ensure_prerouting_chain()
+    _ensure_ns_nat_chains()
+    # route_localnet: veth 経由の 127.0.0.0/8 パケットを許可
+    subprocess.run([
+        "sudo", "sysctl", "-w", "net.ipv4.conf.veth-host.route_localnet=1",
+    ], check=True, capture_output=True)
+    subprocess.run([
+        "sudo", "ip", "netns", "exec", NS_NAME,
+        "sysctl", "-w", "net.ipv4.conf.veth-ai.route_localnet=1",
+    ], check=True, capture_output=True)
+    # ② ai-ns postrouting masquerade (src=127.0.0.1 → veth-ai IP)
+    subprocess.run([
+        "sudo", "ip", "netns", "exec", NS_NAME,
+        "nft", "add", "rule", "ip", "nat", "postrouting",
+        "ip", "saddr", "127.0.0.1", "oifname", "veth-ai",
+        "masquerade",
+    ], check=True)
+    for port in ports:
+        # ① ai-ns output DNAT (dst 127.0.0.1:port → LISTEN_ADDR:port)
+        subprocess.run([
+            "sudo", "ip", "netns", "exec", NS_NAME,
+            "nft", "add", "rule", "ip", "nat", "output",
+            "ip", "daddr", "127.0.0.1",
+            "tcp", "dport", str(port),
+            "dnat", "to", LISTEN_ADDR,
+        ], check=True)
+        # ai-ns filter output 許可
         subprocess.run([
             "sudo", "ip", "netns", "exec", NS_NAME,
             "nft", "add", "rule", "inet", "filter", "output",
             "ip", "daddr", LISTEN_ADDR,
             "tcp", "dport", str(port),
             "accept",
+        ], check=True)
+        # ③ ホスト側 prerouting DNAT (dst LISTEN_ADDR:port → 127.0.0.1)
+        subprocess.run([
+            "sudo", "nft", "add", "rule", "ip", "nat", "prerouting",
+            "iifname", "veth-host",
+            "tcp", "dport", str(port),
+            "dnat", "to", "127.0.0.1",
         ], check=True)
 
 
