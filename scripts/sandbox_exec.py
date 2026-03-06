@@ -1,6 +1,7 @@
 """sandbox_exec - bwrap + netns によるサンドボックス実行ロジック."""
 
 import fcntl
+import fnmatch
 import json
 import os
 import signal
@@ -454,7 +455,7 @@ class EmbeddedCredBroker:
     def _process(self, token: str, entry: str, operation: str = "show", value: str = "") -> dict:
         if not token or token != self._token:
             return {"ok": False, "error": "invalid token"}
-        if self._allowed != "*" and entry not in self._allowed:
+        if self._allowed != "*" and not any(fnmatch.fnmatch(entry, pat) for pat in self._allowed):
             return {"ok": False, "error": f"entry not allowed: {entry}"}
         try:
             if operation == "insert":

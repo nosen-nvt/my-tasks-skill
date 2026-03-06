@@ -19,6 +19,28 @@ from pathlib import Path
 import sandbox_exec
 
 PROJECTS_DIR = Path("~/.local/share/my-tasks/projects").expanduser()
+SANDBOX_PROFILES_DIR = Path("~/.local/share/my-tasks/sandbox-profiles").expanduser()
+PROXY_PROFILES_DIR = Path("~/.local/share/my-tasks/proxy-profiles").expanduser()
+
+
+def resolve_proxy_port(sandbox_profile_name: str) -> int | None:
+    """サンドボックスプロファイルの proxy_profile からポートを解決する。"""
+    sp = SANDBOX_PROFILES_DIR / f"{sandbox_profile_name}.json"
+    if sp.is_file():
+        with open(sp, encoding="utf-8") as f:
+            sandbox_data = json.load(f)
+    elif sandbox_profile_name in sandbox_exec.BUILTIN_PROFILES:
+        sandbox_data = sandbox_exec.BUILTIN_PROFILES[sandbox_profile_name]
+    else:
+        return None
+    proxy_profile_id = sandbox_data.get("proxy_profile")
+    if not proxy_profile_id:
+        return None
+    pp = PROXY_PROFILES_DIR / f"{proxy_profile_id}.json"
+    if pp.is_file():
+        with open(pp, encoding="utf-8") as f:
+            return json.load(f).get("port")
+    return None
 
 
 def main() -> None:
@@ -28,7 +50,7 @@ def main() -> None:
     )
     parser.add_argument("--project", default=None,
                         help="プロジェクトID (プロジェクトのディレクトリ・プロファイルで実行)")
-    parser.add_argument("--proxy-port", type=int, default=3128)
+    parser.add_argument("--proxy-port", type=int, default=None)
     parser.add_argument("--sandbox-profile", default=None)
     parser.add_argument("--env-file", action="append", default=[])
     parser.add_argument("command", nargs="*")
@@ -55,9 +77,13 @@ def main() -> None:
     if sandbox_profile is None:
         sandbox_profile = "default"
 
+    proxy_port = args.proxy_port
+    if proxy_port is None:
+        proxy_port = resolve_proxy_port(sandbox_profile) or 3128
+
     try:
         sandbox_exec.run(
-            proxy_port=args.proxy_port,
+            proxy_port=proxy_port,
             sandbox_profile=sandbox_profile,
             env_files=args.env_file,
             command=args.command or None,

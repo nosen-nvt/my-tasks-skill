@@ -19,6 +19,7 @@ dispatcher.py - Unix ドメインソケット C/S ジョブランナー
 
 import argparse
 import asyncio
+import fnmatch
 import json
 import logging
 import os
@@ -270,7 +271,7 @@ class CredentialBroker:
             return {"ok": False, "error": "invalid token"}
 
         allowed = self._registry[token]
-        if allowed != "*" and entry not in allowed:
+        if allowed != "*" and not any(fnmatch.fnmatch(entry, pat) for pat in allowed):
             log.warning(f"Credential broker: entry not allowed: {entry} (token {token[:8]}...)")
             return {"ok": False, "error": f"entry not allowed: {entry}"}
 
