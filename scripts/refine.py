@@ -2,7 +2,7 @@
 """
 refine.py - タスク精査ディスパッチャー
 
-reshaping / needs_clarification (全回答済み) のタスクを1タスク1ジョブとして
+reshaping / needs_input (全回答済み) のタスクを1タスク1ジョブとして
 dispatcher.py に投入する。各ジョブは専用のコンテキストでタスクを精査し、
 scoped 遷移時には実行プロンプトも生成する。
 run_count > 0 のタスクは再精査として実行履歴を踏まえたプロンプト修正を行う。
@@ -14,7 +14,7 @@ run_count > 0 のタスクは再精査として実行履歴を踏まえたプロ
   # 特定タスクのみ
   python3 refine.py --repo ~/.local/share/my-tasks --task 20260301-001
 
-  # 全回答済み needs_clarification タスクも含める
+  # 全回答済み needs_input タスクも含める
   python3 refine.py --repo ~/.local/share/my-tasks --include-clarified
 
   # ドライラン（プロンプトを表示するだけで投入しない）
@@ -107,7 +107,7 @@ def find_targets(
 
         if status == "reshaping":
             targets.append(entry)
-        elif status == "needs_clarification" and include_clarified:
+        elif status == "needs_input" and include_clarified:
             md = read_task_md(tasks_dir, entry["id"])
             if md and is_all_answered(md):
                 targets.append(entry)
@@ -148,7 +148,7 @@ TRIAGE_TEMPLATE = """\
    - 達成条件がAIエージェント自身でローカル検証可能か（ファイル確認、テスト実行、ビルド成功など）
 
 3. 判定:
-   - **未決事項がある場合**: `## 未決事項` セクションにチェックボックス形式で質問を記載し、ステータスを `needs_clarification` に遷移
+   - **未決事項がある場合**: `## 未決事項` セクションにチェックボックス形式で質問を記載し、ステータスを `needs_input` に遷移
    - **未決事項がない場合**: `## 概要`、`## 事前条件`、`## 達成条件`、`## 完了時アクション` を記載し、ステータスを `scoped` に遷移。さらに `## 実行プロンプト` セクションに実行プロンプトを生成
 
 4. 達成条件のルール（重要）:
@@ -251,7 +251,7 @@ REREFINEMENT_TEMPLATE = """\
      - ステータスを `scoped` に遷移
    - **追加の未決事項がある場合**:
      - `## 未決事項` にチェックボックス形式で質問を記載
-     - ステータスを `needs_clarification` に遷移
+     - ステータスを `needs_input` に遷移
    - **問題がない場合**（タスクは正常完了している）:
      - ステータスは `reshaping` のまま変更しない（ユーザーが操作9で完了確認する）
      - `## 概要` の末尾に「精査結果: 正常完了を確認。完了確認待ち。」と追記
@@ -272,7 +272,7 @@ REREFINEMENT_TEMPLATE = """\
 以下の2つのファイルを更新してください:
 
 1. `{tasks_dir}/{task_id}.md`: 上記の精査結果を反映
-2. `{tasks_dir}/index.jsonl`: 該当タスク（id="{task_id}"）の status フィールドを適切に更新（scoped / needs_clarification / reshaping のまま）
+2. `{tasks_dir}/index.jsonl`: 該当タスク（id="{task_id}"）の status フィールドを適切に更新（scoped / needs_input / reshaping のまま）
 
 index.jsonl は JSONL 形式（1行1タスク）です。該当行のみ status を変更し、他の行は変更しないでください。
 """
@@ -287,7 +287,7 @@ def build_prompt(
     status = entry.get("status", "")
     run_count = entry.get("run_count", 0)
 
-    if status == "needs_clarification":
+    if status == "needs_input":
         template = RECLARIFY_TEMPLATE
     elif status == "reshaping" and run_count > 0:
         template = REREFINEMENT_TEMPLATE
@@ -322,6 +322,8 @@ async def dispatch_one(
         sys.executable, str(DISPATCHER),
         "run",
         "--project", entry["project_id"],
+        "--task-id", entry["id"],
+        "--job-type", "refine",
         "--repo", repo,
     ]
     if sandbox_profile:
@@ -446,7 +448,7 @@ def main() -> None:
     parser.add_argument(
         "--include-clarified",
         action="store_true",
-        help="全回答済みの needs_clarification タスクも対象にする",
+        help="全回答済みの needs_input タスクも対象にする",
     )
     parser.add_argument(
         "--sandbox-profile",

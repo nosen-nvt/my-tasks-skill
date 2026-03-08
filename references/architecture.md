@@ -64,20 +64,31 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 ## タスクのステータスフロー
 
 ```
-pending → reshaping ⇄ needs_clarification
-              ↓
-           scoped → approved → running → reshaping（ループ）
-                                              ↓
-                                         （ユーザ確認）→ done
+pending → reshaping ⇄ needs_input
+            ↑  ↓
+            │  scoped → [auto_approve / 初回は手動] → approved → running
+            │                                                       ↓
+            │                                                  evaluating
+            │                                                 ↙    ↓    ↘
+            │                                           RETRY   PASS   BLOCKED
+            │                                             ↓       ↓       ↓
+            └─────────────────────────────────────────────┘     done   needs_input
+                                                                  ↑       ↓
+                                                           [再オープン] [ユーザ回答]
+                                                           (gen++)      ↓
+                                                                    reshaping
+
+※ ABORT / max_runs 到達 → aborted
 ```
 
 - `pending`: データソースから取り込まれた初期状態
 - `reshaping`: 精査・見直しプロセス中。初回精査（`run_count=0`）とジョブ実行後の再精査（`run_count>0`）の両方を含む
-- `needs_clarification`: 質問が生成されたが未回答の項目がある
+- `needs_input`: 質問が生成されたが未回答の項目がある（精査時・評価時の両方で使用）
 - `scoped`: 前提条件・達成条件が明確で、実行プロンプトが生成済み（精査ジョブが scoped 遷移時に同時生成）
-- `approved`: ユーザがプロンプトを承認し、実行待ち
+- `approved`: ユーザがプロンプトを承認し、実行待ち。オーケストレーション有効時は自動遷移も可能
 - `running`: ディスパッチャーで実行中
-- `done`: 完了（ユーザが結果を確認し、明示的に完了とした状態）
+- `done`: 完了（評価ジョブの PASS 判定、またはユーザが明示的に完了とした状態）
+- `aborted`: 実行不可能と判断された状態（ABORT 判定、または max_runs 到達）
 
 ## git 操作ポリシー
 
@@ -138,6 +149,20 @@ Unix ドメインソケット C/S アーキテクチャのジョブランナー�
 | `kill` | 実行中ジョブを強制停止 |
 | `kill-all` | 全ジョブを強制停止 |
 | `wait` | ジョブ完了まで接続を保持 |
+
+### ジョブタイプ
+
+| タイプ | 説明 |
+|--------|------|
+| `execute` | タスク実行ジョブ（デフォルト） |
+| `evaluate` | 実行結果の評価ジョブ（達成条件の判定） |
+| `refine` | タスク精査ジョブ |
+
+### オーケストレーション
+
+プロジェクト定義に `orchestration` フィールドが設定されている場合、
+実行→評価→（再精査→再実行）のチェーンが自動で動作する。
+詳細は `dispatcher-design.md` のオーケストレーションセクションを参照。
 
 詳細は `dispatcher-design.md` を参照。
 

@@ -40,7 +40,7 @@ JSON over Unix ドメインソケット。改行区切り（1行1メッセージ
 
 | コマンド | フィールド | 説明 |
 |---------|-----------|------|
-| `run` | `task_id?`, `project_id`, `prompt` | ジョブを実行（sandbox_profile はプロジェクト設定から自動解決） |
+| `run` | `task_id?`, `project_id`, `prompt`, `job_type?` | ジョブを実行（sandbox_profile はプロジェクト設定から自動解決） |
 | `open` | `project_id`, `session?` | 対話的セッションを tmux で開く |
 | `status` | | 全ジョブのステータスを返す |
 | `cancel` | `dispatch_id` | キュー内ジョブを取消 |
@@ -50,8 +50,9 @@ JSON over Unix ドメインソケット。改行区切り（1行1メッセージ
 | `log` | (CLI のみ) | ジョブの stdout/stderr ログを表示（ファイル直接読み取り） |
 
 ```json
-{"command": "run", "task_id": "20260301-001", "project_id": "ubs-mgmt-tool", "prompt": "..."}
+{"command": "run", "task_id": "20260301-001", "project_id": "ubs-mgmt-tool", "prompt": "...", "job_type": "execute"}
 {"command": "run", "project_id": "bo", "prompt": "バグを修正してください"}
+{"command": "run", "project_id": "bo", "task_id": "20260301-001", "prompt": "...", "job_type": "refine"}
 {"command": "open", "project_id": "ubs-mgmt-tool", "session": "main"}
 {"command": "status"}
 {"command": "cancel", "dispatch_id": "ubs-mgmt-tool-1"}
@@ -130,6 +131,45 @@ queued ──→ running ──→ done
 1. `dispatch_id` に対応する `asyncio.Future` を作成
 2. ジョブが既に完了していれば即座にレスポンスを返す
 3. 未完了の場合、Future の完了を待ってからレスポンスを返す
+
+### オーケストレーション
+
+プロジェクト定義に `orchestration` フィールドが設定されている場合、ジョブ完了後に自動でチェーンジョブをディスパッチする。
+
+#### ジョブタイプ (`job_type`)
+
+| タイプ | 説明 |
+|--------|------|
+| `execute` | タスク実行ジョブ（デフォルト） |
+| `evaluate` | 実行結果の評価ジョブ（達成条件の判定） |
+| `refine` | タスク精査ジョブ |
+
+#### チェーンフロー
+
+```
+execute 完了
+    ↓
+evaluate を自動ディスパッチ（実行ログ + タスク MD を含むプロンプト）
+    ↓
+evaluate 完了 → 評価エージェントが index.jsonl を更新
+    ↓ (verdict に応じて)
+    ├── PASS (status=done)       → 完了
+    ├── RETRY (status=reshaping) → refine を自動ディスパッチ
+    ├── BLOCKED (status=needs_input) → ユーザ待ち
+    └── ABORT (status=aborted)   → 停止
+
+refine 完了 → 精査エージェントが index.jsonl を更新
+    ↓ (status に応じて)
+    ├── scoped + auto_approve → status を approved に更新 → execute を自動ディスパッチ
+    ├── needs_input → ユーザ待ち
+    └── reshaping → 完了確認待ち
+```
+
+#### 自動承認条件
+
+`_should_auto_approve(orchestration, run_count)`:
+- `auto_approve == true` かつ
+- `require_first_approval == false` または `run_count > 0`
 
 ### SIGTERM ハンドラ
 

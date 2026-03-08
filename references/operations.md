@@ -100,7 +100,7 @@
 
 ## 3. タスク精査
 
-`reshaping` タスクの精査、および全回答済み `needs_clarification` タスクの再精査を行う。
+`reshaping` タスクの精査、および全回答済み `needs_input` タスクの再精査を行う。
 `refine.py` を使い、**1タスク1ジョブ**としてディスパッチャーに投入する。
 各ジョブは専用のコンテキストでタスクを精査し、`scoped` 遷移時には実行プロンプトも同時に生成する。
 
@@ -117,7 +117,7 @@
      --repo ~/.local/share/my-tasks \
      --task 20260301-001
 
-   # 全回答済み needs_clarification タスクも含める
+   # 全回答済み needs_input タスクも含める
    python3 ~/.claude/skills/my-tasks/scripts/refine.py \
      --repo ~/.local/share/my-tasks \
      --include-clarified
@@ -134,10 +134,10 @@
    ```
 
 3. 結果を確認:
-   - `needs_clarification` に遷移したタスク → ユーザーに質問を提示し、回答を収集
+   - `needs_input` に遷移したタスク → ユーザーに質問を提示し、回答を収集
    - `scoped` に遷移したタスク → 実行プロンプトが生成済み。操作5（承認）へ
 
-4. ユーザーが `needs_clarification` タスクの質問に回答したら:
+4. ユーザーが `needs_input` タスクの質問に回答したら:
    - 回答済みの項目を `[x]` に更新し、回答を追記
    - 全項目が `[x]` になったら `refine.py --include-clarified` で再精査
 
@@ -148,7 +148,7 @@
 1. タスク md とプロジェクト定義を読み込み
 2. 必要に応じて作業ディレクトリ配下のソースコードを調査
 3. 未決事項を分析:
-   - **未決事項がある場合**: `## 未決事項` にチェックボックス形式で質問を記載し、`needs_clarification` に遷移
+   - **未決事項がある場合**: `## 未決事項` にチェックボックス形式で質問を記載し、`needs_input` に遷移
    - **未決事項がない場合**: `## 概要`、`## 事前条件`、`## 達成条件`、`## 完了時アクション` を記載し、`scoped` に遷移。`## 実行プロンプト` も同時に生成
 4. `tasks/{id}.md` と `tasks/index.jsonl` を更新
 
@@ -228,7 +228,21 @@
 
 ### ジョブ完了後の処理
 
-ジョブ完了（成功・失敗問わず）後、タスクを `reshaping` に戻す:
+#### オーケストレーション有効時（プロジェクトに `orchestration` 設定あり）
+
+ジョブ完了後の処理は自動化される:
+
+1. **実行ジョブ完了** → 評価ジョブが自動ディスパッチされる
+2. **評価ジョブ**が達成条件を判定し、verdict を出力:
+   - **PASS** → `done`（完了）
+   - **RETRY** → `reshaping` → 精査ジョブが自動ディスパッチされ、`scoped` → 自動承認 → 再実行（ループ）
+   - **BLOCKED** → `needs_input`（ユーザの追加情報が必要、ループ停止）
+   - **ABORT** → `aborted`（実行不可能、ループ停止）
+3. `max_runs_per_generation` に到達した場合は自動で `aborted` に遷移
+
+#### オーケストレーション無効時（手動フロー）
+
+ジョブ完了（成功・失敗問わず）後、手動でタスクを `reshaping` に戻す:
 
 1. ディスパッチャーのジョブ結果を確認（`dispatcher.py status` または `dispatcher.py log --id {dispatch_id}`）
 

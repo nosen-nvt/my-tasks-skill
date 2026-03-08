@@ -113,6 +113,9 @@ def create_task_markdown(tasks_dir: Path, entry: dict) -> None:
     task_id = entry["id"]
     md_path = tasks_dir / f"{task_id}.md"
 
+    generation = entry.get("generation", 1)
+    generation_line = f"- Generation: {generation}\n" if generation > 1 else ""
+
     content = f"""# {entry['title']}
 
 - ID: {entry['id']}
@@ -120,7 +123,7 @@ def create_task_markdown(tasks_dir: Path, entry: dict) -> None:
 - Datasource: {entry['datasource_id']}
 - Project: {entry.get('project_id', '')}
 - Status: {entry['status']}
-
+{generation_line}
 ## 概要
 
 
@@ -164,8 +167,10 @@ def update_task_markdown_metadata(tasks_dir: Path, entry: dict) -> None:
     with open(md_path, encoding="utf-8") as f:
         content = f.read()
 
+    generation = entry.get("generation", 1)
     lines = content.split("\n")
     new_lines = []
+    has_generation_line = False
     for line in lines:
         if line.startswith("# ") and new_lines == []:
             new_lines.append(f"# {entry['title']}")
@@ -179,11 +184,74 @@ def update_task_markdown_metadata(tasks_dir: Path, entry: dict) -> None:
             new_lines.append(f"- Project: {entry.get('project_id', '')}")
         elif line.startswith("- Status: "):
             new_lines.append(f"- Status: {entry['status']}")
+        elif line.startswith("- Generation: "):
+            new_lines.append(f"- Generation: {generation}")
+            has_generation_line = True
         else:
             new_lines.append(line)
 
+    # Generation 行がなく generation > 1 なら Status の後に挿入
+    if not has_generation_line and generation > 1:
+        for i, line in enumerate(new_lines):
+            if line.startswith("- Status: "):
+                new_lines.insert(i + 1, f"- Generation: {generation}")
+                break
+
     with open(md_path, "w", encoding="utf-8") as f:
         f.write("\n".join(new_lines))
+
+
+def reopen_task_markdown(tasks_dir: Path, entry: dict) -> None:
+    """done タスクを再オープンする。実行履歴を保持し、新世代の区切りを挿入する。"""
+    task_id = entry["id"]
+    md_path = tasks_dir / f"{task_id}.md"
+
+    if not md_path.exists():
+        create_task_markdown(tasks_dir, entry)
+        return
+
+    with open(md_path, encoding="utf-8") as f:
+        content = f.read()
+
+    generation = entry.get("generation", 1)
+    lines = content.split("\n")
+    new_lines = []
+    has_generation_line = False
+
+    for line in lines:
+        if line.startswith("# ") and new_lines == []:
+            new_lines.append(f"# {entry['title']}")
+        elif line.startswith("- Status: "):
+            new_lines.append(f"- Status: {entry['status']}")
+        elif line.startswith("- Generation: "):
+            new_lines.append(f"- Generation: {generation}")
+            has_generation_line = True
+        else:
+            new_lines.append(line)
+
+    # Generation 行がなければ追加
+    if not has_generation_line:
+        for i, line in enumerate(new_lines):
+            if line.startswith("- Status: "):
+                new_lines.insert(i + 1, f"- Generation: {generation}")
+                break
+
+    # 実行履歴セクションに世代区切りを挿入
+    history_marker = "## 実行履歴"
+    joined = "\n".join(new_lines)
+    idx = joined.find(history_marker)
+    if idx != -1:
+        after_marker = joined[idx + len(history_marker):]
+        # 既存の履歴がある場合、世代区切りを追加
+        existing_history = after_marker.strip()
+        if existing_history:
+            prev_gen = generation - 1
+            generation_separator = f"\n### Generation {prev_gen} (完了済み)\n"
+            new_history = f"\n{generation_separator}\n{existing_history}\n\n---\n\n### Generation {generation}\n"
+            joined = joined[:idx + len(history_marker)] + new_history
+
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(joined)
 
 
 def delete_task(tasks_dir: Path, task_id: str) -> None:
@@ -236,6 +304,7 @@ def process_datasource(
         {
             "added": [...],
             "updated": [...],
+            "reopened": [...],
             "vanished": [...],
             "gc": [...],
             "auto_assigned": [...],
@@ -247,12 +316,15 @@ def process_datasource(
     sync_mode = datasource.get("sync_mode", "full") if datasource else "full"
 
     # append モードの GC: done エントリを除去し .md を削除
+    # ただし incoming に含まれる remote_id は再オープン対象なのでスキップ
+    incoming_remote_ids = {t["remote_id"] for t in incoming_tasks}
     gc = []
     if sync_mode == "append":
         gc_ids = set()
         for entry in index_entries:
             if (entry.get("datasource_id") == datasource_id
-                    and entry.get("status") == "done"):
+                    and entry.get("status") == "done"
+                    and entry.get("remote_id") not in incoming_remote_ids):
                 gc.append({
                     "datasource_id": datasource_id,
                     "remote_id": entry.get("remote_id", ""),
@@ -275,6 +347,7 @@ def process_datasource(
 
     added = []
     updated = []
+    reopened = []
     auto_assigned = []
     needs_review = []
 
@@ -282,9 +355,24 @@ def process_datasource(
         remote_id = t["remote_id"]
 
         if remote_id in existing_entries:
-            # 既存タスク: title 変更があれば更新
             entry = existing_entries[remote_id]
-            if entry.get("title") != t["title"]:
+
+            if entry.get("status") == "done":
+                # 再オープン: 履歴を保持したまま reshaping に戻す
+                entry["status"] = "reshaping"
+                entry["generation"] = entry.get("generation", 1) + 1
+                if entry.get("title") != t["title"]:
+                    entry["title"] = t["title"]
+                reopen_task_markdown(tasks_dir, entry)
+                reopened.append({
+                    "datasource_id": datasource_id,
+                    "remote_id": remote_id,
+                    "title": entry["title"],
+                    "id": entry["id"],
+                    "generation": entry["generation"],
+                })
+            elif entry.get("title") != t["title"]:
+                # 既存タスク: title 変更があれば更新
                 entry["title"] = t["title"]
                 update_task_markdown_metadata(tasks_dir, entry)
                 updated.append({
@@ -306,6 +394,7 @@ def process_datasource(
                 "status": "pending",
                 "project_id": project_id,
                 "run_count": 0,
+                "generation": 1,
             }
             index_entries.append(new_entry)
             create_task_markdown(tasks_dir, new_entry)
@@ -354,6 +443,7 @@ def process_datasource(
     return {
         "added": added,
         "updated": updated,
+        "reopened": reopened,
         "vanished": vanished,
         "gc": gc,
         "auto_assigned": auto_assigned,
@@ -434,6 +524,7 @@ def main() -> None:
     # 集計結果
     total_added = []
     total_updated = []
+    total_reopened = []
     total_vanished = []
     total_gc = []
     total_auto_assigned = []
@@ -445,6 +536,7 @@ def main() -> None:
         )
         total_added.extend(result["added"])
         total_updated.extend(result["updated"])
+        total_reopened.extend(result["reopened"])
         total_vanished.extend(result["vanished"])
         total_gc.extend(result["gc"])
         total_auto_assigned.extend(result["auto_assigned"])
@@ -474,6 +566,7 @@ def main() -> None:
         "summary": {
             "added": len(total_added),
             "updated": len(total_updated),
+            "reopened": len(total_reopened),
             "vanished": len(total_vanished),
             "gc": len(total_gc),
             "auto_assigned": len(total_auto_assigned),
@@ -481,6 +574,7 @@ def main() -> None:
         },
         "added": total_added,
         "updated": total_updated,
+        "reopened": total_reopened,
         "vanished": total_vanished,
         "gc": total_gc,
         "auto_assigned": total_auto_assigned,

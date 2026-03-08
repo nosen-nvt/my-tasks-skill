@@ -91,6 +91,7 @@ datasource 設定の `sync_mode` フィールドに応じて同期動作が異�
   "summary": {
     "added": 3,
     "updated": 1,
+    "reopened": 0,
     "vanished": 1,
     "gc": 2,
     "auto_assigned": 2,
@@ -98,6 +99,7 @@ datasource 設定の `sync_mode` フィールドに応じて同期動作が異�
   },
   "added": [...],
   "updated": [...],
+  "reopened": [...],
   "vanished": [...],
   "gc": [...],
   "auto_assigned": [...],
@@ -125,7 +127,7 @@ python3 ~/.claude/skills/my-tasks/scripts/refine.py \
   --repo ~/.local/share/my-tasks \
   --task 20260301-001
 
-# 全回答済み needs_clarification タスクも含める
+# 全回答済み needs_input タスクも含める
 python3 ~/.claude/skills/my-tasks/scripts/refine.py \
   --repo ~/.local/share/my-tasks \
   --include-clarified
@@ -142,7 +144,7 @@ python3 ~/.claude/skills/my-tasks/scripts/refine.py \
 |---|---|---|
 | `--repo PATH` | No | タスク管理リポジトリのパス（デフォルト: `~/.local/share/my-tasks`） |
 | `--task ID` | No | 特定タスク ID のみ処理 |
-| `--include-clarified` | No | 全回答済みの `needs_clarification` タスクも対象にする |
+| `--include-clarified` | No | 全回答済みの `needs_input` タスクも対象にする |
 | `--sandbox-profile PROFILE` | No | サンドボックスプロファイルを上書き指定 |
 | `--dry-run` | No | 投入せずにプロンプトを表示するだけ |
 
@@ -162,9 +164,9 @@ python3 ~/.claude/skills/my-tasks/scripts/refine.py \
 
 | ステータス | 対象条件 | ジョブの動作 |
 |---|---|---|
-| `reshaping`（`run_count=0`） | 常に対象 | 初回精査 → `needs_clarification` or `scoped`（+ 実行プロンプト生成） |
+| `reshaping`（`run_count=0`） | 常に対象 | 初回精査 → `needs_input` or `scoped`（+ 実行プロンプト生成） |
 | `reshaping`（`run_count>0`） | 常に対象 | 再精査（実行履歴を踏まえてプロンプト修正） → `scoped`（+ 実行プロンプト再生成）。問題なければユーザーに完了確認を促す |
-| `needs_clarification` | `--include-clarified` 指定時、かつ全チェックボックスが `[x]` | 再精査 → `scoped`（+ 実行プロンプト生成） |
+| `needs_input` | `--include-clarified` 指定時、かつ全チェックボックスが `[x]` | 再精査 → `scoped`（+ 実行プロンプト生成） |
 
 ### 注意
 

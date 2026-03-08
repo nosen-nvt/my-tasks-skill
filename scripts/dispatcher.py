@@ -175,6 +175,7 @@ class Job:
     task_id: str | None
     prompt: str
     working_dir: str
+    job_type: str = "execute"  # "execute" | "evaluate" | "refine"
     sandbox_profile_id: str = "default"
     env_files: list[str] = field(default_factory=list)
     allowed_credentials: list[str] | str = field(default_factory=list)
@@ -189,6 +190,7 @@ class Job:
             "dispatch_id": self.dispatch_id,
             "project_id": self.project_id,
             "task_id": self.task_id,
+            "job_type": self.job_type,
             "status": self.status,
             "pid": self.pid,
             "exit_code": self.exit_code,
@@ -277,6 +279,7 @@ class DispatchServer:
         project_id = request.get("project_id", "")
         task_id = request.get("task_id")
         prompt = request.get("prompt", "")
+        job_type = request.get("job_type", "execute")
 
         if not project_id:
             return {"ok": False, "error": "project_id is required"}
@@ -309,6 +312,7 @@ class DispatchServer:
             task_id=task_id,
             prompt=prompt,
             working_dir=working_dir,
+            job_type=job_type,
             sandbox_profile_id=sandbox_profile_id,
             env_files=env_files,
             allowed_credentials=allowed_credentials,
@@ -482,6 +486,7 @@ class DispatchServer:
             log.info(f"Job finished: {job.dispatch_id} status={job.status} exit_code={job.exit_code}")
 
         self._notify_waiters(job)
+        await self.on_job_complete(job)
         await self.drain_queue()
 
     async def drain_queue(self):
@@ -523,6 +528,233 @@ class DispatchServer:
         for future in waiters:
             if not future.done():
                 future.set_result(result)
+
+    # --- オーケストレーション ---
+
+    async def on_job_complete(self, job: Job):
+        """ジョブ完了後のオーケストレーションチェーン。"""
+        if not job.task_id:
+            return
+
+        project = sandbox_exec.load_project(job.project_id, self.repo_dir)
+        if not project:
+            return
+        orchestration = project.get("orchestration")
+        if not orchestration:
+            return  # オーケストレーション未設定 → 手動フロー
+
+        try:
+            if job.job_type == "execute":
+                await self._on_execute_complete(job, orchestration)
+            elif job.job_type == "evaluate":
+                await self._on_evaluate_complete(job, orchestration)
+            elif job.job_type == "refine":
+                await self._on_refine_complete(job, orchestration)
+        except Exception as e:
+            log.error(f"Orchestration error for {job.dispatch_id}: {e}")
+
+    async def _on_execute_complete(self, job: Job, orchestration: dict):
+        """実行ジョブ完了 → 評価ジョブを自動ディスパッチ。"""
+        log.info(f"Orchestration: execute complete for task {job.task_id}, dispatching evaluation")
+
+        # 実行ログを読み込み（末尾 200 行）
+        log_path = self._log_path(job.dispatch_id)
+        execution_log = ""
+        if log_path.exists():
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if len(lines) > 200:
+                execution_log = f"... ({len(lines) - 200} 行省略) ...\n"
+                lines = lines[-200:]
+            execution_log += "\n".join(lines)
+
+        # タスク情報を読み込み
+        tasks_dir = self.repo_dir / "tasks"
+        task_md = _read_file(tasks_dir / f"{job.task_id}.md")
+        if not task_md:
+            log.error(f"Orchestration: task md not found: {job.task_id}")
+            return
+
+        task_entry = _load_task_entry(tasks_dir, job.task_id)
+        if not task_entry:
+            log.error(f"Orchestration: task entry not found: {job.task_id}")
+            return
+
+        next_run = task_entry.get("run_count", 0) + 1
+
+        prompt = EVALUATION_TEMPLATE.format(
+            tasks_dir=tasks_dir,
+            task_id=job.task_id,
+            task_md=task_md,
+            execution_log=execution_log,
+            log_lines=min(len(execution_log.splitlines()), 200),
+            next_run=next_run,
+            finished_at=job.finished_at or now_iso(),
+            exit_code=job.exit_code,
+        )
+
+        await self._dispatch_internal(
+            project_id=job.project_id,
+            task_id=job.task_id,
+            prompt=prompt,
+            job_type="evaluate",
+        )
+
+    async def _on_evaluate_complete(self, job: Job, orchestration: dict):
+        """評価ジョブ完了 → verdict に基づいて次のアクションを決定。"""
+        tasks_dir = self.repo_dir / "tasks"
+        task_entry = _load_task_entry(tasks_dir, job.task_id)
+        if not task_entry:
+            log.error(f"Orchestration: task entry not found after evaluation: {job.task_id}")
+            return
+
+        status = task_entry.get("status", "")
+        run_count = task_entry.get("run_count", 0)
+        generation = task_entry.get("generation", 1)
+        max_runs = orchestration.get("max_runs_per_generation", 5)
+
+        # generation 内の実行回数を計算（generation 開始時の run_count は不明なので、
+        # 簡易的に max_runs と run_count を比較）
+        if status == "reshaping" and orchestration.get("auto_retry", False):
+            if run_count >= max_runs:
+                log.info(f"Orchestration: max_runs ({max_runs}) reached for task {job.task_id}, aborting")
+                _update_task_index(tasks_dir, job.task_id, {"status": "aborted"})
+                return
+
+            log.info(f"Orchestration: RETRY verdict for task {job.task_id} (run {run_count}), dispatching refine")
+            await self._dispatch_refine(job.project_id, job.task_id)
+
+        elif status == "done":
+            log.info(f"Orchestration: PASS verdict for task {job.task_id}")
+
+        elif status == "needs_input":
+            log.info(f"Orchestration: BLOCKED verdict for task {job.task_id}, waiting for user input")
+
+        elif status == "aborted":
+            log.info(f"Orchestration: ABORT verdict for task {job.task_id}")
+
+        else:
+            log.info(f"Orchestration: unexpected status '{status}' after evaluation for task {job.task_id}")
+
+    async def _on_refine_complete(self, job: Job, orchestration: dict):
+        """精査ジョブ完了 → scoped なら自動承認判定。"""
+        tasks_dir = self.repo_dir / "tasks"
+        task_entry = _load_task_entry(tasks_dir, job.task_id)
+        if not task_entry:
+            log.error(f"Orchestration: task entry not found after refine: {job.task_id}")
+            return
+
+        status = task_entry.get("status", "")
+        run_count = task_entry.get("run_count", 0)
+
+        if status == "scoped":
+            if self._should_auto_approve(orchestration, run_count):
+                log.info(f"Orchestration: auto-approving task {job.task_id}")
+                _update_task_index(tasks_dir, job.task_id, {"status": "approved"})
+                _update_task_md_status(tasks_dir, job.task_id, "approved")
+
+                # 実行ジョブをディスパッチ
+                prompt = read_execution_prompt(self.repo_dir, job.task_id)
+                if prompt:
+                    await self._dispatch_internal(
+                        project_id=job.project_id,
+                        task_id=job.task_id,
+                        prompt=prompt,
+                        job_type="execute",
+                    )
+                else:
+                    log.error(f"Orchestration: no execution prompt for task {job.task_id}")
+            else:
+                log.info(f"Orchestration: task {job.task_id} scoped, waiting for manual approval")
+
+        elif status == "needs_input":
+            log.info(f"Orchestration: refine produced needs_input for task {job.task_id}")
+
+        elif status == "reshaping":
+            # 再精査で問題なしと判断された（完了確認待ち）
+            log.info(f"Orchestration: refine confirmed task {job.task_id} is complete, waiting for manual done")
+
+        else:
+            log.info(f"Orchestration: unexpected status '{status}' after refine for task {job.task_id}")
+
+    def _should_auto_approve(self, orchestration: dict, run_count: int) -> bool:
+        if not orchestration.get("auto_approve", False):
+            return False
+        if orchestration.get("require_first_approval", True) and run_count == 0:
+            return False
+        return True
+
+    async def _dispatch_refine(self, project_id: str, task_id: str):
+        """精査ジョブを内部ディスパッチする。"""
+        import refine as refine_mod
+
+        tasks_dir = self.repo_dir / "tasks"
+        task_entry = _load_task_entry(tasks_dir, task_id)
+        if not task_entry:
+            log.error(f"Orchestration: cannot dispatch refine, task not found: {task_id}")
+            return
+
+        task_md = _read_file(tasks_dir / f"{task_id}.md")
+        if not task_md:
+            log.error(f"Orchestration: cannot dispatch refine, task md not found: {task_id}")
+            return
+
+        projects_dir = self.repo_dir / "projects"
+        project = refine_mod.load_project(projects_dir, project_id)
+        if not project:
+            log.error(f"Orchestration: cannot dispatch refine, project not found: {project_id}")
+            return
+
+        prompt = refine_mod.build_prompt(task_entry, task_md, project, tasks_dir)
+
+        await self._dispatch_internal(
+            project_id=project_id,
+            task_id=task_id,
+            prompt=prompt,
+            job_type="refine",
+        )
+
+    async def _dispatch_internal(self, project_id: str, task_id: str, prompt: str, job_type: str) -> str:
+        """内部ジョブディスパッチ（オーケストレーション用）。"""
+        project = sandbox_exec.load_project(project_id, self.repo_dir)
+        if not project:
+            log.error(f"Orchestration: project not found: {project_id}")
+            return ""
+
+        working_dir = project.get("working_directory", "")
+        if not working_dir or not Path(working_dir).is_dir():
+            log.error(f"Orchestration: invalid working_directory for project: {project_id}")
+            return ""
+
+        try:
+            sandbox_profile_id, env_files, allowed_credentials = \
+                sandbox_exec.resolve_project_sandbox_params(project)
+        except (FileNotFoundError, ValueError) as e:
+            log.error(f"Orchestration: sandbox params error: {e}")
+            return ""
+
+        dispatch_id = self.generate_dispatch_id(project_id)
+
+        job = Job(
+            dispatch_id=dispatch_id,
+            project_id=project_id,
+            task_id=task_id,
+            prompt=prompt,
+            working_dir=working_dir,
+            job_type=job_type,
+            sandbox_profile_id=sandbox_profile_id,
+            env_files=env_files,
+            allowed_credentials=allowed_credentials,
+        )
+        self.jobs[dispatch_id] = job
+
+        if self.count_running() < self.max_slots and project_id not in self.running_project_ids():
+            asyncio.create_task(self.execute_job(job))
+            log.info(f"Orchestration: {job_type} job started: {dispatch_id}")
+        else:
+            self.queue.append(job)
+            log.info(f"Orchestration: {job_type} job queued: {dispatch_id}")
+
+        return dispatch_id
 
     def _build_system_prompt(self, job: Job) -> str:
         profile = sandbox_exec.resolve_profile(job.sandbox_profile_id)
@@ -585,6 +817,145 @@ class DispatchServer:
                     proc.terminate()
                 except ProcessLookupError:
                     pass
+
+
+# ---------------------------------------------------------------------------
+# オーケストレーション用ヘルパー関数
+# ---------------------------------------------------------------------------
+
+EVALUATION_TEMPLATE = """\
+あなたはタスク評価エージェントです。直前の実行ジョブの結果を評価し、タスクの達成条件が満たされたか判定してください。
+
+# 対象タスク
+
+ファイル: `{tasks_dir}/{task_id}.md`
+
+```markdown
+{task_md}
+```
+
+# 実行ログ（直前のジョブ、末尾 {log_lines} 行）
+
+```
+{execution_log}
+```
+
+# 実行情報
+
+- 終了コード: {exit_code}
+- 終了日時: {finished_at}
+
+# 判定基準
+
+以下の verdict のいずれかを選択してください:
+
+- **PASS**: 達成条件がすべて満たされている
+- **RETRY**: 達成条件が未達だが、AIエージェントが次の実行で修正できる。具体的なフィードバック（何が失敗し、どう修正すべきか）を記載すること
+- **BLOCKED**: 達成条件が未達で、ユーザからの追加情報・判断が必要。何が必要かを明確に質問として記載すること
+- **ABORT**: 根本的に実行不可能（前提条件の誤り、権限不足で回復不能など）
+
+# 出力指示
+
+必要に応じて作業ディレクトリ配下のソースコードや変更差分を調査してください。
+
+1. `{tasks_dir}/{task_id}.md` の「## 実行履歴」セクションに以下を追記:
+   ```markdown
+   ### Run {next_run}
+
+   - 日時: {finished_at}
+   - 結果: （成功 or 失敗）
+   - 終了コード: {exit_code}
+   - Verdict: （PASS / RETRY / BLOCKED / ABORT）
+   - 要約: （実行結果の要約）
+   ```
+
+2. verdict が BLOCKED の場合:
+   - 「## 未決事項」セクションに質問をチェックボックス形式で追記
+
+3. `{tasks_dir}/index.jsonl` を更新:
+   - `run_count` を `{next_run}` に更新
+   - `status` を verdict に応じて設定:
+     - PASS → `done`
+     - RETRY → `reshaping`
+     - BLOCKED → `needs_input`
+     - ABORT → `aborted`
+
+index.jsonl は JSONL 形式（1行1タスク）です。該当行のみ変更し、他の行は変更しないでください。
+"""
+
+
+def _read_file(path: Path) -> str | None:
+    """ファイルを読み込む。存在しない場合は None を返す。"""
+    if not path.exists():
+        return None
+    return path.read_text(encoding="utf-8")
+
+
+def _load_task_entry(tasks_dir: Path, task_id: str) -> dict | None:
+    """index.jsonl からタスクエントリを読み込む。"""
+    index_path = tasks_dir / "index.jsonl"
+    if not index_path.exists():
+        return None
+    with open(index_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+                if entry.get("id") == task_id:
+                    return entry
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
+def _update_task_index(tasks_dir: Path, task_id: str, updates: dict) -> bool:
+    """index.jsonl の指定タスクのフィールドを更新する。"""
+    index_path = tasks_dir / "index.jsonl"
+    if not index_path.exists():
+        return False
+
+    lines = []
+    found = False
+    with open(index_path, encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                entry = json.loads(stripped)
+                if entry.get("id") == task_id:
+                    entry.update(updates)
+                    found = True
+                lines.append(json.dumps(entry, ensure_ascii=False) + "\n")
+            except json.JSONDecodeError:
+                lines.append(line)
+
+    if found:
+        with open(index_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    return found
+
+
+def _update_task_md_status(tasks_dir: Path, task_id: str, new_status: str) -> bool:
+    """タスク Markdown ファイルの Status 行を更新する。"""
+    md_path = tasks_dir / f"{task_id}.md"
+    if not md_path.exists():
+        return False
+
+    content = md_path.read_text(encoding="utf-8")
+    lines = content.split("\n")
+    updated = False
+    for i, line in enumerate(lines):
+        if line.startswith("- Status: "):
+            lines[i] = f"- Status: {new_status}"
+            updated = True
+            break
+
+    if updated:
+        md_path.write_text("\n".join(lines), encoding="utf-8")
+    return updated
 
 
 # ---------------------------------------------------------------------------
@@ -837,6 +1208,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             "command": "run",
             "project_id": project_id,
             "task_id": args.task,
+            "job_type": "execute",
             "prompt": prompt,
         }
     else:
@@ -851,6 +1223,10 @@ def cmd_run(args: argparse.Namespace) -> None:
             "project_id": args.project,
             "prompt": prompt,
         }
+        if args.task_id:
+            request["task_id"] = args.task_id
+        if args.job_type:
+            request["job_type"] = args.job_type
 
     if args.sandbox_profile:
         request["sandbox_profile"] = args.sandbox_profile
@@ -900,7 +1276,8 @@ def cmd_status(args: argparse.Namespace) -> None:
         for job in jobs:
             pid_str = str(job.get("pid", "")) or "-"
             task_str = job.get("task_id", "") or "-"
-            print(f"  {job['dispatch_id']:<20} {job['status']:<10} pid={pid_str:<8} task={task_str:<16} {job.get('started_at') or '-'}")
+            jtype = job.get("job_type", "execute")
+            print(f"  {job['dispatch_id']:<20} {job['status']:<10} {jtype:<10} pid={pid_str:<8} task={task_str:<16} {job.get('started_at') or '-'}")
 
         counts: dict[str, int] = {}
         for job in jobs:
@@ -992,6 +1369,8 @@ def main() -> None:
         "--repo", default=DEFAULT_REPO, metavar="PATH",
         help=f"タスク管理リポジトリのパス（デフォルト: {DEFAULT_REPO}）",
     )
+    p_run.add_argument("--task-id", help="タスク ID（--project モードでオーケストレーション用に指定）")
+    p_run.add_argument("--job-type", default=None, help="ジョブタイプ: execute, evaluate, refine")
     p_run.add_argument("--sandbox-profile", help="サンドボックスプロファイルを上書き指定")
     p_run.set_defaults(func=cmd_run)
 

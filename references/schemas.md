@@ -128,36 +128,57 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 | `title` | string | Yes | タスクタイトル |
 | `status` | string | Yes | タスクステータス |
 | `project_id` | string | No | 紐づくプロジェクトの ID |
-| `run_count` | integer | No | ジョブ実行回数（デフォルト: `0`）。ジョブ完了後に `reshaping` に戻す際にインクリメントする |
+| `run_count` | integer | No | ジョブ実行回数（デフォルト: `0`）。評価ジョブが完了時にインクリメントする |
+| `generation` | integer | No | 再オープン世代（デフォルト: `1`）。done タスクが同じ remote_id で再度取り込まれた際にインクリメントする |
 
 ### ステータス定義
 
 ```
-pending → reshaping ⇄ needs_clarification
-              ↓
-           scoped → approved → running → reshaping（ループ）
-                                              ↓
-                                         （ユーザ確認）→ done
+pending → reshaping ⇄ needs_input
+            ↑  ↓
+            │  scoped → [auto_approve / 初回は手動] → approved → running
+            │                                                       ↓
+            │                                                  evaluating
+            │                                                 ↙    ↓    ↘
+            │                                           RETRY   PASS   BLOCKED
+            │                                             ↓       ↓       ↓
+            └─────────────────────────────────────────────┘     done   needs_input
+                                                                         ↓
+                                                                     [ユーザ回答]
+                                                                         ↓
+                                                                     reshaping
+                                                                     (ループ継続)
+
+※ ABORT / max_runs 到達 → aborted
+※ done → sync で同じ remote_id が再出現 → reshaping（再オープン、generation++）
 ```
 
 | ステータス | 意味 |
 |-----------|------|
 | `pending` | データソースから取り込まれた初期状態 |
 | `reshaping` | 精査・見直しプロセス中。初回精査（`run_count=0`）とジョブ実行後の再精査（`run_count>0`）の両方を含む |
-| `needs_clarification` | 質問が生成されたが、未回答の項目がある（manual プロジェクトでは全回答後 `done` へ直接遷移） |
+| `needs_input` | 質問が生成されたが、未回答の項目がある。精査時（仕様の曖昧さ）と評価時（実行時ブロッカー）の両方で使用される。manual プロジェクトでは全回答後 `done` へ直接遷移 |
 | `scoped` | 前提条件・達成条件が明確で、実行プロンプトが生成済み（精査ジョブが scoped 遷移時に同時生成） |
-| `approved` | ユーザがプロンプトを承認し、実行待ち |
+| `approved` | ユーザがプロンプトを承認し、実行待ち。オーケストレーション有効時は自動遷移も可能 |
 | `running` | ディスパッチャーで実行中 |
-| `done` | 完了（ユーザが結果を確認し、明示的に完了とした状態） |
+| `done` | 完了（評価ジョブの PASS 判定、またはユーザが明示的に完了とした状態） |
+| `aborted` | 実行不可能と判断された状態（ABORT 判定、または max_runs 到達） |
 
 ### 遷移ルール補足
 
 - `pending` → `reshaping`: ユーザが精査対象として選択したとき
-- `reshaping` → `scoped`: 未決事項がなく達成条件が明確な場合
-- `reshaping` → `needs_clarification`: 未決事項がある場合
-- `running` → `reshaping`: ジョブ完了後（成功・失敗問わず）。`run_count` をインクリメントし、実行履歴を追記する
+- `reshaping` → `scoped`: 精査ジョブで未決事項がなく達成条件が明確な場合
+- `reshaping` → `needs_input`: 精査ジョブで未決事項がある場合
+- `scoped` → `approved`: ユーザが承認、またはオーケストレーションによる自動承認
+- `approved` → `running`: ディスパッチャーでジョブ実行開始
+- `running` → 評価ジョブ: 実行ジョブ完了後、オーケストレーション有効時は自動で評価ジョブをディスパッチ
+- 評価ジョブ → `done`: PASS 判定
+- 評価ジョブ → `reshaping`: RETRY 判定（`run_count` をインクリメント）。オーケストレーション有効時は自動で精査ジョブをディスパッチし、ループ継続
+- 評価ジョブ → `needs_input`: BLOCKED 判定（ユーザの追加情報が必要）
+- 評価ジョブ → `aborted`: ABORT 判定、または `max_runs_per_generation` 到達
 - `reshaping` → `done`: ユーザがタスクの完了を確認したとき（操作9）。完了時アクションも同時に実行する
-- **manual プロジェクト短縮フロー**: プロジェクト定義に `working_directory` がないプロジェクトは manual 扱い。`needs_clarification` で全未決事項が `[x]` になったら `scoped` / `approved` / `running` をスキップし `done` へ直接遷移する。完了時アクション（操作9）は通常通り実行する
+- `done` → `reshaping`: 同じ remote_id のタスクが再度取り込まれたとき（再オープン、`generation` をインクリメント）
+- **manual プロジェクト短縮フロー**: プロジェクト定義に `working_directory` がないプロジェクトは manual 扱い。`needs_input` で全未決事項が `[x]` になったら `scoped` / `approved` / `running` をスキップし `done` へ直接遷移する。完了時アクション（操作9）は通常通り実行する
 
 ### ID 生成規則
 
@@ -168,8 +189,8 @@ pending → reshaping ⇄ needs_clarification
 ### 例
 
 ```jsonl
-{"id":"20260301-001","remote_id":"UBS-101","datasource_id":"jira","title":"API実装","status":"pending","project_id":"ubs-mgmt-tool","run_count":0}
-{"id":"20260301-002","remote_id":"abc123","datasource_id":"ms-todo","title":"書類提出","status":"needs_clarification","project_id":"","run_count":0}
+{"id":"20260301-001","remote_id":"UBS-101","datasource_id":"jira","title":"API実装","status":"pending","project_id":"ubs-mgmt-tool","run_count":0,"generation":1}
+{"id":"20260301-002","remote_id":"abc123","datasource_id":"ms-todo","title":"書類提出","status":"needs_input","project_id":"","run_count":0,"generation":1}
 ```
 
 ---
@@ -243,6 +264,7 @@ pending → reshaping ⇄ needs_clarification
 | `working_directory` | string | No | ディスパッチャーが使用する作業ディレクトリ（未設定の場合 manual プロジェクト扱い） |
 | `sandbox_profile` | string | No | サンドボックスプロファイル ID（デフォルト: `"default"`）。ファイルベース（`sandbox-profiles/{id}.json`）または組み込みプロファイル（`default`, `unrestricted`）を参照 |
 | `env` | object | No | サンドボックス内で設定する環境変数。値は plain string または `{"pass": "entry"}` 形式（後者は `pass show` で解決）。`.env` ファイルより低優先度 |
+| `orchestration` | object | No | オーケストレーションポリシー。未設定の場合は手動フロー（従来動作） |
 
 ### 例
 
@@ -259,6 +281,38 @@ pending → reshaping ⇄ needs_clarification
   "env": {
     "ATL_SITE": "ubs",
     "GITHUB_TOKEN": {"pass": "github/fine-grained-pat"}
+  }
+}
+```
+
+### `orchestration`
+
+タスク実行の自動オーケストレーションポリシーを定義する。
+未設定の場合は手動フロー（従来動作）。
+
+| フィールド | 型 | デフォルト | 説明 |
+|---|---|---|---|
+| `auto_approve` | boolean | `false` | `scoped` → `approved` を自動遷移するか |
+| `require_first_approval` | boolean | `true` | 初回（`run_count=0`）のみ手動承認を要求。`false` の場合は初回から自動承認 |
+| `auto_retry` | boolean | `false` | 評価ジョブの RETRY 判定時に自動で再精査→再実行するか |
+| `max_runs_per_generation` | integer | `5` | 1世代あたりの最大実行回数。超過時は `aborted` に遷移 |
+
+**オーケストレーション有効時のフロー**:
+1. 実行ジョブ完了 → 評価ジョブを自動ディスパッチ
+2. 評価ジョブ完了 → verdict に応じて次のアクションを自動実行:
+   - PASS → `done`
+   - RETRY → 精査ジョブ → scoped → auto_approve → 実行ジョブ（ループ）
+   - BLOCKED → `needs_input`（ユーザ介入待ち）
+   - ABORT → `aborted`
+3. 精査ジョブ完了 → `scoped` かつ auto_approve 条件を満たせば自動で実行ジョブをディスパッチ
+
+```json
+{
+  "orchestration": {
+    "auto_approve": true,
+    "require_first_approval": true,
+    "auto_retry": true,
+    "max_runs_per_generation": 5
   }
 }
 ```
