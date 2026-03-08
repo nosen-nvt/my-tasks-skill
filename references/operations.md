@@ -1,6 +1,6 @@
 # 操作リファレンス
 
-タスク管理スキルが提供する10のオペレーションの詳細手順。
+タスク管理スキルが提供する11のオペレーションの詳細手順。
 
 ---
 
@@ -100,7 +100,7 @@
 
 ## 3. タスク精査
 
-`triaging` タスクの精査、および全回答済み `needs_clarification` タスクの再精査を行う。
+`reshaping` タスクの精査、および全回答済み `needs_clarification` タスクの再精査を行う。
 `refine.py` を使い、**1タスク1ジョブ**としてディスパッチャーに投入する。
 各ジョブは専用のコンテキストでタスクを精査し、`scoped` 遷移時には実行プロンプトも同時に生成する。
 
@@ -108,7 +108,7 @@
 
 1. `refine.py` を実行してジョブを投入:
    ```bash
-   # 全 triaging タスクを精査ジョブとして投入
+   # 全 reshaping タスクを精査ジョブとして投入
    python3 ~/.claude/skills/my-tasks/scripts/refine.py \
      --repo ~/.local/share/my-tasks
 
@@ -158,6 +158,13 @@
 - **達成条件は AI エージェント自身がローカルで検証可能な内容** にすること
 - OK: ファイル内容の確認、YAML/JSON のパース検証、テスト実行（`dotnet test`, `npm test` 等）、ビルド成功、`az pipelines run` + 結果確認
 - NG: ブラウザでの手動確認、外部サービスの目視確認など、エージェントが実行できない操作
+
+### 再精査（`run_count > 0`）
+
+ジョブ実行後に `reshaping` に戻ったタスク（`run_count > 0`）は、実行履歴を踏まえた再精査が行われる:
+- `## 実行履歴` セクションの内容（成功/失敗、結果要約）を参照
+- レビュー指摘や不具合があれば、達成条件・実行プロンプトを修正して `scoped` に遷移
+- 問題がなければ、ユーザーに完了確認を促す（操作9 へ）
 
 ### manual プロジェクト
 
@@ -219,6 +226,26 @@
 
 3. `index.jsonl` と `.md` の status を `running` に更新
 
+### ジョブ完了後の処理
+
+ジョブ完了（成功・失敗問わず）後、タスクを `reshaping` に戻す:
+
+1. ディスパッチャーのジョブ結果を確認（`dispatcher.py status` または `dispatcher.py log --id {dispatch_id}`）
+
+2. `tasks/{id}.md` の `## 実行履歴` セクションに結果を追記:
+   ```markdown
+   ### Run {run_count + 1}
+
+   - 日時: {finished_at}
+   - 結果: {成功 or 失敗}
+   - 終了コード: {exit_code}
+   - 要約: （ジョブログから主要な結果を要約）
+   ```
+
+3. `index.jsonl` の `run_count` をインクリメント
+
+4. `index.jsonl` と `.md` の status を `reshaping` に更新
+
 ### 対話セッション
 
 ジョブ管理の対象外で対話セッションを起動する場合:
@@ -279,23 +306,28 @@ python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --sand
 
 ---
 
-## 9. 完了時アクション
+## 9. 完了確認・完了時アクション
 
-`done` タスクの後処理を実行する。
+`reshaping` タスク（`run_count > 0`）の結果を確認し、完了と判断した場合に `done` に遷移させ、後処理を実行する。
 
 ### 手順
 
-1. `tasks/index.jsonl` から `status=done` のタスクを一覧
+1. `tasks/index.jsonl` から `status=reshaping` かつ `run_count > 0` のタスクを一覧
 
-2. 各タスクの `tasks/{id}.md` の `## 完了時アクション` セクションを確認
+2. 各タスクの `tasks/{id}.md` の `## 実行履歴` セクションを確認し、ユーザーに結果を提示
 
-3. 記載されたアクションを実行:
-   - データソース側のステータス更新（操作8を活用）
-   - PR の作成
-   - 通知の送信
-   - etc.
+3. ユーザーが完了を確認した場合:
+   a. `## 完了時アクション` セクションに記載されたアクションを実行:
+      - データソース側のステータス更新（操作8を活用）
+      - PR の作成
+      - 通知の送信
+      - etc.
+   b. `index.jsonl` と `.md` の status を `done` に更新
 
-4. アクション完了後、必要に応じてタスク収集（操作1）を実行
+4. ユーザーが再作業が必要と判断した場合:
+   - タスクは `reshaping` のまま。操作3（タスク精査）で再精査 → `scoped` → 操作5 → 操作6 のフローを繰り返す
+
+5. 完了後、必要に応じてタスク収集（操作1）を実行して GC させる
 
 ---
 
@@ -366,21 +398,21 @@ python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --sand
 
 ## 11. 精査対象選択
 
-`pending` タスクを `triaging`（精査対象）にする。ユーザが明示的に精査対象を選択するステップ。
+`pending` タスクを `reshaping`（精査対象）にする。ユーザが明示的に精査対象を選択するステップ。
 
-### 手順（pending → triaging）
+### 手順（pending → reshaping）
 
 1. 対象タスクの `tasks/index.jsonl` エントリを確認し、`status` が `pending` であることを確認
 
-2. `index.jsonl` の当該エントリの `status` を `triaging` に更新
+2. `index.jsonl` の当該エントリの `status` を `reshaping` に更新
 
-3. `tasks/{id}.md` の `- Status:` 行を `triaging` に更新
+3. `tasks/{id}.md` の `- Status:` 行を `reshaping` に更新
 
 ### 制約
 
-- `pending` → `triaging` 遷移は `status=pending` のタスクのみ可
+- `pending` → `reshaping` 遷移は `status=pending` のタスクのみ可
 - git commit は不要（tasks/ は gitignore 対象）
 
 ### 例
 
-- 「これを精査して」「次にやる」→ `pending` → `triaging`（その後、操作3 タスク精査を実行）
+- 「これを精査して」「次にやる」→ `pending` → `reshaping`（その後、操作3 タスク精査を実行）

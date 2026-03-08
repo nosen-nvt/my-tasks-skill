@@ -64,18 +64,20 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 ## タスクのステータスフロー
 
 ```
-pending → triaging → scoped              → approved → running → done
-                   → needs_clarification → scoped                └→ failed
-                         └→ done (manual 短縮フロー)
+pending → reshaping ⇄ needs_clarification
+              ↓
+           scoped → approved → running → reshaping（ループ）
+                                              ↓
+                                         （ユーザ確認）→ done
 ```
 
 - `pending`: データソースから取り込まれた初期状態
-- `triaging`: ユーザが精査対象として選択。精査プロセス中
+- `reshaping`: 精査・見直しプロセス中。初回精査（`run_count=0`）とジョブ実行後の再精査（`run_count>0`）の両方を含む
 - `needs_clarification`: 質問が生成されたが未回答の項目がある
 - `scoped`: 前提条件・達成条件が明確で、実行プロンプトが生成済み（精査ジョブが scoped 遷移時に同時生成）
 - `approved`: ユーザがプロンプトを承認し、実行待ち
 - `running`: ディスパッチャーで実行中
-- `done` / `failed`: 完了 / 失敗
+- `done`: 完了（ユーザが結果を確認し、明示的に完了とした状態）
 
 ## git 操作ポリシー
 

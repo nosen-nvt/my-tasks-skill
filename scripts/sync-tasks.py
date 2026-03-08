@@ -143,6 +143,10 @@ def create_task_markdown(tasks_dir: Path, entry: dict) -> None:
 
 ## 実行プロンプト
 
+
+
+## 実行履歴
+
 """
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(content)
@@ -301,6 +305,7 @@ def process_datasource(
                 "title": t["title"],
                 "status": "pending",
                 "project_id": project_id,
+                "run_count": 0,
             }
             index_entries.append(new_entry)
             create_task_markdown(tasks_dir, new_entry)

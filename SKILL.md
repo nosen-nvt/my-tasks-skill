@@ -28,9 +28,9 @@ JIRA・Microsoft To Do・メール等の外部データソースからタスク�
 6. **タスク実行** - approved タスクをディスパッチャー経由で実行
 7. **ステータス確認** - タスク一覧、ジョブ状況の表示
 8. **タスク操作** - データソース側のタスクを操作（ステータス変更等）
-9. **完了時アクション** - done タスクの後処理実行
+9. **完了確認・完了時アクション** - reshaping タスク（run_count > 0）の結果確認 → done 遷移 + 後処理実行
 10. **設定管理** - プロジェクト・データソースの CRUD、リポジトリ初期化
-11. **精査対象選択** - pending タスクを triaging にする（精査対象として選択）
+11. **精査対象選択** - pending タスクを reshaping にする（精査対象として選択）
 
 ## 詳細リファレンス
 
@@ -113,9 +113,10 @@ datasource 設定の `sync_mode` フィールドに応じて同期動作が異�
 
 タスク精査を1タスク1ジョブとしてディスパッチャーに投入するスクリプト。
 各ジョブは専用のコンテキストでタスクを精査し、scoped 遷移時には実行プロンプトも同時に生成する。
+`run_count > 0` のタスクは再精査として実行履歴を踏まえたプロンプト修正を行う。
 
 ```bash
-# 全 triaging タスクを精査ジョブとして投入
+# 全 reshaping タスクを精査ジョブとして投入
 python3 ~/.claude/skills/my-tasks/scripts/refine.py \
   --repo ~/.local/share/my-tasks
 
@@ -161,7 +162,8 @@ python3 ~/.claude/skills/my-tasks/scripts/refine.py \
 
 | ステータス | 対象条件 | ジョブの動作 |
 |---|---|---|
-| `triaging` | 常に対象 | 精査 → `needs_clarification` or `scoped`（+ 実行プロンプト生成） |
+| `reshaping`（`run_count=0`） | 常に対象 | 初回精査 → `needs_clarification` or `scoped`（+ 実行プロンプト生成） |
+| `reshaping`（`run_count>0`） | 常に対象 | 再精査（実行履歴を踏まえてプロンプト修正） → `scoped`（+ 実行プロンプト再生成）。問題なければユーザーに完了確認を促す |
 | `needs_clarification` | `--include-clarified` 指定時、かつ全チェックボックスが `[x]` | 再精査 → `scoped`（+ 実行プロンプト生成） |
 
 ### 注意

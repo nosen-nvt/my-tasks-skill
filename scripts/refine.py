@@ -2,12 +2,13 @@
 """
 refine.py - タスク精査ディスパッチャー
 
-triaging / needs_clarification (全回答済み) のタスクを1タスク1ジョブとして
+reshaping / needs_clarification (全回答済み) のタスクを1タスク1ジョブとして
 dispatcher.py に投入する。各ジョブは専用のコンテキストでタスクを精査し、
 scoped 遷移時には実行プロンプトも生成する。
+run_count > 0 のタスクは再精査として実行履歴を踏まえたプロンプト修正を行う。
 
 使い方:
-  # 全 triaging タスクを精査ジョブとして投入
+  # 全 reshaping タスクを精査ジョブとして投入
   python3 refine.py --repo ~/.local/share/my-tasks
 
   # 特定タスクのみ
@@ -104,7 +105,7 @@ def find_targets(
 
         status = entry.get("status", "")
 
-        if status == "triaging":
+        if status == "reshaping":
             targets.append(entry)
         elif status == "needs_clarification" and include_clarified:
             md = read_task_md(tasks_dir, entry["id"])
@@ -219,6 +220,63 @@ RECLARIFY_TEMPLATE = """\
 index.jsonl は JSONL 形式（1行1タスク）です。該当行のみ status を変更し、他の行は変更しないでください。
 """
 
+REREFINEMENT_TEMPLATE = """\
+あなたはタスク精査エージェントです。以下のタスクはジョブ実行後に reshaping に戻されました。実行履歴を踏まえて再精査してください。
+
+# 対象タスク
+
+ファイル: `{tasks_dir}/{task_id}.md`
+
+```markdown
+{task_md}
+```
+
+# プロジェクト情報
+
+- プロジェクトID: {project_id}
+- プロジェクト名: {project_name}
+- 説明: {project_description}
+- 作業ディレクトリ: {working_directory}
+
+# 実行回数: {run_count}
+
+# 指示
+
+1. `## 実行履歴` セクションを確認し、前回の実行結果を把握してください。必要に応じて作業ディレクトリ配下のソースコードや変更差分を調査してください。
+
+2. 判定:
+   - **再作業が必要な場合**（失敗、レビュー指摘、不具合など）:
+     - `## 事前条件`、`## 達成条件` を必要に応じて修正
+     - `## 実行プロンプト` を前回の結果を踏まえて修正（何が問題だったか、どう修正すべきかを明記）
+     - ステータスを `scoped` に遷移
+   - **追加の未決事項がある場合**:
+     - `## 未決事項` にチェックボックス形式で質問を記載
+     - ステータスを `needs_clarification` に遷移
+   - **問題がない場合**（タスクは正常完了している）:
+     - ステータスは `reshaping` のまま変更しない（ユーザーが操作9で完了確認する）
+     - `## 概要` の末尾に「精査結果: 正常完了を確認。完了確認待ち。」と追記
+
+3. 達成条件のルール（重要）:
+   - このタスクは AI エージェントが実装・実行する前提です
+   - 達成条件は AI エージェント自身がローカルで検証可能な内容にしてください
+   - OK: ファイル内容の確認、YAML/JSON のパース検証、テスト実行結果、ビルド成功
+   - NG: ブラウザでの手動確認、外部サービスの目視確認など
+
+4. 実行プロンプト修正時の注意:
+   - 実行プロンプトは、別の AI エージェントがこのタスクを実行するための指示書です
+   - 前回の実行で何が起きたか、今回何を修正すべきかを明確に記載してください
+   - 実行エージェントはタスク md の他のセクションを読まない前提で、自己完結した内容にしてください
+
+# ファイル更新
+
+以下の2つのファイルを更新してください:
+
+1. `{tasks_dir}/{task_id}.md`: 上記の精査結果を反映
+2. `{tasks_dir}/index.jsonl`: 該当タスク（id="{task_id}"）の status フィールドを適切に更新（scoped / needs_clarification / reshaping のまま）
+
+index.jsonl は JSONL 形式（1行1タスク）です。該当行のみ status を変更し、他の行は変更しないでください。
+"""
+
 
 def build_prompt(
     entry: dict,
@@ -227,7 +285,14 @@ def build_prompt(
     tasks_dir: Path,
 ) -> str:
     status = entry.get("status", "")
-    template = RECLARIFY_TEMPLATE if status == "needs_clarification" else TRIAGE_TEMPLATE
+    run_count = entry.get("run_count", 0)
+
+    if status == "needs_clarification":
+        template = RECLARIFY_TEMPLATE
+    elif status == "reshaping" and run_count > 0:
+        template = REREFINEMENT_TEMPLATE
+    else:
+        template = TRIAGE_TEMPLATE
 
     return template.format(
         tasks_dir=tasks_dir,
@@ -237,6 +302,7 @@ def build_prompt(
         project_name=project.get("name", ""),
         project_description=project.get("description", ""),
         working_directory=project.get("working_directory", ""),
+        run_count=run_count,
     )
 
 

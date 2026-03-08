@@ -128,31 +128,35 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 | `title` | string | Yes | タスクタイトル |
 | `status` | string | Yes | タスクステータス |
 | `project_id` | string | No | 紐づくプロジェクトの ID |
+| `run_count` | integer | No | ジョブ実行回数（デフォルト: `0`）。ジョブ完了後に `reshaping` に戻す際にインクリメントする |
 
 ### ステータス定義
 
 ```
-pending → triaging → scoped              → approved → running → done
-                   → needs_clarification → scoped                └→ failed
-                         └→ done (manual 短縮フロー)
+pending → reshaping ⇄ needs_clarification
+              ↓
+           scoped → approved → running → reshaping（ループ）
+                                              ↓
+                                         （ユーザ確認）→ done
 ```
 
 | ステータス | 意味 |
 |-----------|------|
 | `pending` | データソースから取り込まれた初期状態 |
-| `triaging` | ユーザが精査対象として選択。精査プロセス中 |
+| `reshaping` | 精査・見直しプロセス中。初回精査（`run_count=0`）とジョブ実行後の再精査（`run_count>0`）の両方を含む |
 | `needs_clarification` | 質問が生成されたが、未回答の項目がある（manual プロジェクトでは全回答後 `done` へ直接遷移） |
 | `scoped` | 前提条件・達成条件が明確で、実行プロンプトが生成済み（精査ジョブが scoped 遷移時に同時生成） |
 | `approved` | ユーザがプロンプトを承認し、実行待ち |
 | `running` | ディスパッチャーで実行中 |
-| `done` | 完了 |
-| `failed` | 失敗 |
+| `done` | 完了（ユーザが結果を確認し、明示的に完了とした状態） |
 
 ### 遷移ルール補足
 
-- `pending` → `triaging`: ユーザが精査対象として選択したとき
-- `triaging` → `scoped`: 未決事項がなく達成条件が明確な場合
-- `triaging` → `needs_clarification`: 未決事項がある場合
+- `pending` → `reshaping`: ユーザが精査対象として選択したとき
+- `reshaping` → `scoped`: 未決事項がなく達成条件が明確な場合
+- `reshaping` → `needs_clarification`: 未決事項がある場合
+- `running` → `reshaping`: ジョブ完了後（成功・失敗問わず）。`run_count` をインクリメントし、実行履歴を追記する
+- `reshaping` → `done`: ユーザがタスクの完了を確認したとき（操作9）。完了時アクションも同時に実行する
 - **manual プロジェクト短縮フロー**: プロジェクト定義に `working_directory` がないプロジェクトは manual 扱い。`needs_clarification` で全未決事項が `[x]` になったら `scoped` / `approved` / `running` をスキップし `done` へ直接遷移する。完了時アクション（操作9）は通常通り実行する
 
 ### ID 生成規則
@@ -164,8 +168,8 @@ pending → triaging → scoped              → approved → running → done
 ### 例
 
 ```jsonl
-{"id":"20260301-001","remote_id":"UBS-101","datasource_id":"jira","title":"API実装","status":"pending","project_id":"ubs-mgmt-tool"}
-{"id":"20260301-002","remote_id":"abc123","datasource_id":"ms-todo","title":"書類提出","status":"needs_clarification","project_id":""}
+{"id":"20260301-001","remote_id":"UBS-101","datasource_id":"jira","title":"API実装","status":"pending","project_id":"ubs-mgmt-tool","run_count":0}
+{"id":"20260301-002","remote_id":"abc123","datasource_id":"ms-todo","title":"書類提出","status":"needs_clarification","project_id":"","run_count":0}
 ```
 
 ---
@@ -208,6 +212,10 @@ pending → triaging → scoped              → approved → running → done
 ## 実行プロンプト
 
 （scoped ステータスに遷移した際にエージェントが生成）
+
+## 実行履歴
+
+（ジョブ実行後に reshaping に戻す際、実行結果を追記する。run_count=0 の初期状態では空）
 ```
 
 ### 規約
@@ -215,6 +223,7 @@ pending → triaging → scoped              → approved → running → done
 - メタデータ部分（冒頭のリスト）はプログラムから読み書きする
 - `## 未決事項` はチェックボックス形式。全て `[x]` になったら scoped への遷移が可能
 - `## 実行プロンプト` は scoped 時に生成され、approved 時にディスパッチャーに渡される
+- `## 実行履歴` はジョブ実行後に結果を追記する。各エントリは `### Run N` ヘッダの下に、日時・結果（成功/失敗）・終了コード・要約を記載する
 - 各セクションは空でもヘッダを残す（パース容易性のため）
 
 ---
