@@ -478,7 +478,65 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 
 ---
 
-## 6. ディスパッチャージョブ状態（インメモリ）
+## 6. Lifecycle（ライフサイクル状態）
+
+タスクのライフサイクルを管理するステートマシン。
+永続化: `$XDG_RUNTIME_DIR/my-tasks-dispatch/lifecycles.jsonl`
+
+### フィールド
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `lifecycle_id` | string | 識別子（`lc-{連番}` 形式） |
+| `task_id` | string\|null | タスク ID（直接投入時は null） |
+| `project_id` | string | プロジェクト ID |
+| `prompt` | string | 元の依頼内容 |
+| `status` | string | `reshaping` \| `running` \| `evaluating` \| `suspend` \| `done` |
+| `suspend_reason` | string\|null | suspend 時の理由: `needs_input`, `approval_required`, `project_confirmation` |
+| `run_count` | integer | 実行回数 |
+| `max_runs` | integer | 最大実行回数 |
+| `current_dispatch_id` | string\|null | 現在のサブジョブの dispatch_id |
+| `created_at` | string | 作成日時（ISO 8601） |
+| `updated_at` | string | 更新日時（ISO 8601） |
+
+### 例
+
+```jsonl
+{"lifecycle_id":"lc-1","task_id":"20260301-001","project_id":"bo","prompt":"API実装","status":"running","suspend_reason":null,"run_count":0,"max_runs":5,"current_dispatch_id":"bo-3","created_at":"2026-03-01T10:00:00+09:00","updated_at":"2026-03-01T10:05:00+09:00"}
+{"lifecycle_id":"lc-2","task_id":"20260301-002","project_id":"ubs","prompt":"バグ修正","status":"suspend","suspend_reason":"needs_input","run_count":1,"max_runs":5,"current_dispatch_id":null,"created_at":"2026-03-01T09:00:00+09:00","updated_at":"2026-03-01T09:30:00+09:00"}
+```
+
+---
+
+## 7. 結果ファイル
+
+ジョブ完了時にジョブが書き出す結果ファイル。Lifecycle ステートマシンが次の状態を決定するために使用する。
+パス: `$XDG_RUNTIME_DIR/my-tasks-dispatch/{dispatch_id}.result.json`
+
+### 精査ジョブ (refine)
+
+```json
+{"next_status": "scoped"}
+{"next_status": "needs_input"}
+{"next_status": "reshaping"}
+```
+
+### 評価ジョブ (evaluate)
+
+```json
+{"verdict": "PASS", "summary": "全達成条件を確認済み"}
+{"verdict": "RETRY", "summary": "テストが2件失敗"}
+{"verdict": "BLOCKED", "summary": "API キーが必要"}
+{"verdict": "ABORT", "summary": "前提条件が誤り"}
+```
+
+### 実行ジョブ (execute)
+
+結果ファイル不要。exit code で判定（0=成功、非0=失敗）。
+
+---
+
+## 8. ディスパッチャージョブ状態（インメモリ）
 
 ディスパッチャーサーバがインメモリで管理するジョブ状態。
 ファイルへの永続化は行わない（サーバ再起動時にリセット）。
@@ -491,6 +549,7 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 | `dispatch_id` | string | 識別子（`{project_id}-{連番}` 形式、例: `bo-1`） |
 | `project_id` | string | プロジェクト ID |
 | `task_id` | string\|null | タスク ID（`run --task` の場合） |
+| `lifecycle_id` | string\|null | 所属する Lifecycle ID（Lifecycle 経由のジョブのみ） |
 | `status` | string | `queued` \| `running` \| `done` \| `failed` |
 | `pid` | integer\|null | 子プロセスの PID |
 | `exit_code` | integer\|null | 終了コード |

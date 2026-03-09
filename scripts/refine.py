@@ -170,6 +170,15 @@ TRIAGE_TEMPLATE = """\
 2. `{tasks_dir}/index.jsonl`: 該当タスク（id="{task_id}"）の status フィールドを更新
 
 index.jsonl は JSONL 形式（1行1タスク）です。該当行のみ status を変更し、他の行は変更しないでください。
+
+# 結果ファイル出力
+
+以下のパスに結果 JSON を書き出してください:
+  {result_file_path}
+
+フォーマット:
+  {{"next_status": "scoped"}} — 精査完了、実行可能
+  {{"next_status": "needs_input"}} — ユーザへの質問あり
 """
 
 RECLARIFY_TEMPLATE = """\
@@ -218,6 +227,14 @@ RECLARIFY_TEMPLATE = """\
 2. `{tasks_dir}/index.jsonl`: 該当タスク（id="{task_id}"）の status フィールドを `scoped` に更新
 
 index.jsonl は JSONL 形式（1行1タスク）です。該当行のみ status を変更し、他の行は変更しないでください。
+
+# 結果ファイル出力
+
+以下のパスに結果 JSON を書き出してください:
+  {result_file_path}
+
+フォーマット:
+  {{"next_status": "scoped"}} — 精査完了、実行可能
 """
 
 REREFINEMENT_TEMPLATE = """\
@@ -275,6 +292,16 @@ REREFINEMENT_TEMPLATE = """\
 2. `{tasks_dir}/index.jsonl`: 該当タスク（id="{task_id}"）の status フィールドを適切に更新（scoped / needs_input / reshaping のまま）
 
 index.jsonl は JSONL 形式（1行1タスク）です。該当行のみ status を変更し、他の行は変更しないでください。
+
+# 結果ファイル出力
+
+以下のパスに結果 JSON を書き出してください:
+  {result_file_path}
+
+フォーマット:
+  {{"next_status": "scoped"}} — 精査完了、実行可能
+  {{"next_status": "needs_input"}} — ユーザへの質問あり
+  {{"next_status": "reshaping"}} — 問題なし（完了確認待ち）
 """
 
 
@@ -283,6 +310,7 @@ def build_prompt(
     task_md: str,
     project: dict,
     tasks_dir: Path,
+    result_file_path: str = "",
 ) -> str:
     status = entry.get("status", "")
     run_count = entry.get("run_count", 0)
@@ -303,6 +331,7 @@ def build_prompt(
         project_description=project.get("description", ""),
         working_directory=project.get("working_directory", ""),
         run_count=run_count,
+        result_file_path=result_file_path,
     )
 
 

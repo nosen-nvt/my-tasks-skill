@@ -40,9 +40,11 @@ JSON over Unix ドメインソケット。改行区切り（1行1メッセージ
 
 | コマンド | フィールド | 説明 |
 |---------|-----------|------|
+| `dispatch` | `task_id?`, `project_id?`, `prompt?` | ライフサイクルを開始（精査→実行→評価を自動制御） |
+| `resume` | `lifecycle_id`, `project_id?` | suspend 中のライフサイクルを再開 |
 | `run` | `task_id?`, `project_id`, `prompt`, `job_type?` | ジョブを実行（sandbox_profile はプロジェクト設定から自動解決） |
 | `open` | `project_id`, `session?` | 対話的セッションを tmux で開く |
-| `status` | | 全ジョブのステータスを返す |
+| `status` | | 全ジョブ + ライフサイクルのステータスを返す |
 | `cancel` | `dispatch_id` | キュー内ジョブを取消 |
 | `kill` | `dispatch_id` | 実行中ジョブを強制停止 |
 | `kill-all` | | 全ジョブを強制停止 |
@@ -132,9 +134,50 @@ queued ──→ running ──→ done
 2. ジョブが既に完了していれば即座にレスポンスを返す
 3. 未完了の場合、Future の完了を待ってからレスポンスを返す
 
-### オーケストレーション
+### Lifecycle ステートマシン
+
+`dispatch` コマンドで開始される Lifecycle がタスクの全ライフサイクルを自動制御する。
+
+#### データモデル
+
+- `Lifecycle` dataclass: lifecycle_id, task_id, project_id, prompt, status, suspend_reason, run_count, max_runs, current_dispatch_id, timestamps
+- 永続化: `$XDG_RUNTIME_DIR/my-tasks-dispatch/lifecycles.jsonl` (状態変更のたびに全件書き出し)
+- Job に `lifecycle_id` フィールドを追加（Lifecycle 経由のジョブを識別）
+
+#### コマンド
+
+| コマンド | フィールド | 説明 |
+|---------|-----------|------|
+| `dispatch` | `task_id?`, `project_id?`, `prompt?` | ライフサイクル開始。精査→承認→実行→評価を自動制御 |
+| `resume` | `lifecycle_id`, `project_id?` | suspend 中のライフサイクルを再開 |
+
+#### ステートマシンフロー
+
+```
+dispatch → reshaping → 精査ジョブ
+                          ├── scoped + auto_approve → running → 実行ジョブ → evaluating → 評価ジョブ
+                          │                                                                ├── PASS → done
+                          │                                                                ├── RETRY → reshaping (ループ)
+                          │                                                                ├── BLOCKED → suspend
+                          │                                                                └── ABORT → done
+                          ├── scoped + 手動承認 → suspend (approval_required)
+                          ├── needs_input → suspend (needs_input)
+                          └── reshaping (問題なし) → done
+```
+
+#### 結果ファイル
+
+ジョブは `$XDG_RUNTIME_DIR/my-tasks-dispatch/{dispatch_id}.result.json` に結果 JSON を出力。
+Lifecycle ステートマシンがこのファイルを読んで次の状態を決定する（フォールバック: index.jsonl）。
+
+#### LLM プロジェクト判定
+
+`dispatch` 時に `project_id` 未指定の場合、`claude` CLI でプロジェクトを自動判定する。
+
+### オーケストレーション（従来方式、後方互換）
 
 プロジェクト定義に `orchestration` フィールドが設定されている場合、ジョブ完了後に自動でチェーンジョブをディスパッチする。
+**注意**: Lifecycle 経由（`lifecycle_id` あり）のジョブはこの従来オーケストレーションをバイパスし、Lifecycle ステートマシンで処理される。
 
 #### ジョブタイプ (`job_type`)
 
@@ -203,7 +246,14 @@ async def client_send(request: dict) -> dict:
 ### CLI コマンド
 
 ```bash
-# タスクの実行プロンプトを index + Markdown から読み取ってジョブ投入
+# ライフサイクル開始（推奨）
+dispatcher.py dispatch --task 20260301-001
+dispatcher.py dispatch --project bo --prompt "バグを修正して"
+
+# ライフサイクル再開
+dispatcher.py resume --id lc-1
+
+# タスクの実行プロンプトを index + Markdown から読み取ってジョブ投入（従来方式）
 dispatcher.py run --task 20260301-001
 
 # プロンプトを stdin から読み取ってジョブ投入

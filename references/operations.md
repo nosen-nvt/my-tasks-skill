@@ -1,6 +1,9 @@
 # 操作リファレンス
 
-タスク管理スキルが提供する11のオペレーションの詳細手順。
+タスク管理スキルが提供するオペレーションの詳細手順。
+
+**推奨**: dispatch/resume を使用すると、精査→承認→実行→評価のフローが自動制御される。
+従来のオペレーション 3〜6, 9, 11 は dispatch に統合されたが、後方互換として引き続き使用可能。
 
 ---
 
@@ -98,7 +101,78 @@
 
 ---
 
-## 3. タスク精査
+## 3. dispatch（ライフサイクル開始）
+
+タスクのライフサイクルを開始する。Lifecycle ステートマシンが精査→承認→実行→評価を自動制御する。
+
+### 手順
+
+1. ライフサイクルを開始:
+   ```bash
+   # タスク ID 指定（pending → reshaping 自動遷移、精査ジョブ自動実行）
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py dispatch --task 20260301-001
+
+   # プロジェクト + プロンプト指定（タスクなしの直接投入）
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py dispatch --project bo --prompt "バグを修正して"
+
+   # プロジェクト未指定（LLM で自動判定）
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py dispatch --task 20260301-001
+   ```
+
+2. ステータスを確認:
+   ```bash
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status
+   ```
+
+### ステートマシン
+
+```
+dispatch → reshaping → 精査ジョブ → scoped
+                                       ├── auto_approve → running → 実行ジョブ → evaluating → 評価ジョブ
+                                       │                                                        ├── PASS → done
+                                       │                                                        ├── RETRY → reshaping（ループ）
+                                       │                                                        ├── BLOCKED → suspend (needs_input)
+                                       │                                                        └── ABORT → done
+                                       └── 手動承認が必要 → suspend (approval_required)
+精査ジョブ → needs_input → suspend (needs_input)
+精査ジョブ → reshaping（問題なし）→ done
+```
+
+### suspend 理由
+
+| 理由 | 説明 | resume 時の動作 |
+|------|------|----------------|
+| `approval_required` | 手動承認が必要 | 実行ジョブをディスパッチ |
+| `needs_input` | ユーザ入力が必要 | 再精査ジョブをディスパッチ |
+| `project_confirmation` | プロジェクト判定の確認 | 指定プロジェクトで精査開始 |
+
+---
+
+## 4. resume（ライフサイクル再開）
+
+suspend 中のライフサイクルを再開する。
+
+### 手順
+
+1. suspend 中のライフサイクルを確認:
+   ```bash
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status
+   ```
+
+2. `needs_input` の場合: タスク md の未決事項に回答し `[x]` に更新
+
+3. ライフサイクルを再開:
+   ```bash
+   # 通常の再開（needs_input 回答済み / approval_required 承認）
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py resume --id lc-1
+
+   # プロジェクト確認の場合（project_confirmation）
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py resume --id lc-1 --project correct-project-id
+   ```
+
+---
+
+## 5. タスク精査（従来方式、dispatch に統合済み）
 
 `reshaping` タスクの精査、および全回答済み `needs_input` タスクの再精査を行う。
 `refine.py` を使い、**1タスク1ジョブ**としてディスパッチャーに投入する。

@@ -22,15 +22,20 @@ JIRA・Microsoft To Do・メール等の外部データソースからタスク�
 
 1. **タスク収集** - 全データソースからタスクを取得し、index.jsonl + Markdown を更新
 2. **メールトリアージ** - メールデータソースからアクションアイテムを収集
-3. **タスク精査** - refine.py で1タスク1ジョブとして精査をディスパッチ（scoped 遷移時にプロンプトも同時生成）
-4. **プロンプト再生成** - scoped タスクの実行プロンプトを再生成（通常は操作3で自動生成）
-5. **プロンプト承認** - 生成されたプロンプトを確認し approved に遷移
-6. **タスク実行** - approved タスクをディスパッチャー経由で実行
-7. **ステータス確認** - タスク一覧、ジョブ状況の表示
-8. **タスク操作** - データソース側のタスクを操作（ステータス変更等）
-9. **完了確認・完了時アクション** - reshaping タスク（run_count > 0）の結果確認 → done 遷移 + 後処理実行
-10. **設定管理** - プロジェクト・データソースの CRUD、リポジトリ初期化
-11. **精査対象選択** - pending タスクを reshaping にする（精査対象として選択）
+3. **dispatch** - ライフサイクルを開始（精査→承認→実行→評価を自動制御）
+4. **resume** - suspend 中のライフサイクルを再開（ユーザ入力の反映、承認）
+5. **ステータス確認** - ライフサイクル・ジョブの状況表示
+6. **タスク操作** - データソース側のタスクを操作（ステータス変更等）
+7. **設定管理** - プロジェクト・データソースの CRUD、リポジトリ初期化
+
+### 従来オペレーション（後方互換）
+
+以下は dispatch/resume に統合されたが、従来の run コマンドからも利用可能:
+
+- **タスク精査** - refine.py で1タスク1ジョブとして精査をディスパッチ
+- **プロンプト承認** - 生成されたプロンプトを確認し approved に遷移
+- **タスク実行** - approved タスクをディスパッチャー経由で実行
+- **完了確認** - 評価ジョブの PASS 判定で自動完了
 
 ## 詳細リファレンス
 
@@ -180,39 +185,55 @@ python3 ~/.claude/skills/my-tasks/scripts/refine.py \
 
 Unix ドメインソケット C/S ジョブランナー。サーバは systemd user service として常駐。
 
+### dispatch / resume（推奨）
+
+Lifecycle ステートマシンによりタスクの精査→承認→実行→評価を自動制御する。
+
+```bash
+# タスク ID 指定でライフサイクル開始（pending → reshaping → 精査ジョブ自動実行）
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py dispatch --task 20260301-001
+
+# プロジェクト ID + プロンプト指定
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py dispatch --project bo --prompt "バグを修正して"
+
+# プロジェクト未指定（LLM で自動判定）
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py dispatch --task 20260301-001
+
+# suspend 中のライフサイクルを再開（ユーザ回答済み / 承認）
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py resume --id lc-1
+
+# ステータス確認（ライフサイクル + ジョブ）
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status --json
+```
+
+### run（従来方式、後方互換）
+
 ```bash
 # タスク ID 指定でジョブ投入（index.jsonl + .md からプロンプトを自動読み取り）
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py run --task 20260301-001
 
 # プロジェクト ID + stdin プロンプト指定
 echo "バグを修正してください" | python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py run --project bo
+```
 
+### その他のコマンド
+
+```bash
 # 対話セッション（ジョブ管理の対象外）
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --session main
 
-# プロファイルを上書きしてジョブ投入（例: unrestricted で調査タスクを実行）
+# プロファイルを上書きしてジョブ投入
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py run --task 20260301-001 --sandbox-profile unrestricted
-
-# open でも同様
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --sandbox-profile unrestricted
-
-# ステータス確認
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status --json
 
 # ジョブ制御
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py cancel --id bo-1
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py kill --id bo-1
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py kill --all
 
-# ジョブ完了待機（run とは別途実行）
+# ジョブ完了待機
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py wait --id bo-1
-
-# 実行して完了まで待機（run は非同期なので、dispatch_id を取り出して wait に渡す）
-# run の出力例（stderr）: "Job started: bo-1"
-DISP=$(python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py run --task 20260301-001 2>&1 | grep -oP '[\w-]+-\d+$')
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py wait --id "$DISP"
 
 # ジョブの stdout/stderr ログを表示
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py log --id bo-1

@@ -6,6 +6,9 @@ dispatcher.py - Unix ドメインソケット C/S ジョブランナー
   dispatcher.py server [--max-slots 3]
 
 クライアント:
+  dispatcher.py dispatch --task 20260301-001
+  dispatcher.py dispatch --project bo --prompt "..."
+  dispatcher.py resume --id lc-1
   echo "..." | dispatcher.py run --project bo
   dispatcher.py run --task 20260301-001
   dispatcher.py open --project bo [--session main]
@@ -169,6 +172,36 @@ class CredentialBroker:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class Lifecycle:
+    lifecycle_id: str
+    task_id: str | None
+    project_id: str
+    prompt: str
+    status: str = "reshaping"
+    suspend_reason: str | None = None
+    run_count: int = 0
+    max_runs: int = 5
+    current_dispatch_id: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "lifecycle_id": self.lifecycle_id,
+            "task_id": self.task_id,
+            "project_id": self.project_id,
+            "prompt": self.prompt,
+            "status": self.status,
+            "suspend_reason": self.suspend_reason,
+            "run_count": self.run_count,
+            "max_runs": self.max_runs,
+            "current_dispatch_id": self.current_dispatch_id,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass
 class Job:
     dispatch_id: str
     project_id: str
@@ -179,6 +212,7 @@ class Job:
     sandbox_profile_id: str = "default"
     env_files: list[str] = field(default_factory=list)
     allowed_credentials: list[str] | str = field(default_factory=list)
+    lifecycle_id: str | None = None
     status: str = "queued"
     pid: int | None = None
     exit_code: int | None = None
@@ -213,10 +247,63 @@ class DispatchServer:
         self._counter: dict[str, int] = {}
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self.cred_broker = CredentialBroker()
+        self.lifecycles: dict[str, Lifecycle] = {}
+        self._lc_counter: int = 0
 
     def _log_path(self, dispatch_id: str) -> Path:
         runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}")
         return Path(runtime_dir) / SOCKET_DIR_NAME / f"{dispatch_id}.log"
+
+    def _result_path(self, dispatch_id: str) -> Path:
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}")
+        return Path(runtime_dir) / SOCKET_DIR_NAME / f"{dispatch_id}.result.json"
+
+    def _read_result(self, dispatch_id: str) -> dict | None:
+        path = self._result_path(dispatch_id)
+        if not path.exists():
+            return None
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def generate_lifecycle_id(self) -> str:
+        self._lc_counter += 1
+        return f"lc-{self._lc_counter}"
+
+    def _lifecycles_path(self) -> Path:
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}")
+        return Path(runtime_dir) / SOCKET_DIR_NAME / "lifecycles.jsonl"
+
+    def _save_lifecycles(self):
+        path = self._lifecycles_path()
+        with open(path, "w", encoding="utf-8") as f:
+            for lc in self.lifecycles.values():
+                f.write(json.dumps(lc.to_dict(), ensure_ascii=False) + "\n")
+
+    def _load_lifecycles(self):
+        path = self._lifecycles_path()
+        if not path.exists():
+            return
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                data = json.loads(line)
+                lc = Lifecycle(**data)
+                self.lifecycles[lc.lifecycle_id] = lc
+                seq = int(lc.lifecycle_id.split("-")[1])
+                self._lc_counter = max(self._lc_counter, seq)
+
+    def _update_lifecycle_status(self, lc: Lifecycle, new_status: str):
+        lc.status = new_status
+        lc.updated_at = now_iso()
+        if new_status != "suspend":
+            lc.suspend_reason = None
+        self._save_lifecycles()
+        log.info(f"Lifecycle {lc.lifecycle_id}: {new_status}")
 
     def generate_dispatch_id(self, project_id: str) -> str:
         self._counter.setdefault(project_id, 0)
@@ -247,6 +334,8 @@ class DispatchServer:
                 "kill": self.cmd_kill,
                 "kill-all": self.cmd_kill_all,
                 "wait": self.cmd_wait,
+                "dispatch": self.cmd_dispatch,
+                "resume": self.cmd_resume,
             }.get(command)
 
             if handler is None:
@@ -375,7 +464,8 @@ class DispatchServer:
 
     async def cmd_status(self, _request: dict) -> dict:
         jobs = [j.to_dict() for j in self.jobs.values()]
-        return {"ok": True, "jobs": jobs}
+        lifecycles = [lc.to_dict() for lc in self.lifecycles.values()]
+        return {"ok": True, "jobs": jobs, "lifecycles": lifecycles}
 
     async def cmd_cancel(self, request: dict) -> dict:
         dispatch_id = request.get("dispatch_id", "")
@@ -529,10 +619,362 @@ class DispatchServer:
             if not future.done():
                 future.set_result(result)
 
+    # --- dispatch / resume コマンド ---
+
+    async def cmd_dispatch(self, request: dict) -> dict:
+        """ライフサイクルを開始する。"""
+        task_id = request.get("task_id")
+        project_id = request.get("project_id")
+        prompt = request.get("prompt", "")
+
+        # タスク起点の場合: index.jsonl から情報を読み込み
+        if task_id:
+            task_entry = _load_task_entry(self.repo_dir / "tasks", task_id)
+            if not task_entry:
+                return {"ok": False, "error": f"Task not found: {task_id}"}
+            project_id = project_id or task_entry.get("project_id")
+            prompt = prompt or task_entry.get("title", "")
+
+            # pending → reshaping 自動遷移
+            if task_entry.get("status") == "pending":
+                _update_task_index(self.repo_dir / "tasks", task_id, {"status": "reshaping"})
+                _update_task_md_status(self.repo_dir / "tasks", task_id, "reshaping")
+
+        # プロジェクト未確定 → LLM 判定
+        if not project_id:
+            project_id = await self._classify_project(prompt)
+            if not project_id:
+                return {"ok": False, "error": "プロジェクトを判定できませんでした。--project を指定してください"}
+
+        # プロジェクト検証
+        project = sandbox_exec.load_project(project_id, self.repo_dir)
+        if not project:
+            return {"ok": False, "error": f"Project not found: {project_id}"}
+        if not project.get("working_directory"):
+            return {"ok": False, "error": f"manual project: {project_id}"}
+
+        # オーケストレーション設定を取得
+        orchestration = project.get("orchestration", {})
+        max_runs = orchestration.get("max_runs_per_generation", 5)
+
+        # Lifecycle 作成
+        lc = Lifecycle(
+            lifecycle_id=self.generate_lifecycle_id(),
+            task_id=task_id,
+            project_id=project_id,
+            prompt=prompt,
+            max_runs=max_runs,
+            created_at=now_iso(),
+            updated_at=now_iso(),
+        )
+        self.lifecycles[lc.lifecycle_id] = lc
+        self._save_lifecycles()
+
+        # 精査ジョブをディスパッチ
+        await self._lc_dispatch_refine(lc)
+
+        return {
+            "ok": True,
+            "lifecycle_id": lc.lifecycle_id,
+            "dispatch_id": lc.current_dispatch_id,
+            "message": f"Lifecycle started: {lc.lifecycle_id}",
+        }
+
+    async def cmd_resume(self, request: dict) -> dict:
+        """suspend 中のライフサイクルを再開する。"""
+        lifecycle_id = request.get("lifecycle_id")
+        lc = self.lifecycles.get(lifecycle_id) if lifecycle_id else None
+        if not lc:
+            return {"ok": False, "error": f"Lifecycle not found: {lifecycle_id}"}
+        if lc.status != "suspend":
+            return {"ok": False, "error": f"Lifecycle is not suspended (current: {lc.status})"}
+
+        if lc.suspend_reason == "needs_input":
+            self._update_lifecycle_status(lc, "reshaping")
+            await self._lc_dispatch_refine(lc)
+        elif lc.suspend_reason == "approval_required":
+            self._update_lifecycle_status(lc, "running")
+            await self._lc_dispatch_execute(lc)
+        elif lc.suspend_reason == "project_confirmation":
+            # resume 時に project_id を更新
+            new_project_id = request.get("project_id")
+            if new_project_id:
+                lc.project_id = new_project_id
+            self._update_lifecycle_status(lc, "reshaping")
+            await self._lc_dispatch_refine(lc)
+        else:
+            return {"ok": False, "error": f"Unknown suspend reason: {lc.suspend_reason}"}
+
+        return {
+            "ok": True,
+            "lifecycle_id": lc.lifecycle_id,
+            "dispatch_id": lc.current_dispatch_id,
+            "message": f"Lifecycle resumed: {lc.lifecycle_id}",
+        }
+
+    # --- Lifecycle ステートマシン ---
+
+    async def _on_lifecycle_job_complete(self, job: Job):
+        """Lifecycle 所属ジョブの完了ハンドラ。"""
+        lc = self.lifecycles.get(job.lifecycle_id)
+        if not lc:
+            return
+
+        result = self._read_result(job.dispatch_id)
+
+        if job.job_type == "refine":
+            await self._lc_on_refine_complete(lc, job, result)
+        elif job.job_type == "execute":
+            await self._lc_on_execute_complete(lc, job, result)
+        elif job.job_type == "evaluate":
+            await self._lc_on_evaluate_complete(lc, job, result)
+
+    async def _lc_on_refine_complete(self, lc: Lifecycle, job: Job, result: dict | None):
+        next_status = (result or {}).get("next_status")
+
+        # フォールバック: index.jsonl から読み取り
+        if not next_status and lc.task_id:
+            entry = _load_task_entry(self.repo_dir / "tasks", lc.task_id)
+            next_status = entry.get("status") if entry else None
+
+        if next_status == "scoped":
+            # 自動承認判定
+            project = sandbox_exec.load_project(lc.project_id, self.repo_dir)
+            orchestration = (project or {}).get("orchestration", {})
+            if self._should_auto_approve(orchestration, lc.run_count):
+                self._update_lifecycle_status(lc, "running")
+                await self._lc_dispatch_execute(lc)
+            else:
+                lc.suspend_reason = "approval_required"
+                self._update_lifecycle_status(lc, "suspend")
+
+        elif next_status == "needs_input":
+            lc.suspend_reason = "needs_input"
+            self._update_lifecycle_status(lc, "suspend")
+
+        elif next_status == "reshaping":
+            # run_count > 0 で問題なし → 自動完了
+            self._update_lifecycle_status(lc, "done")
+            if lc.task_id:
+                _update_task_index(self.repo_dir / "tasks", lc.task_id, {"status": "done"})
+                _update_task_md_status(self.repo_dir / "tasks", lc.task_id, "done")
+
+        else:
+            log.error(f"Lifecycle: unexpected refine result for {lc.lifecycle_id}: {next_status}")
+
+    async def _lc_on_execute_complete(self, lc: Lifecycle, job: Job, result: dict | None):
+        self._update_lifecycle_status(lc, "evaluating")
+        await self._lc_dispatch_evaluate(lc, job)
+
+    async def _lc_on_evaluate_complete(self, lc: Lifecycle, job: Job, result: dict | None):
+        verdict = (result or {}).get("verdict")
+
+        # フォールバック
+        if not verdict and lc.task_id:
+            entry = _load_task_entry(self.repo_dir / "tasks", lc.task_id)
+            status = entry.get("status") if entry else None
+            verdict = {"done": "PASS", "reshaping": "RETRY",
+                       "needs_input": "BLOCKED", "aborted": "ABORT"}.get(status)
+
+        lc.run_count += 1
+
+        if verdict == "PASS":
+            self._update_lifecycle_status(lc, "done")
+        elif verdict == "RETRY":
+            if lc.run_count >= lc.max_runs:
+                self._update_lifecycle_status(lc, "done")
+                if lc.task_id:
+                    _update_task_index(self.repo_dir / "tasks", lc.task_id, {"status": "aborted"})
+            else:
+                self._update_lifecycle_status(lc, "reshaping")
+                await self._lc_dispatch_refine(lc)
+        elif verdict == "BLOCKED":
+            lc.suspend_reason = "needs_input"
+            self._update_lifecycle_status(lc, "suspend")
+        elif verdict == "ABORT":
+            self._update_lifecycle_status(lc, "done")
+            if lc.task_id:
+                _update_task_index(self.repo_dir / "tasks", lc.task_id, {"status": "aborted"})
+        else:
+            log.error(f"Lifecycle: unknown verdict for {lc.lifecycle_id}: {verdict}")
+
+    # --- Lifecycle ディスパッチヘルパー ---
+
+    async def _lc_dispatch_refine(self, lc: Lifecycle):
+        """Lifecycle から精査ジョブをディスパッチ。"""
+        import refine as refine_mod
+
+        tasks_dir = self.repo_dir / "tasks"
+        projects_dir = self.repo_dir / "projects"
+
+        if lc.task_id:
+            task_entry = _load_task_entry(tasks_dir, lc.task_id)
+            task_md = _read_file(tasks_dir / f"{lc.task_id}.md")
+            project = refine_mod.load_project(projects_dir, lc.project_id)
+            if not all([task_entry, task_md, project]):
+                log.error(f"Lifecycle: missing data for refine: {lc.lifecycle_id}")
+                return
+
+            dispatch_id = self.generate_dispatch_id(lc.project_id)
+            result_file_path = str(self._result_path(dispatch_id))
+            prompt = refine_mod.build_prompt(task_entry, task_md, project, tasks_dir,
+                                             result_file_path=result_file_path)
+        else:
+            # タスクなし直接投入: 精査不要、直接実行に回す
+            self._update_lifecycle_status(lc, "running")
+            await self._lc_dispatch_execute(lc)
+            return
+
+        actual_dispatch_id = await self._dispatch_internal(
+            project_id=lc.project_id,
+            task_id=lc.task_id,
+            prompt=prompt,
+            job_type="refine",
+            lifecycle_id=lc.lifecycle_id,
+            dispatch_id_hint=dispatch_id,
+        )
+        lc.current_dispatch_id = actual_dispatch_id
+        self._save_lifecycles()
+
+    async def _lc_dispatch_execute(self, lc: Lifecycle):
+        """Lifecycle から実行ジョブをディスパッチ。"""
+        if lc.task_id:
+            prompt = read_execution_prompt(self.repo_dir, lc.task_id)
+            if not prompt:
+                log.error(f"Lifecycle: no execution prompt for {lc.lifecycle_id}")
+                return
+            _update_task_index(self.repo_dir / "tasks", lc.task_id, {"status": "approved"})
+            _update_task_md_status(self.repo_dir / "tasks", lc.task_id, "approved")
+        else:
+            prompt = lc.prompt
+
+        dispatch_id = await self._dispatch_internal(
+            project_id=lc.project_id,
+            task_id=lc.task_id,
+            prompt=prompt,
+            job_type="execute",
+            lifecycle_id=lc.lifecycle_id,
+        )
+        lc.current_dispatch_id = dispatch_id
+        if lc.task_id:
+            _update_task_index(self.repo_dir / "tasks", lc.task_id, {"status": "running"})
+            _update_task_md_status(self.repo_dir / "tasks", lc.task_id, "running")
+        self._save_lifecycles()
+
+    async def _lc_dispatch_evaluate(self, lc: Lifecycle, execute_job: Job):
+        """Lifecycle から評価ジョブをディスパッチ。"""
+        tasks_dir = self.repo_dir / "tasks"
+
+        # 実行ログを読み込み（末尾 200 行）
+        log_path = self._log_path(execute_job.dispatch_id)
+        execution_log = ""
+        if log_path.exists():
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if len(lines) > 200:
+                execution_log = f"... ({len(lines) - 200} 行省略) ...\n"
+                lines = lines[-200:]
+            execution_log += "\n".join(lines)
+
+        task_md = ""
+        next_run = lc.run_count + 1
+        if lc.task_id:
+            task_md = _read_file(tasks_dir / f"{lc.task_id}.md") or ""
+
+        prompt = EVALUATION_TEMPLATE.format(
+            tasks_dir=tasks_dir,
+            task_id=lc.task_id or "(direct)",
+            task_md=task_md,
+            execution_log=execution_log,
+            log_lines=min(len(execution_log.splitlines()), 200),
+            next_run=next_run,
+            finished_at=execute_job.finished_at or now_iso(),
+            exit_code=execute_job.exit_code,
+            result_file_path="(システムプロンプトで指定されるパスを使用してください)",
+        )
+
+        dispatch_id = await self._dispatch_internal(
+            project_id=lc.project_id,
+            task_id=lc.task_id,
+            prompt=prompt,
+            job_type="evaluate",
+            lifecycle_id=lc.lifecycle_id,
+        )
+        lc.current_dispatch_id = dispatch_id
+        self._save_lifecycles()
+
+    # --- LLM プロジェクト判定 ---
+
+    async def _classify_project(self, prompt: str) -> str | None:
+        """プロンプトからプロジェクトを判定する。"""
+        projects_dir = self.repo_dir / "projects"
+        if not projects_dir.exists():
+            return None
+
+        projects = []
+        for p in projects_dir.glob("*.json"):
+            try:
+                with open(p) as f:
+                    proj = json.load(f)
+                desc = proj.get("description", "")
+                wd = proj.get("working_directory", "")
+                if not wd:
+                    continue  # manual プロジェクトは除外
+                projects.append(f"- {proj.get('project_id', p.stem)}: {proj.get('name', '')} - {desc}")
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        if not projects:
+            return None
+
+        classification_prompt = (
+            "以下のタスク/依頼内容を読んで、最も適切なプロジェクトを選択してください。\n\n"
+            f"# タスク内容\n{prompt}\n\n"
+            f"# プロジェクト一覧\n" + "\n".join(projects) + "\n\n"
+            "# 出力\nJSON で回答してください:\n"
+            '{\"project_id\": \"選択したプロジェクトID\", \"confidence\": \"high\"|\"low\"}\n\n'
+            "どのプロジェクトにも該当しない場合:\n"
+            '{\"project_id\": null, \"reason\": \"理由\"}'
+        )
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "claude", "-p", classification_prompt, "--output-format", "json",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode != 0:
+                return None
+
+            result = json.loads(stdout.decode())
+            # Claude の JSON 出力から result フィールドを取得
+            if isinstance(result, list):
+                # output-format json の場合 [{"type":"result","result":"..."}]
+                for item in result:
+                    if item.get("type") == "result":
+                        inner = json.loads(item["result"])
+                        project_id = inner.get("project_id")
+                        if project_id and inner.get("confidence") != "low":
+                            return project_id
+                        elif project_id and inner.get("confidence") == "low":
+                            return project_id  # low confidence でも返す（dispatch 側で判断）
+                        return None
+            elif isinstance(result, dict):
+                project_id = result.get("project_id")
+                return project_id if project_id else None
+        except Exception as e:
+            log.error(f"Project classification error: {e}")
+
+        return None
+
     # --- オーケストレーション ---
 
     async def on_job_complete(self, job: Job):
         """ジョブ完了後のオーケストレーションチェーン。"""
+        if job.lifecycle_id:
+            await self._on_lifecycle_job_complete(job)
+            return
+
         if not job.task_id:
             return
 
@@ -590,6 +1032,7 @@ class DispatchServer:
             next_run=next_run,
             finished_at=job.finished_at or now_iso(),
             exit_code=job.exit_code,
+            result_file_path="(システムプロンプトで指定されるパスを使用してください)",
         )
 
         await self._dispatch_internal(
@@ -602,19 +1045,25 @@ class DispatchServer:
     async def _on_evaluate_complete(self, job: Job, orchestration: dict):
         """評価ジョブ完了 → verdict に基づいて次のアクションを決定。"""
         tasks_dir = self.repo_dir / "tasks"
-        task_entry = _load_task_entry(tasks_dir, job.task_id)
-        if not task_entry:
-            log.error(f"Orchestration: task entry not found after evaluation: {job.task_id}")
-            return
 
-        status = task_entry.get("status", "")
-        run_count = task_entry.get("run_count", 0)
-        generation = task_entry.get("generation", 1)
+        # 結果ファイルから verdict を取得（フォールバック: index.jsonl）
+        result = self._read_result(job.dispatch_id)
+        verdict = (result or {}).get("verdict")
+
+        if not verdict:
+            task_entry = _load_task_entry(tasks_dir, job.task_id)
+            if not task_entry:
+                log.error(f"Orchestration: task entry not found after evaluation: {job.task_id}")
+                return
+            status = task_entry.get("status", "")
+            verdict = {"done": "PASS", "reshaping": "RETRY",
+                       "needs_input": "BLOCKED", "aborted": "ABORT"}.get(status)
+
+        task_entry = _load_task_entry(tasks_dir, job.task_id)
+        run_count = (task_entry or {}).get("run_count", 0)
         max_runs = orchestration.get("max_runs_per_generation", 5)
 
-        # generation 内の実行回数を計算（generation 開始時の run_count は不明なので、
-        # 簡易的に max_runs と run_count を比較）
-        if status == "reshaping" and orchestration.get("auto_retry", False):
+        if verdict == "RETRY" and orchestration.get("auto_retry", False):
             if run_count >= max_runs:
                 log.info(f"Orchestration: max_runs ({max_runs}) reached for task {job.task_id}, aborting")
                 _update_task_index(tasks_dir, job.task_id, {"status": "aborted"})
@@ -623,36 +1072,42 @@ class DispatchServer:
             log.info(f"Orchestration: RETRY verdict for task {job.task_id} (run {run_count}), dispatching refine")
             await self._dispatch_refine(job.project_id, job.task_id)
 
-        elif status == "done":
+        elif verdict == "PASS":
             log.info(f"Orchestration: PASS verdict for task {job.task_id}")
 
-        elif status == "needs_input":
+        elif verdict == "BLOCKED":
             log.info(f"Orchestration: BLOCKED verdict for task {job.task_id}, waiting for user input")
 
-        elif status == "aborted":
+        elif verdict == "ABORT":
             log.info(f"Orchestration: ABORT verdict for task {job.task_id}")
 
         else:
-            log.info(f"Orchestration: unexpected status '{status}' after evaluation for task {job.task_id}")
+            log.info(f"Orchestration: unexpected verdict '{verdict}' after evaluation for task {job.task_id}")
 
     async def _on_refine_complete(self, job: Job, orchestration: dict):
         """精査ジョブ完了 → scoped なら自動承認判定。"""
         tasks_dir = self.repo_dir / "tasks"
+
+        # 結果ファイルから next_status を取得（フォールバック: index.jsonl）
+        result = self._read_result(job.dispatch_id)
+        next_status = (result or {}).get("next_status")
+
+        if not next_status:
+            task_entry = _load_task_entry(tasks_dir, job.task_id)
+            if not task_entry:
+                log.error(f"Orchestration: task entry not found after refine: {job.task_id}")
+                return
+            next_status = task_entry.get("status", "")
+
         task_entry = _load_task_entry(tasks_dir, job.task_id)
-        if not task_entry:
-            log.error(f"Orchestration: task entry not found after refine: {job.task_id}")
-            return
+        run_count = (task_entry or {}).get("run_count", 0)
 
-        status = task_entry.get("status", "")
-        run_count = task_entry.get("run_count", 0)
-
-        if status == "scoped":
+        if next_status == "scoped":
             if self._should_auto_approve(orchestration, run_count):
                 log.info(f"Orchestration: auto-approving task {job.task_id}")
                 _update_task_index(tasks_dir, job.task_id, {"status": "approved"})
                 _update_task_md_status(tasks_dir, job.task_id, "approved")
 
-                # 実行ジョブをディスパッチ
                 prompt = read_execution_prompt(self.repo_dir, job.task_id)
                 if prompt:
                     await self._dispatch_internal(
@@ -666,15 +1121,14 @@ class DispatchServer:
             else:
                 log.info(f"Orchestration: task {job.task_id} scoped, waiting for manual approval")
 
-        elif status == "needs_input":
+        elif next_status == "needs_input":
             log.info(f"Orchestration: refine produced needs_input for task {job.task_id}")
 
-        elif status == "reshaping":
-            # 再精査で問題なしと判断された（完了確認待ち）
+        elif next_status == "reshaping":
             log.info(f"Orchestration: refine confirmed task {job.task_id} is complete, waiting for manual done")
 
         else:
-            log.info(f"Orchestration: unexpected status '{status}' after refine for task {job.task_id}")
+            log.info(f"Orchestration: unexpected status '{next_status}' after refine for task {job.task_id}")
 
     def _should_auto_approve(self, orchestration: dict, run_count: int) -> bool:
         if not orchestration.get("auto_approve", False):
@@ -713,7 +1167,10 @@ class DispatchServer:
             job_type="refine",
         )
 
-    async def _dispatch_internal(self, project_id: str, task_id: str, prompt: str, job_type: str) -> str:
+    async def _dispatch_internal(
+        self, project_id: str, task_id: str | None, prompt: str, job_type: str,
+        lifecycle_id: str | None = None, dispatch_id_hint: str | None = None,
+    ) -> str:
         """内部ジョブディスパッチ（オーケストレーション用）。"""
         project = sandbox_exec.load_project(project_id, self.repo_dir)
         if not project:
@@ -732,7 +1189,7 @@ class DispatchServer:
             log.error(f"Orchestration: sandbox params error: {e}")
             return ""
 
-        dispatch_id = self.generate_dispatch_id(project_id)
+        dispatch_id = dispatch_id_hint or self.generate_dispatch_id(project_id)
 
         job = Job(
             dispatch_id=dispatch_id,
@@ -744,6 +1201,7 @@ class DispatchServer:
             sandbox_profile_id=sandbox_profile_id,
             env_files=env_files,
             allowed_credentials=allowed_credentials,
+            lifecycle_id=lifecycle_id,
         )
         self.jobs[dispatch_id] = job
 
@@ -782,13 +1240,39 @@ class DispatchServer:
 - `cred-get <entry>` または `pass show <entry>` で以下の認証情報を取得できます:
 {entries}"""
 
+        result_path = self._result_path(job.dispatch_id)
+        result_desc = ""
+        if job.job_type == "refine":
+            result_desc = f"""
+
+結果ファイル:
+ジョブ完了時、以下のパスに結果 JSON を書き出してください:
+  {result_path}
+
+精査ジョブの結果フォーマット:
+  {{"next_status": "scoped"}} — 精査完了、実行可能
+  {{"next_status": "needs_input"}} — ユーザへの質問あり
+  {{"next_status": "reshaping"}} — 再精査後、問題なし（完了確認待ち）"""
+        elif job.job_type == "evaluate":
+            result_desc = f"""
+
+結果ファイル:
+ジョブ完了時、以下のパスに結果 JSON を書き出してください:
+  {result_path}
+
+評価ジョブの結果フォーマット:
+  {{"verdict": "PASS", "summary": "..."}} — 達成条件すべて満たされている
+  {{"verdict": "RETRY", "summary": "..."}} — 再実行で修正可能
+  {{"verdict": "BLOCKED", "summary": "..."}} — ユーザ入力が必要
+  {{"verdict": "ABORT", "summary": "..."}} — 実行不可能"""
+
         network_mode = "保護あり (netns + proxy)" if network_protected else "ホストネットワーク直接"
         return f"""あなたはサンドボックス環境で実行されています。
 
 実行環境:
 - 作業ディレクトリ: {job.working_dir}
 - ネットワーク: {network_mode}
-{network_desc}{cred_desc}
+{network_desc}{cred_desc}{result_desc}
 
 作業が完了したら、変更をコミットしてください。
 プロセスの終了がジョブ完了の通知になります（シグナルファイルは不要です）。"""
@@ -801,10 +1285,10 @@ class DispatchServer:
             try:
                 log_dir = self._log_path("_").parent
                 now = datetime.now().timestamp()
-                for p in log_dir.glob("*.log"):
+                for p in list(log_dir.glob("*.log")) + list(log_dir.glob("*.result.json")):
                     if now - p.stat().st_mtime > max_age:
                         p.unlink()
-                        log.info(f"Cleaned up old log: {p.name}")
+                        log.info(f"Cleaned up old file: {p.name}")
             except Exception as e:
                 log.error(f"Log cleanup error: {e}")
 
@@ -881,6 +1365,17 @@ EVALUATION_TEMPLATE = """\
      - ABORT → `aborted`
 
 index.jsonl は JSONL 形式（1行1タスク）です。該当行のみ変更し、他の行は変更しないでください。
+
+# 結果ファイル出力
+
+以下のパスに結果 JSON を書き出してください:
+  {result_file_path}
+
+フォーマット:
+  {{"verdict": "PASS", "summary": "..."}} — 達成条件すべて満たされている
+  {{"verdict": "RETRY", "summary": "..."}} — 再実行で修正可能
+  {{"verdict": "BLOCKED", "summary": "..."}} — ユーザ入力が必要
+  {{"verdict": "ABORT", "summary": "..."}} — 実行不可能
 """
 
 
@@ -1040,6 +1535,8 @@ async def run_server(max_slots: int, repo: str):
         os.unlink(cred_broker_path)
 
     server = DispatchServer(max_slots=max_slots, repo_dir=repo_dir)
+    server._load_lifecycles()
+    log.info(f"Loaded {len(server.lifecycles)} lifecycles ({sum(1 for lc in server.lifecycles.values() if lc.status == 'suspend')} suspended)")
 
     loop = asyncio.get_event_loop()
     loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(_shutdown(server, srv, cred_srv)))
@@ -1266,13 +1763,29 @@ def cmd_status(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     jobs = response.get("jobs", [])
-    if not jobs:
+    lifecycles = response.get("lifecycles", [])
+
+    if args.json:
+        print(json.dumps({"jobs": jobs, "lifecycles": lifecycles}, ensure_ascii=False, indent=2))
+        return
+
+    # ライフサイクル表示
+    active_lcs = [lc for lc in lifecycles if lc.get("status") != "done"]
+    if active_lcs:
+        print("Lifecycles:", file=sys.stderr)
+        for lc in active_lcs:
+            task_str = lc.get("task_id", "") or "-"
+            reason = f" ({lc['suspend_reason']})" if lc.get("suspend_reason") else ""
+            print(f"  {lc['lifecycle_id']:<10} {lc['status']:<12}{reason}  project={lc['project_id']:<12} task={task_str:<16} runs={lc.get('run_count', 0)}/{lc.get('max_runs', 5)}")
+        print(file=sys.stderr)
+
+    # ジョブ表示
+    if not jobs and not active_lcs:
         print("ジョブはありません", file=sys.stderr)
         return
 
-    if args.json:
-        print(json.dumps(jobs, ensure_ascii=False, indent=2))
-    else:
+    if jobs:
+        print("Jobs:", file=sys.stderr)
         for job in jobs:
             pid_str = str(job.get("pid", "")) or "-"
             task_str = job.get("task_id", "") or "-"
@@ -1289,6 +1802,40 @@ def cmd_status(args: argparse.Namespace) -> None:
                 parts.append(f"{s}={counts[s]}")
         if parts:
             print(f"\n  [{', '.join(parts)}]")
+
+
+def cmd_dispatch_cli(args: argparse.Namespace) -> None:
+    request: dict[str, Any] = {"command": "dispatch"}
+    if args.task:
+        request["task_id"] = args.task
+    if args.project:
+        request["project_id"] = args.project
+    if args.prompt:
+        request["prompt"] = args.prompt
+    elif not args.task and not sys.stdin.isatty():
+        request["prompt"] = sys.stdin.read().strip()
+
+    response = asyncio.run(client_send(request))
+    if response.get("ok"):
+        print(f"{response.get('message', 'OK')}", file=sys.stderr)
+        if response.get("dispatch_id"):
+            print(f"  dispatch_id: {response['dispatch_id']}", file=sys.stderr)
+    else:
+        print(f"エラー: {response.get('error', 'Unknown error')}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_resume_cli(args: argparse.Namespace) -> None:
+    request: dict[str, Any] = {"command": "resume", "lifecycle_id": args.id}
+    if args.project:
+        request["project_id"] = args.project
+
+    response = asyncio.run(client_send(request))
+    if response.get("ok"):
+        print(f"{response.get('message', 'OK')}", file=sys.stderr)
+    else:
+        print(f"エラー: {response.get('error', 'Unknown error')}", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_cancel(args: argparse.Namespace) -> None:
@@ -1380,6 +1927,19 @@ def main() -> None:
     p_open.add_argument("--session", default=None, help="tmux セッション名を明示指定")
     p_open.add_argument("--sandbox-profile", help="サンドボックスプロファイルを上書き指定")
     p_open.set_defaults(func=cmd_open)
+
+    # dispatch
+    p_dispatch = subparsers.add_parser("dispatch", help="ライフサイクルを開始する")
+    p_dispatch.add_argument("--task", help="タスク ID")
+    p_dispatch.add_argument("--project", help="プロジェクト ID")
+    p_dispatch.add_argument("--prompt", help="プロンプト（省略時は stdin）")
+    p_dispatch.set_defaults(func=cmd_dispatch_cli)
+
+    # resume
+    p_resume = subparsers.add_parser("resume", help="suspend 中のライフサイクルを再開する")
+    p_resume.add_argument("--id", required=True, help="ライフサイクル ID")
+    p_resume.add_argument("--project", default=None, help="プロジェクト ID（project_confirmation 時に指定）")
+    p_resume.set_defaults(func=cmd_resume_cli)
 
     # status
     p_status = subparsers.add_parser("status", help="ジョブ状態を表示する")
