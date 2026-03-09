@@ -3,7 +3,7 @@
 refine.py - タスク精査ディスパッチャー
 
 reshaping / needs_input (全回答済み) のタスクを1タスク1ジョブとして
-dispatcher.py に投入する。各ジョブは専用のコンテキストでタスクを精査し、
+dispatcher に投入する。各ジョブは専用のコンテキストでタスクを精査し、
 scoped 遷移時には実行プロンプトも生成する。
 run_count > 0 のタスクは再精査として実行履歴を踏まえたプロンプト修正を行う。
 
@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DISPATCHER = SCRIPT_DIR / "dispatcher.py"
+DISPATCHER = SCRIPT_DIR / "dispatcher"
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +346,7 @@ async def dispatch_one(
     sandbox_profile: str | None = None,
     repo: str,
 ) -> dict:
-    """dispatcher.py run --project にプロンプトを渡してジョブを投入する。"""
+    """dispatcher run --project にプロンプトを渡してジョブを投入する。"""
     cmd = [
         sys.executable, str(DISPATCHER),
         "run",

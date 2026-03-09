@@ -105,18 +105,18 @@
 1. ライフサイクルを開始:
    ```bash
    # タスク ID 指定（pending → reshaping 自動遷移、精査ジョブ自動実行）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py dispatch --task 20260301-001
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch --task 20260301-001
 
    # プロジェクト + プロンプト指定（タスクなしの直接投入）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py dispatch --project bo --prompt "バグを修正して"
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch --project bo --prompt "バグを修正して"
 
    # プロジェクト未指定（LLM で自動判定）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py dispatch --task 20260301-001
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch --task 20260301-001
    ```
 
 2. ステータスを確認:
    ```bash
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher status
    ```
 
 ### ステートマシン
@@ -182,7 +182,7 @@ suspend 中のライフサイクルを再開する。
 
 1. suspend 中のライフサイクルを確認:
    ```bash
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher status
    ```
 
 2. `needs_input` の場合: タスク md の未決事項に回答し `[x]` に更新
@@ -190,10 +190,10 @@ suspend 中のライフサイクルを再開する。
 3. ライフサイクルを再開:
    ```bash
    # 通常の再開（needs_input 回答済み / approval_required 承認）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py resume --id lc-1
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher resume --id lc-1
 
    # プロジェクト確認の場合（project_confirmation）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py resume --id lc-1 --project correct-project-id
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher resume --id lc-1 --project correct-project-id
    ```
 
 ---
@@ -212,8 +212,8 @@ suspend 中のライフサイクルを再開する。
 
 1. ディスパッチャーにステータスを問い合わせ:
    ```bash
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status --json
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher status
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher status --json
    ```
 
 ### タスク検索
@@ -341,8 +341,8 @@ suspend 中のライフサイクルを再開する。
 ### 手順
 
 ```bash
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo [--session main]
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher open --project bo [--session main]
 
 # サンドボックスプロファイルを上書きして対話セッションを起動
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --sandbox-profile unrestricted
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher open --project bo --sandbox-profile unrestricted
 ```

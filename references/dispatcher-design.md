@@ -12,7 +12,7 @@ Unix ドメインソケット C/S アーキテクチャのジョブランナー�
 ┌─ ホスト ──────────────────────────────────────────────┐
 │                                                        │
 │  systemd user service                                  │
-│  └─ dispatcher.py server                               │
+│  └─ dispatcher server                               │
 │       ├─ asyncio.start_unix_server(SOCKET_PATH)        │
 │       ├─ ジョブキュー管理（max_slots）                  │
 │       ├─ fork: sandbox claude -p "..." (job 1)         │
@@ -26,7 +26,7 @@ Unix ドメインソケット C/S アーキテクチャのジョブランナー�
 │  ┌─ サンドボックス ──────────────────────────────────┐ │
 │  │    │                                              │ │
 │  │  Claude Code (スキル実行中)                       │ │
-│  │    └─ dispatcher.py run --task 20260301-001       │ │
+│  │    └─ dispatcher run --task 20260301-001       │ │
 │  │        └─ connect(SOCKET_PATH) → ホストへ到達     │ │
 │  └───────────────────────────────────────────────────┘ │
 └────────────────────────────────────────────────────────┘
@@ -207,31 +207,31 @@ async def client_send(request: dict) -> dict:
 
 ```bash
 # ライフサイクル開始（推奨）
-dispatcher.py dispatch --task 20260301-001
-dispatcher.py dispatch --project bo --prompt "バグを修正して"
+dispatcher dispatch --task 20260301-001
+dispatcher dispatch --project bo --prompt "バグを修正して"
 
 # ライフサイクル再開
-dispatcher.py resume --id lc-1
+dispatcher resume --id lc-1
 
 # 対話的セッション
-dispatcher.py open --project ubs-mgmt-tool [--session main]
+dispatcher open --project ubs-mgmt-tool [--session main]
 
 # ステータス確認
-dispatcher.py status [--json]
+dispatcher status [--json]
 
 # ジョブ制御
-dispatcher.py cancel --id ubs-mgmt-tool-1
-dispatcher.py kill --id ubs-mgmt-tool-1
-dispatcher.py kill --all
+dispatcher cancel --id ubs-mgmt-tool-1
+dispatcher kill --id ubs-mgmt-tool-1
+dispatcher kill --all
 
 # ジョブ完了待機
-dispatcher.py wait --id ubs-mgmt-tool-1
+dispatcher wait --id ubs-mgmt-tool-1
 
 # ジョブの stdout/stderr ログを表示
-dispatcher.py log --id ubs-mgmt-tool-1
+dispatcher log --id ubs-mgmt-tool-1
 
 # サーバ起動（通常は systemd 経由）
-dispatcher.py server [--max-slots 8]
+dispatcher server [--max-slots 8]
 ```
 
 ### `run --task` の処理
@@ -303,7 +303,7 @@ dispatcher.py server [--max-slots 8]
 ```
 ┌─ ホスト ──────────────────────────────────────────────┐
 │                                                        │
-│  dispatcher.py server                                  │
+│  dispatcher server                                  │
 │    ├─ DispatchServer (dispatcher.sock)                 │
 │    └─ CredentialBroker (cred-broker.sock)              │
 │         ├─ token registry: {token → [entries]}         │

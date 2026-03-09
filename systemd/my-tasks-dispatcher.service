@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=%h/src/github.com/nosen-nvt/my-tasks-skill/scripts/dispatcher.py server
+ExecStart=/usr/bin/python3 %h/src/github.com/nosen-nvt/my-tasks-skill/scripts/dispatcher server
 Restart=on-failure
 RestartSec=5
 Environment=XDG_RUNTIME_DIR=/run/user/%U
