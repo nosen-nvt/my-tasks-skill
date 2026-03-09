@@ -22,7 +22,8 @@
      --repo ~/.local/share/my-tasks \
      --input /tmp/my-tasks-sync.jsonl
 
-   # 特定データソースのみ処理（他データソースのタスクには影響しない）
+   # 特定データソースのみ処理（同期処理は指定データソースに限定される）
+   # ※ done タスクの GC は全データソース横断で実行される
    python3 ~/.claude/skills/my-tasks/scripts/sync-tasks.py \
      --repo ~/.local/share/my-tasks \
      --input /tmp/my-tasks-sync.jsonl \
@@ -30,10 +31,13 @@
    ```
 
 3. スクリプトのレポートを確認:
+   - `added`: 新規追加されたタスク
+   - `updated`: タイトルが更新されたタスク
+   - `reopened`: done から再オープンされたタスク
    - `project_assigned`: `project_mapping` でプロジェクトが特定できたタスク
    - `project_unassigned`: プロジェクトが特定できなかったタスク（dispatch 時に判定）
    - `vanished`: 消失タスク（full モード: インデックスと Markdown から削除済み）
-   - `gc`: GC で除去された done タスク（append モード）
+   - `gc`: GC で除去された done タスク（全データソース横断で実行）
 
 4. 一時ファイルを削除:
    ```bash
@@ -83,7 +87,7 @@
      --input /tmp/mail-triage.jsonl \
      --datasource mail-outlook,mail-gmail-nvt,mail-gmail-qzl
    ```
-   `--datasource` でメール系のみ指定し、JIRA/To Do のタスクに影響を与えない
+   `--datasource` でメール系のみ指定し、同期処理（追加・更新・消失検出）を限定する。ただし done タスクの GC は全データソース横断で実行される
 
 ### 注意
 
@@ -106,29 +110,42 @@ Lifecycle はタスク管理の知識を持たない純粋なジョブオーケ�
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
      --project bo --prompt "タスクタイトル" --context-file /path/to/task.md
 
-   # タスクなしの直接投入
+   # タスクなしの直接投入（context なし → 精査スキップ、直接実行）
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
      --project bo --prompt "バグを修正して"
+
+   # --project 省略時はプロンプトから自動判定を試みる
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
+     --prompt "バグを修正して" --context-file /path/to/task.md
    ```
 
-2. ステータスを確認:
+4. ステータスを確認:
    ```bash
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher status
    ```
 
 ### Lifecycle ステートマシン
 
+ステータス値: `reshaping`, `running`, `evaluating`, `suspend`, `done`
+
 ```
-dispatch → reshaping → 精査ジョブ → scoped
-                                       ├── auto_approve → running → 実行ジョブ → evaluating → 評価ジョブ
-                                       │                                                        ├── PASS → done
-                                       │                                                        ├── RETRY → reshaping（ループ）
-                                       │                                                        ├── BLOCKED → suspend (needs_input)
-                                       │                                                        └── ABORT → done
-                                       └── 手動承認が必要 → suspend (approval_required)
-精査ジョブ → needs_input → suspend (needs_input)
-精査ジョブ → reshaping（問題なし）→ done
+dispatch → reshaping → 精査ジョブ完了
+             │           ├── [scoped + auto_approve] → running → 実行ジョブ → evaluating → 評価ジョブ
+             │           │                                                        ├── PASS → done
+             │           │                                                        ├── RETRY → reshaping（ループ）
+             │           │                                                        ├── BLOCKED → suspend (needs_input)
+             │           │                                                        └── ABORT → done
+             │           ├── [scoped + 手動承認が必要] → suspend (approval_required)
+             │           ├── [needs_input] → suspend (needs_input)
+             │           └── [reshaping（問題なし）] → done
+             │
+             └── context なし → running → 実行ジョブ（精査スキップ）
 ```
+
+auto_approve の判定ロジック:
+- `orchestration.auto_approve = false` → 常に手動承認
+- `orchestration.require_first_approval = true`（デフォルト）かつ `run_count = 0` → 初回は手動承認
+- それ以外 → 自動承認
 
 ### タスクステータス遷移（スキル側で管理）
 
@@ -321,7 +338,7 @@ suspend 中のライフサイクルを再開する。
 
 ---
 
-## 9. 対話セッション
+## 8. 対話セッション
 
 ジョブ管理の対象外で対話セッションを起動する。
 
