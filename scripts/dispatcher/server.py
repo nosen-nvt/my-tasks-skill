@@ -6,7 +6,6 @@ import os
 import signal
 import subprocess
 import sys
-import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -15,14 +14,17 @@ import sandbox_exec
 
 from .models import (
     Job, Lifecycle, log, now_iso,
-    DEFAULT_SESSION_NAME, SOCKET_DIR_NAME,
+    SOCKET_DIR_NAME,
     get_socket_path, get_cred_broker_socket_path, get_repo_dir,
 )
 from .cred import CredentialBroker
 from .lifecycle import LifecycleManager
+from .tmux import detect_tmux_session, ensure_tmux_session
+from .project_classifier import classify_project
+from .executor import ExecutorMixin
 
 
-class DispatchServer:
+class DispatchServer(ExecutorMixin):
     def __init__(self, max_slots: int, repo_dir: Path):
         self.max_slots = max_slots
         self.repo_dir = repo_dir
@@ -197,8 +199,8 @@ class DispatchServer:
         except (FileNotFoundError, ValueError) as e:
             return {"ok": False, "error": str(e)}
 
-        session_name, is_caller = _detect_tmux_session(session)
-        if not _ensure_tmux_session(session_name, is_caller):
+        session_name, is_caller = detect_tmux_session(session)
+        if not ensure_tmux_session(session_name, is_caller):
             return {"ok": False, "error": f"tmux session '{session_name}' not available"}
 
         window_name = project_id
@@ -275,7 +277,7 @@ class DispatchServer:
         max_runs = request.get("max_runs")
 
         if not project_id:
-            project_id = await self._classify_project(prompt)
+            project_id = await classify_project(self.repo_dir, prompt)
             if not project_id:
                 return {"ok": False, "error": "プロジェクトを判定できませんでした。--project を指定してください"}
 
@@ -349,284 +351,6 @@ class DispatchServer:
             "message": f"Lifecycle resumed: {lc.lifecycle_id}",
         }
 
-    # --- ジョブ実行 ---
-
-    async def execute_job(self, job: Job):
-        job.status = "running"
-        job.started_at = now_iso()
-
-        cred_token = None
-        if job.allowed_credentials:
-            cred_token = uuid.uuid4().hex
-            self.cred_broker.register(cred_token, job.allowed_credentials)
-
-        system_prompt = self._build_system_prompt(job)
-        log_path = self._log_path(job.dispatch_id)
-        log_file = None
-        try:
-            cred_env: dict[str, str] | None = None
-            if cred_token:
-                cred_env = {"CRED_TOKEN": cred_token, "CRED_BROKER_SOCK": get_cred_broker_socket_path()}
-
-            command = [
-                "claude", "--permission-mode", "bypassPermissions",
-                "-p", job.prompt,
-                "--append-system-prompt", system_prompt,
-            ]
-
-            exec_args = sandbox_exec.build_exec_args(
-                sandbox_profile=job.sandbox_profile_id,
-                env_files=job.env_files,
-                cred_env=cred_env,
-                command=command,
-                working_dir=job.working_dir,
-            )
-
-            log_file = open(log_path, "w", encoding="utf-8")
-            proc = await asyncio.create_subprocess_exec(
-                *exec_args,
-                cwd=job.working_dir,
-                stdout=log_file,
-                stderr=log_file,
-            )
-            job.pid = proc.pid
-            self._processes[job.dispatch_id] = proc
-            log.info(f"Job executing: {job.dispatch_id} pid={proc.pid} log={log_path}")
-
-            exit_code = await proc.wait()
-            job.exit_code = exit_code
-            job.status = "done" if exit_code == 0 else "failed"
-        except Exception as e:
-            log.error(f"Job execution error: {job.dispatch_id}: {e}")
-            job.status = "failed"
-            job.exit_code = -1
-        finally:
-            if cred_token:
-                self.cred_broker.revoke(cred_token)
-            if log_file:
-                log_file.close()
-            job.finished_at = now_iso()
-            self._processes.pop(job.dispatch_id, None)
-            log.info(f"Job finished: {job.dispatch_id} status={job.status} exit_code={job.exit_code}")
-
-        self._notify_waiters(job)
-
-        if job.lifecycle_id:
-            await self.lifecycle_mgr.on_job_complete(job)
-
-        await self.drain_queue()
-
-    async def drain_queue(self):
-        while self.queue and self.count_running() < self.max_slots:
-            running_projects = self.running_project_ids()
-            idx = next((i for i, j in enumerate(self.queue) if j.project_id not in running_projects), None)
-            if idx is None:
-                break
-            job = self.queue.pop(idx)
-            asyncio.create_task(self.execute_job(job))
-
-    async def _kill_job(self, job: Job):
-        if job.status == "queued":
-            self.queue = [j for j in self.queue if j.dispatch_id != job.dispatch_id]
-            del self.jobs[job.dispatch_id]
-            return
-
-        if job.status == "running":
-            proc = self._processes.get(job.dispatch_id)
-            if proc and proc.returncode is None:
-                try:
-                    proc.terminate()
-                    try:
-                        await asyncio.wait_for(proc.wait(), timeout=5)
-                    except asyncio.TimeoutError:
-                        proc.kill()
-                except ProcessLookupError:
-                    pass
-            job.status = "failed"
-            job.exit_code = -1
-            job.finished_at = now_iso()
-            self._processes.pop(job.dispatch_id, None)
-            self._notify_waiters(job)
-
-    def _notify_waiters(self, job: Job):
-        waiters = self.waiters.pop(job.dispatch_id, [])
-        result = {"ok": True, "dispatch_id": job.dispatch_id, "status": job.status, "exit_code": job.exit_code}
-        for future in waiters:
-            if not future.done():
-                future.set_result(result)
-
-    # --- 内部ディスパッチ ---
-
-    async def _dispatch_internal(
-        self, project_id: str, prompt: str, job_type: str,
-        lifecycle_id: str | None = None, dispatch_id_hint: str | None = None,
-    ) -> str:
-        project = sandbox_exec.load_project(project_id, self.repo_dir)
-        if not project:
-            log.error(f"Internal dispatch: project not found: {project_id}")
-            return ""
-
-        working_dir = project.get("working_directory", "")
-        if not working_dir or not Path(working_dir).is_dir():
-            log.error(f"Internal dispatch: invalid working_directory for project: {project_id}")
-            return ""
-
-        try:
-            sandbox_profile_id, env_files, allowed_credentials = \
-                sandbox_exec.resolve_project_sandbox_params(project)
-        except (FileNotFoundError, ValueError) as e:
-            log.error(f"Internal dispatch: sandbox params error: {e}")
-            return ""
-
-        dispatch_id = dispatch_id_hint or self.generate_dispatch_id(project_id)
-
-        job = Job(
-            dispatch_id=dispatch_id,
-            project_id=project_id,
-            prompt=prompt,
-            working_dir=working_dir,
-            job_type=job_type,
-            sandbox_profile_id=sandbox_profile_id,
-            env_files=env_files,
-            allowed_credentials=allowed_credentials,
-            lifecycle_id=lifecycle_id,
-        )
-        self.jobs[dispatch_id] = job
-
-        if self.count_running() < self.max_slots and project_id not in self.running_project_ids():
-            asyncio.create_task(self.execute_job(job))
-            log.info(f"Internal dispatch: {job_type} job started: {dispatch_id}")
-        else:
-            self.queue.append(job)
-            log.info(f"Internal dispatch: {job_type} job queued: {dispatch_id}")
-
-        return dispatch_id
-
-    def _build_system_prompt(self, job: Job) -> str:
-        profile = sandbox_exec.resolve_profile(job.sandbox_profile_id)
-        network_protected = sandbox_exec.uses_network_protection(profile)
-
-        network_desc = ""
-        if network_protected:
-            network_desc = """
-制約事項 (ネットワーク保護あり):
-- ネットワーク: GitHub/Bitbucket SSH と HTTP プロキシ経由の HTTPS のみ利用可能
-- ファイル: 作業ディレクトリ内のファイルのみ変更可能"""
-
-        cred_desc = ""
-        if job.allowed_credentials:
-            if job.allowed_credentials == "*":
-                cred_desc = """
-
-認証情報:
-- `cred-get <entry>` または `pass show <entry>` で全ての認証情報を取得できます"""
-            else:
-                entries = "\n".join(f"  - {e}" for e in job.allowed_credentials)
-                cred_desc = f"""
-
-認証情報:
-- `cred-get <entry>` または `pass show <entry>` で以下の認証情報を取得できます:
-{entries}"""
-
-        result_path = self._result_path(job.dispatch_id)
-        result_desc = ""
-        if job.job_type == "refine":
-            result_desc = f"""
-
-結果ファイル:
-ジョブ完了時、以下のパスに結果 JSON を書き出してください:
-  {result_path}
-
-精査ジョブの結果フォーマット:
-  {{"next_status": "scoped"}} — 精査完了、実行可能
-  {{"next_status": "needs_input"}} — ユーザへの質問あり
-  {{"next_status": "reshaping"}} — 再精査後、問題なし（完了確認待ち）"""
-        elif job.job_type == "evaluate":
-            result_desc = f"""
-
-結果ファイル:
-ジョブ完了時、以下のパスに結果 JSON を書き出してください:
-  {result_path}
-
-評価ジョブの結果フォーマット:
-  {{"verdict": "PASS", "summary": "..."}} — 達成条件すべて満たされている
-  {{"verdict": "RETRY", "summary": "..."}} — 再実行で修正可能
-  {{"verdict": "BLOCKED", "summary": "..."}} — ユーザ入力が必要
-  {{"verdict": "ABORT", "summary": "..."}} — 実行不可能"""
-
-        network_mode = "保護あり (netns + proxy)" if network_protected else "ホストネットワーク直接"
-        return f"""あなたはサンドボックス環境で実行されています。
-
-実行環境:
-- 作業ディレクトリ: {job.working_dir}
-- ネットワーク: {network_mode}
-{network_desc}{cred_desc}{result_desc}
-
-作業が完了したら、変更をコミットしてください。
-プロセスの終了がジョブ完了の通知になります（シグナルファイルは不要です）。"""
-
-    # --- LLM プロジェクト判定 ---
-
-    async def _classify_project(self, prompt: str) -> str | None:
-        projects_dir = self.repo_dir / "projects"
-        if not projects_dir.exists():
-            return None
-
-        projects = []
-        for p in projects_dir.glob("*.json"):
-            try:
-                with open(p) as f:
-                    proj = json.load(f)
-                desc = proj.get("description", "")
-                wd = proj.get("working_directory", "")
-                if not wd:
-                    continue
-                projects.append(f"- {proj.get('project_id', p.stem)}: {proj.get('name', '')} - {desc}")
-            except (json.JSONDecodeError, OSError):
-                continue
-
-        if not projects:
-            return None
-
-        classification_prompt = (
-            "以下のタスク/依頼内容を読んで、最も適切なプロジェクトを選択してください。\n\n"
-            f"# タスク内容\n{prompt}\n\n"
-            f"# プロジェクト一覧\n" + "\n".join(projects) + "\n\n"
-            "# 出力\nJSON で回答してください:\n"
-            '{\"project_id\": \"選択したプロジェクトID\", \"confidence\": \"high\"|\"low\"}\n\n'
-            "どのプロジェクトにも該当しない場合:\n"
-            '{\"project_id\": null, \"reason\": \"理由\"}'
-        )
-
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "claude", "-p", classification_prompt, "--output-format", "json",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await proc.communicate()
-            if proc.returncode != 0:
-                return None
-
-            result = json.loads(stdout.decode())
-            if isinstance(result, list):
-                for item in result:
-                    if item.get("type") == "result":
-                        inner = json.loads(item["result"])
-                        project_id = inner.get("project_id")
-                        if project_id and inner.get("confidence") != "low":
-                            return project_id
-                        elif project_id and inner.get("confidence") == "low":
-                            return project_id
-                        return None
-            elif isinstance(result, dict):
-                project_id = result.get("project_id")
-                return project_id if project_id else None
-        except Exception as e:
-            log.error(f"Project classification error: {e}")
-
-        return None
-
     # --- クリーンアップ・シャットダウン ---
 
     async def cleanup_old_logs(self):
@@ -655,57 +379,6 @@ class DispatchServer:
                     proc.terminate()
                 except ProcessLookupError:
                     pass
-
-
-# ---------------------------------------------------------------------------
-# tmux ヘルパー
-# ---------------------------------------------------------------------------
-
-def _detect_tmux_session(explicit: str | None) -> tuple[str, bool]:
-    if explicit:
-        result = subprocess.run(
-            ["tmux", "has-session", "-t", explicit],
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            return (explicit, True)
-        return (explicit, True)
-
-    if os.environ.get("TMUX"):
-        result = subprocess.run(
-            ["tmux", "display-message", "-p", "#S"],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return (result.stdout.strip(), True)
-
-    result = subprocess.run(
-        ["tmux", "list-clients", "-F", "#{client_session}"],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0:
-        sessions = [s.strip() for s in result.stdout.strip().split("\n") if s.strip()]
-        non_default = [s for s in sessions if s != DEFAULT_SESSION_NAME]
-        if non_default:
-            return (non_default[0], True)
-
-    return (DEFAULT_SESSION_NAME, False)
-
-
-def _ensure_tmux_session(session_name: str, is_caller_session: bool) -> bool:
-    result = subprocess.run(
-        ["tmux", "has-session", "-t", session_name],
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        if is_caller_session:
-            return False
-        result = subprocess.run(
-            ["tmux", "new-session", "-d", "-s", session_name, "-n", "_control"],
-            capture_output=True,
-        )
-        return result.returncode == 0
-    return True
 
 
 # ---------------------------------------------------------------------------

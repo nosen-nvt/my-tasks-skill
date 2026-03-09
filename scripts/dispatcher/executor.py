@@ -1,0 +1,172 @@
+"""ジョブ実行 Mixin。"""
+
+import asyncio
+import sys
+import uuid
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import sandbox_exec
+
+from .models import Job, log, now_iso, get_cred_broker_socket_path
+from .prompt import build_system_prompt
+
+
+class ExecutorMixin:
+    """DispatchServer にジョブ実行機能を提供する Mixin。
+
+    ホストクラスに以下の属性・メソッドを期待する:
+      属性: jobs, queue, waiters, _processes, max_slots, repo_dir,
+            cred_broker, lifecycle_mgr
+      メソッド: _log_path, _result_path, generate_dispatch_id,
+               count_running, running_project_ids
+    """
+
+    async def execute_job(self, job: Job):
+        job.status = "running"
+        job.started_at = now_iso()
+
+        cred_token = None
+        if job.allowed_credentials:
+            cred_token = uuid.uuid4().hex
+            self.cred_broker.register(cred_token, job.allowed_credentials)
+
+        system_prompt = build_system_prompt(job, self._result_path(job.dispatch_id))
+        log_path = self._log_path(job.dispatch_id)
+        log_file = None
+        try:
+            cred_env: dict[str, str] | None = None
+            if cred_token:
+                cred_env = {"CRED_TOKEN": cred_token, "CRED_BROKER_SOCK": get_cred_broker_socket_path()}
+
+            command = [
+                "claude", "--permission-mode", "bypassPermissions",
+                "-p", job.prompt,
+                "--append-system-prompt", system_prompt,
+            ]
+
+            exec_args = sandbox_exec.build_exec_args(
+                sandbox_profile=job.sandbox_profile_id,
+                env_files=job.env_files,
+                cred_env=cred_env,
+                command=command,
+                working_dir=job.working_dir,
+            )
+
+            log_file = open(log_path, "w", encoding="utf-8")
+            proc = await asyncio.create_subprocess_exec(
+                *exec_args,
+                cwd=job.working_dir,
+                stdout=log_file,
+                stderr=log_file,
+            )
+            job.pid = proc.pid
+            self._processes[job.dispatch_id] = proc
+            log.info(f"Job executing: {job.dispatch_id} pid={proc.pid} log={log_path}")
+
+            exit_code = await proc.wait()
+            job.exit_code = exit_code
+            job.status = "done" if exit_code == 0 else "failed"
+        except Exception as e:
+            log.error(f"Job execution error: {job.dispatch_id}: {e}")
+            job.status = "failed"
+            job.exit_code = -1
+        finally:
+            if cred_token:
+                self.cred_broker.revoke(cred_token)
+            if log_file:
+                log_file.close()
+            job.finished_at = now_iso()
+            self._processes.pop(job.dispatch_id, None)
+            log.info(f"Job finished: {job.dispatch_id} status={job.status} exit_code={job.exit_code}")
+
+        self._notify_waiters(job)
+
+        if job.lifecycle_id:
+            await self.lifecycle_mgr.on_job_complete(job)
+
+        await self.drain_queue()
+
+    async def drain_queue(self):
+        while self.queue and self.count_running() < self.max_slots:
+            running_projects = self.running_project_ids()
+            idx = next((i for i, j in enumerate(self.queue) if j.project_id not in running_projects), None)
+            if idx is None:
+                break
+            job = self.queue.pop(idx)
+            asyncio.create_task(self.execute_job(job))
+
+    async def _kill_job(self, job: Job):
+        if job.status == "queued":
+            self.queue = [j for j in self.queue if j.dispatch_id != job.dispatch_id]
+            del self.jobs[job.dispatch_id]
+            return
+
+        if job.status == "running":
+            proc = self._processes.get(job.dispatch_id)
+            if proc and proc.returncode is None:
+                try:
+                    proc.terminate()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                except ProcessLookupError:
+                    pass
+            job.status = "failed"
+            job.exit_code = -1
+            job.finished_at = now_iso()
+            self._processes.pop(job.dispatch_id, None)
+            self._notify_waiters(job)
+
+    def _notify_waiters(self, job: Job):
+        waiters = self.waiters.pop(job.dispatch_id, [])
+        result = {"ok": True, "dispatch_id": job.dispatch_id, "status": job.status, "exit_code": job.exit_code}
+        for future in waiters:
+            if not future.done():
+                future.set_result(result)
+
+    async def _dispatch_internal(
+        self, project_id: str, prompt: str, job_type: str,
+        lifecycle_id: str | None = None, dispatch_id_hint: str | None = None,
+    ) -> str:
+        project = sandbox_exec.load_project(project_id, self.repo_dir)
+        if not project:
+            log.error(f"Internal dispatch: project not found: {project_id}")
+            return ""
+
+        working_dir = project.get("working_directory", "")
+        if not working_dir or not Path(working_dir).is_dir():
+            log.error(f"Internal dispatch: invalid working_directory for project: {project_id}")
+            return ""
+
+        try:
+            sandbox_profile_id, env_files, allowed_credentials = \
+                sandbox_exec.resolve_project_sandbox_params(project)
+        except (FileNotFoundError, ValueError) as e:
+            log.error(f"Internal dispatch: sandbox params error: {e}")
+            return ""
+
+        dispatch_id = dispatch_id_hint or self.generate_dispatch_id(project_id)
+
+        job = Job(
+            dispatch_id=dispatch_id,
+            project_id=project_id,
+            prompt=prompt,
+            working_dir=working_dir,
+            job_type=job_type,
+            sandbox_profile_id=sandbox_profile_id,
+            env_files=env_files,
+            allowed_credentials=allowed_credentials,
+            lifecycle_id=lifecycle_id,
+        )
+        self.jobs[dispatch_id] = job
+
+        if self.count_running() < self.max_slots and project_id not in self.running_project_ids():
+            asyncio.create_task(self.execute_job(job))
+            log.info(f"Internal dispatch: {job_type} job started: {dispatch_id}")
+        else:
+            self.queue.append(job)
+            log.info(f"Internal dispatch: {job_type} job queued: {dispatch_id}")
+
+        return dispatch_id
