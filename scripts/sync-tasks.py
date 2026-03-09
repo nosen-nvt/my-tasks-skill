@@ -307,8 +307,8 @@ def process_datasource(
             "reopened": [...],
             "vanished": [...],
             "gc": [...],
-            "auto_assigned": [...],
-            "needs_review": [...],
+            "project_assigned": [...],
+            "project_unassigned": [...],
         }
     """
     datasource = load_datasource(datasources_dir, datasource_id)
@@ -348,8 +348,8 @@ def process_datasource(
     added = []
     updated = []
     reopened = []
-    auto_assigned = []
-    needs_review = []
+    project_assigned = []
+    project_unassigned = []
 
     for t in incoming_tasks:
         remote_id = t["remote_id"]
@@ -408,14 +408,14 @@ def process_datasource(
             })
 
             if project_id:
-                auto_assigned.append({
+                project_assigned.append({
                     "id": task_id,
                     "title": t["title"],
                     "project_id": project_id,
                     "project_key": t.get("project_key"),
                 })
             else:
-                needs_review.append({
+                project_unassigned.append({
                     "id": task_id,
                     "title": t["title"],
                     "project_key": t.get("project_key"),
@@ -446,8 +446,8 @@ def process_datasource(
         "reopened": reopened,
         "vanished": vanished,
         "gc": gc,
-        "auto_assigned": auto_assigned,
-        "needs_review": needs_review,
+        "project_assigned": project_assigned,
+        "project_unassigned": project_unassigned,
     }
 
 
@@ -527,8 +527,8 @@ def main() -> None:
     total_reopened = []
     total_vanished = []
     total_gc = []
-    total_auto_assigned = []
-    total_needs_review = []
+    total_project_assigned = []
+    total_project_unassigned = []
 
     for datasource_id, incoming_tasks in by_datasource.items():
         result = process_datasource(
@@ -539,8 +539,8 @@ def main() -> None:
         total_reopened.extend(result["reopened"])
         total_vanished.extend(result["vanished"])
         total_gc.extend(result["gc"])
-        total_auto_assigned.extend(result["auto_assigned"])
-        total_needs_review.extend(result["needs_review"])
+        total_project_assigned.extend(result["project_assigned"])
+        total_project_unassigned.extend(result["project_unassigned"])
 
     # 全 datasource 横断の GC: done タスクを除去（manual 等、同期対象外も含む）
     gc_all_ids = set()
@@ -569,16 +569,16 @@ def main() -> None:
             "reopened": len(total_reopened),
             "vanished": len(total_vanished),
             "gc": len(total_gc),
-            "auto_assigned": len(total_auto_assigned),
-            "needs_review": len(total_needs_review),
+            "project_assigned": len(total_project_assigned),
+            "project_unassigned": len(total_project_unassigned),
         },
         "added": total_added,
         "updated": total_updated,
         "reopened": total_reopened,
         "vanished": total_vanished,
         "gc": total_gc,
-        "auto_assigned": total_auto_assigned,
-        "needs_review": total_needs_review,
+        "project_assigned": total_project_assigned,
+        "project_unassigned": total_project_unassigned,
     }
 
     print(json.dumps(report, ensure_ascii=False, indent=2))

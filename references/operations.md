@@ -110,7 +110,7 @@ Lifecycle はタスク管理の知識を持たない純粋なジョブオーケ�
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
      --project bo --prompt "タスクタイトル" --context-file /path/to/task.md
 
-   # タスクなしの直接投入（context なし → 精査スキップ、直接実行）
+   # タスクなしの直接投入（プロンプトから最小コンテキストを自動生成し精査を実行）
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
      --project bo --prompt "バグを修正して"
 
@@ -130,16 +130,14 @@ Lifecycle はタスク管理の知識を持たない純粋なジョブオーケ�
 
 ```
 dispatch → reshaping → 精査ジョブ完了
-             │           ├── [scoped + auto_approve] → running → 実行ジョブ → evaluating → 評価ジョブ
-             │           │                                                        ├── PASS → done
-             │           │                                                        ├── RETRY → reshaping（ループ）
-             │           │                                                        ├── BLOCKED → suspend (needs_input)
-             │           │                                                        └── ABORT → done
-             │           ├── [scoped + 手動承認が必要] → suspend (approval_required)
-             │           ├── [needs_input] → suspend (needs_input)
-             │           └── [reshaping（問題なし）] → done
-             │
-             └── context なし → running → 実行ジョブ（精査スキップ）
+                         ├── [scoped + auto_approve] → running → 実行ジョブ → evaluating → 評価ジョブ
+                         │                                                        ├── PASS → done
+                         │                                                        ├── RETRY → reshaping（ループ）
+                         │                                                        ├── BLOCKED → suspend (needs_input)
+                         │                                                        └── ABORT → done
+                         ├── [scoped + 手動承認が必要] → suspend (approval_required)
+                         ├── [needs_input] → suspend (needs_input)
+                         └── [reshaping（問題なし）] → done
 ```
 
 auto_approve の判定ロジック:

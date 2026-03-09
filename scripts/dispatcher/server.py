@@ -301,8 +301,9 @@ class DispatchServer(ExecutorMixin):
             updated_at=now_iso(),
         )
         mgr.lifecycles[lc.lifecycle_id] = lc
-        if context:
-            mgr._init_context(lc, context)
+        if not context:
+            context = f"# {prompt}\n\n- Project: {project_id}\n\n## 概要\n\n## 未決事項\n\n## 事前条件\n\n## 達成条件\n\n## 完了時アクション\n\n## 実行プロンプト\n\n## 実行履歴\n"
+        mgr._init_context(lc, context)
         mgr._save()
 
         await mgr.dispatch_refine(lc)

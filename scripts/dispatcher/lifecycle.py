@@ -444,9 +444,7 @@ class LifecycleManager:
     async def dispatch_refine(self, lc: Lifecycle, prev_suspend_reason: str | None = None):
         context = self._read_context(lc)
         if not context:
-            # context なし → refine スキップ、直接 execute
-            self._update_status(lc, "running")
-            await self.dispatch_execute(lc)
+            log.error(f"Lifecycle: context file missing for {lc.lifecycle_id}")
             return
 
         template = self._select_refine_template(lc, prev_suspend_reason)
