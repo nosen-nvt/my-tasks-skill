@@ -1,0 +1,20 @@
+#!/usr/bin/bash
+set -uo pipefail
+
+# Usage: job-wrapper <dispatch_dir> <dispatch_id> <command...>
+# Writes PID and exit code to sentinel files for dispatcher monitoring.
+
+DISPATCH_DIR="$1"; shift
+DISPATCH_ID="$1"; shift
+
+PID_FILE="${DISPATCH_DIR}/${DISPATCH_ID}.pid"
+EXIT_FILE="${DISPATCH_DIR}/${DISPATCH_ID}.exit"
+
+echo $$ > "$PID_FILE"
+
+"$@"
+rc=$?
+
+echo "$rc" > "$EXIT_FILE"
+
+exit "$rc"

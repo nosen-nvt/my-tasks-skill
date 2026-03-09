@@ -362,7 +362,7 @@ class DispatchServer(ExecutorMixin):
                 log_dir = self._log_path("_").parent
                 now = datetime.now().timestamp()
                 done_lc_ids = {lc.lifecycle_id for lc in self.lifecycle_mgr.lifecycles.values() if lc.status == "done"}
-                for p in list(log_dir.glob("*.log")) + list(log_dir.glob("*.result.json")) + list(log_dir.glob("*.context.md")):
+                for p in list(log_dir.glob("*.log")) + list(log_dir.glob("*.result.json")) + list(log_dir.glob("*.context.md")) + list(log_dir.glob("*.pid")) + list(log_dir.glob("*.exit")):
                     if p.suffix == ".md" and p.stem.replace(".context", "") not in done_lc_ids:
                         continue
                     if now - p.stat().st_mtime > max_age:

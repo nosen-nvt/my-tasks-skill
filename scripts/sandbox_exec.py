@@ -614,6 +614,7 @@ def build_exec_args(
     cred_env: dict[str, str] | None = None,
     command: list[str] | None = None,
     working_dir: str | None = None,
+    dispatch_id: str | None = None,
 ) -> list[str]:
     """bwrap 実行コマンド引数を構築して返す。netns の準備も行う。"""
     work = working_dir or os.getcwd()
@@ -631,6 +632,10 @@ def build_exec_args(
     if cred_env:
         for k, v in cred_env.items():
             cred_args += ["--setenv", k, v]
+
+    if dispatch_id:
+        dispatch_dir = f"/run/user/{UID}/my-tasks-dispatch"
+        command = [str(SCRIPT_DIR / "job-wrapper"), dispatch_dir, dispatch_id] + command
 
     if proxy_port is None:
         proxy_port = resolve_proxy_port(profile) or 3128

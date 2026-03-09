@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import TYPE_CHECKING
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import sandbox_exec
 
-from .models import Job, log, now_iso, get_cred_broker_socket_path
+from .models import Job, SOCKET_DIR_NAME, log, now_iso, get_cred_broker_socket_path
 from .prompt import build_system_prompt
 
 if TYPE_CHECKING:
@@ -37,6 +38,26 @@ class ExecutorMixin:
     def generate_dispatch_id(self, project_id: str) -> str: raise NotImplementedError
     def count_running(self) -> int: raise NotImplementedError
     def running_project_ids(self) -> set[str]: raise NotImplementedError
+
+    def _dispatch_dir(self) -> Path:
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}")
+        return Path(runtime_dir) / SOCKET_DIR_NAME
+
+    async def _poll_exit_file(self, dispatch_id: str, interval: float = 3.0) -> int:
+        """job-wrapper が書き出す .exit ファイルをポーリングする。"""
+        exit_file = self._dispatch_dir() / f"{dispatch_id}.exit"
+        while True:
+            await asyncio.sleep(interval)
+            if exit_file.is_file():
+                try:
+                    return int(exit_file.read_text().strip())
+                except (ValueError, OSError):
+                    continue
+
+    def _cleanup_sentinels(self, dispatch_id: str):
+        for suffix in (".pid", ".exit"):
+            sentinel = self._dispatch_dir() / f"{dispatch_id}{suffix}"
+            sentinel.unlink(missing_ok=True)
 
     async def execute_job(self, job: Job):
         job.status = "running"
@@ -67,6 +88,7 @@ class ExecutorMixin:
                 cred_env=cred_env,
                 command=command,
                 working_dir=job.working_dir,
+                dispatch_id=job.dispatch_id,
             )
 
             log_file = open(log_path, "w", encoding="utf-8")
@@ -80,7 +102,34 @@ class ExecutorMixin:
             self._processes[job.dispatch_id] = proc
             log.info(f"Job executing: {job.dispatch_id} pid={proc.pid} log={log_path}")
 
-            exit_code = await proc.wait()
+            # Primary: proc.wait(). Fallback: poll .exit file from job-wrapper.
+            wait_task = asyncio.create_task(proc.wait())
+            poll_task = asyncio.create_task(self._poll_exit_file(job.dispatch_id))
+
+            done, _pending = await asyncio.wait(
+                {wait_task, poll_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if wait_task in done:
+                exit_code = wait_task.result()
+                poll_task.cancel()
+            else:
+                exit_code = poll_task.result()
+                log.warning(
+                    f"Job {job.dispatch_id}: exit file detected (code={exit_code}) "
+                    f"but outer process still alive. Terminating."
+                )
+                try:
+                    await asyncio.wait_for(wait_task, timeout=5.0)
+                except asyncio.TimeoutError:
+                    proc.terminate()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                wait_task.cancel()
+
             job.exit_code = exit_code
             job.status = "done" if exit_code == 0 else "failed"
         except Exception as e:
@@ -94,6 +143,7 @@ class ExecutorMixin:
                 log_file.close()
             job.finished_at = now_iso()
             self._processes.pop(job.dispatch_id, None)
+            self._cleanup_sentinels(job.dispatch_id)
             log.info(f"Job finished: {job.dispatch_id} status={job.status} exit_code={job.exit_code}")
 
         self._notify_waiters(job)
@@ -133,6 +183,7 @@ class ExecutorMixin:
             job.exit_code = -1
             job.finished_at = now_iso()
             self._processes.pop(job.dispatch_id, None)
+            self._cleanup_sentinels(job.dispatch_id)
             self._notify_waiters(job)
 
     def _notify_waiters(self, job: Job):
