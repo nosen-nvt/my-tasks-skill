@@ -335,7 +335,6 @@ suspend 中のライフサイクルを再開する。
 ### 手順
 
 - **Lifecycle 経由（操作3 dispatch）**: スキル側で `pending` → `in_progress` にステータスを更新し、`dispatcher dispatch --project X --prompt "title" --context-file tasks/ID.md` で Lifecycle を開始する
-- **refine.py 経由（直接精査）**: `pending` タスクを refine.py で精査ジョブとして投入する（Lifecycle を経由しない単発精査）
 
 ### 制約
 
@@ -344,7 +343,6 @@ suspend 中のライフサイクルを再開する。
 ### 例
 
 - 「これをディスパッチして」→ 操作3 dispatch を実行
-- 「精査して」→ refine.py で直接精査
 
 ---
 
