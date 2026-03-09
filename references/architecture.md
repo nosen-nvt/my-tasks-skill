@@ -71,15 +71,13 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 
 ```
 pending → in_progress → done
-              ↕          ↗
-          suspended → aborted
+                      → aborted
 
 ※ done → sync で同じ remote_id が再出現 → pending（再オープン、generation++）
 ```
 
 - `pending`: データソースから取り込まれた初期状態
-- `in_progress`: Lifecycle にディスパッチ済み
-- `suspended`: ユーザーアクション待ち（詳細は Lifecycle の `suspend_reason` を参照）
+- `in_progress`: Lifecycle にディスパッチ済み（Lifecycle 側の suspend 中も含む）
 - `done`: 完了（評価ジョブの PASS 判定、またはユーザが明示的に完了とした状態）
 - `aborted`: 実行不可能と判断された状態（ABORT 判定、または max_runs 到達）
 
@@ -110,8 +108,6 @@ dispatch → reshaping → 精査ジョブ
 | Lifecycle イベント | タスクインデックス遷移 |
 |---|---|
 | dispatch 時（スキル側） | `pending` → `in_progress` |
-| suspend | `in_progress` → `suspended` |
-| resume | `suspended` → `in_progress` |
 | done (PASS) | `in_progress` → `done` |
 | done (ABORT / max_runs) | `in_progress` → `aborted` |
 

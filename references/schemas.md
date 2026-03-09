@@ -136,8 +136,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 
 ```
 pending → in_progress → done
-              ↕          ↗
-          suspended → aborted
+                      → aborted
 
 ※ done → sync で同じ remote_id が再出現 → pending（再オープン、generation++）
 ```
@@ -145,20 +144,17 @@ pending → in_progress → done
 | ステータス | 意味 |
 |-----------|------|
 | `pending` | データソースから取り込まれた初期状態 |
-| `in_progress` | Lifecycle にディスパッチ済み |
-| `suspended` | ユーザーアクション待ち（詳細は Lifecycle の suspend_reason を参照） |
+| `in_progress` | Lifecycle にディスパッチ済み（Lifecycle 側の suspend 中も含む） |
 | `done` | 完了 |
 | `aborted` | 中止 |
 
 ### 遷移ルール補足
 
 - dispatch 時: `pending` → `in_progress`
-- Lifecycle suspend: `in_progress` → `suspended`
-- Lifecycle resume: `suspended` → `in_progress`
 - Lifecycle done(PASS): `in_progress` → `done`
 - Lifecycle done(ABORT/max_runs): `in_progress` → `aborted`
 - `done` → `pending`: 同じ remote_id のタスクが再度取り込まれたとき（再オープン、`generation` をインクリメント）
-- **manual プロジェクト短縮フロー**: プロジェクト定義に `working_directory` がないプロジェクトは manual 扱い。`suspended` で全未決事項が `[x]` になったら `done` へ直接遷移する。完了時アクション（操作9）は通常通り実行する
+- **manual プロジェクト**: プロジェクト定義に `working_directory` がないプロジェクトは manual 扱い。Lifecycle を経由せず、メインセッションで直接処理する。完了時アクション（操作9）は通常通り実行する
 
 ### ID 生成規則
 
@@ -170,7 +166,7 @@ pending → in_progress → done
 
 ```jsonl
 {"id":"20260301-001","remote_id":"UBS-101","datasource_id":"jira","title":"API実装","status":"pending","project_id":"ubs-mgmt-tool","generation":1}
-{"id":"20260301-002","remote_id":"abc123","datasource_id":"ms-todo","title":"書類提出","status":"suspended","project_id":"","generation":1}
+{"id":"20260301-002","remote_id":"abc123","datasource_id":"ms-todo","title":"書類提出","status":"in_progress","project_id":"","generation":1}
 ```
 
 ---

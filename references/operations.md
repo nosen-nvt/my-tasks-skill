@@ -30,22 +30,17 @@
    ```
 
 3. スクリプトのレポートを確認:
-   - `auto_assigned`: `project_mapping` でプロジェクトが特定できたタスク
-   - `needs_review`: プロジェクトが特定できなかったタスク → ユーザーに確認
+   - `project_assigned`: `project_mapping` でプロジェクトが特定できたタスク
+   - `project_unassigned`: プロジェクトが特定できなかったタスク（dispatch 時に判定）
    - `vanished`: 消失タスク（full モード: インデックスと Markdown から削除済み）
    - `gc`: GC で除去された done タスク（append モード）
 
-4. 要確認タスクに対してユーザーと対話:
-   - プロジェクト一覧をコンテキストとして提示
-   - 割り当て先プロジェクトをユーザーが選択
-   - `tasks/index.jsonl` と `tasks/{id}.md` の `project_id` を更新
-
-5. 一時ファイルを削除:
+4. 一時ファイルを削除:
    ```bash
    rm /tmp/my-tasks-sync.jsonl
    ```
 
-6. commit + push（datasources/ や projects/ に変更がある場合のみ）:
+5. commit + push（datasources/ や projects/ に変更がある場合のみ）:
    ```bash
    cd ~/.local/share/my-tasks
    git add .
@@ -141,8 +136,6 @@ dispatch 時の `pending → in_progress` はスキル側で実行する（dispa
 
 ```
 dispatch 時（スキル側）: pending → in_progress
-Lifecycle suspend:       in_progress → suspended
-Lifecycle resume:        suspended → in_progress
 Lifecycle done(PASS):    in_progress → done
 Lifecycle done(ABORT/max_runs): in_progress → aborted
 ```
