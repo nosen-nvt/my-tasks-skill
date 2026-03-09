@@ -61,34 +61,59 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 1. `tasks/index.jsonl` から `id` が一致する行を取得（サマリ情報）
 2. `tasks/{id}.md` を読み込み（詳細・プロンプト等）
 
-## タスクのステータスフロー
+## ステータスモデル
+
+タスク管理は **タスクインデックス**（スキル側）と **Lifecycle**（ディスパッチャー側）の2層で構成される。
+
+### タスクインデックスのステータス
+
+スキル側が `tasks/index.jsonl` で管理する。
 
 ```
-pending → reshaping ⇄ needs_input
-            ↑  ↓
-            │  scoped → [auto_approve / 初回は手動] → approved → running
-            │                                                       ↓
-            │                                                  evaluating
-            │                                                 ↙    ↓    ↘
-            │                                           RETRY   PASS   BLOCKED
-            │                                             ↓       ↓       ↓
-            └─────────────────────────────────────────────┘     done   needs_input
-                                                                  ↑       ↓
-                                                           [再オープン] [ユーザ回答]
-                                                           (gen++)      ↓
-                                                                    reshaping
+pending → in_progress → done
+              ↕          ↗
+          suspended → aborted
 
-※ ABORT / max_runs 到達 → aborted
+※ done → sync で同じ remote_id が再出現 → pending（再オープン、generation++）
 ```
 
 - `pending`: データソースから取り込まれた初期状態
-- `reshaping`: 精査・見直しプロセス中。初回精査（`run_count=0`）とジョブ実行後の再精査（`run_count>0`）の両方を含む
-- `needs_input`: 質問が生成されたが未回答の項目がある（精査時・評価時の両方で使用）
-- `scoped`: 前提条件・達成条件が明確で、実行プロンプトが生成済み（精査ジョブが scoped 遷移時に同時生成）
-- `approved`: ユーザがプロンプトを承認し、実行待ち。オーケストレーション有効時は自動遷移も可能
-- `running`: ディスパッチャーで実行中
+- `in_progress`: Lifecycle にディスパッチ済み
+- `suspended`: ユーザーアクション待ち（詳細は Lifecycle の `suspend_reason` を参照）
 - `done`: 完了（評価ジョブの PASS 判定、またはユーザが明示的に完了とした状態）
 - `aborted`: 実行不可能と判断された状態（ABORT 判定、または max_runs 到達）
+
+### Lifecycle のステータス
+
+ディスパッチャーが管理するジョブチェーンの内部状態。タスク管理の知識を持たない。
+
+```
+dispatch → reshaping → 精査ジョブ
+                          ├── scoped + auto_approve → running → 実行ジョブ → evaluating → 評価ジョブ
+                          │                                                                ├── PASS → done
+                          │                                                                ├── RETRY → reshaping（ループ）
+                          │                                                                ├── BLOCKED → suspend (needs_input)
+                          │                                                                └── ABORT → done
+                          ├── scoped + 手動承認 → suspend (approval_required)
+                          ├── needs_input → suspend (needs_input)
+                          └── reshaping (問題なし) → done
+```
+
+- `reshaping`: 精査・見直しプロセス中
+- `running`: 実行ジョブ実行中
+- `evaluating`: 評価ジョブ実行中
+- `suspend`: ユーザーアクション待ち（`suspend_reason`: `approval_required` / `needs_input` / `project_confirmation`）
+- `done`: Lifecycle 完了
+
+### 2層の連携
+
+| Lifecycle イベント | タスクインデックス遷移 |
+|---|---|
+| dispatch 時（スキル側） | `pending` → `in_progress` |
+| suspend | `in_progress` → `suspended` |
+| resume | `suspended` → `in_progress` |
+| done (PASS) | `in_progress` → `done` |
+| done (ABORT / max_runs) | `in_progress` → `aborted` |
 
 ## git 操作ポリシー
 
@@ -142,9 +167,11 @@ Unix ドメインソケット C/S アーキテクチャのジョブランナー�
 
 | コマンド | 説明 |
 |---------|------|
-| `run` | ジョブを投入（タスク ID またはプロジェクト ID + プロンプト指定） |
+| `dispatch` | ライフサイクルを開始（精査→実行→評価を自動制御） |
+| `resume` | suspend 中のライフサイクルを再開 |
+| `run` | ジョブを直接投入（プロジェクト ID + プロンプト指定） |
 | `open` | 対話的セッションを tmux で開く |
-| `status` | 全ジョブのステータスを返す |
+| `status` | 全ジョブ + ライフサイクルのステータスを返す |
 | `cancel` | キュー内ジョブを取消 |
 | `kill` | 実行中ジョブを強制停止 |
 | `kill-all` | 全ジョブを強制停止 |

@@ -129,6 +129,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 | `status` | string | Yes | タスクステータス |
 | `project_id` | string | No | 紐づくプロジェクトの ID |
 | `lifecycle_id` | string | No | 関連する Lifecycle ID（dispatch 済みの場合） |
+| `run_count` | integer | No | 実行回数（デフォルト: `0`）。sync-tasks.py が初期値を設定 |
 | `generation` | integer | No | 再オープン世代（デフォルト: `1`）。done タスクが同じ remote_id で再度取り込まれた際にインクリメントする |
 
 ### ステータス定義
@@ -528,18 +529,22 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 |---|---|---|
 | `dispatch_id` | string | 識別子（`{project_id}-{連番}` 形式、例: `bo-1`） |
 | `project_id` | string | プロジェクト ID |
-| `lifecycle_id` | string\|null | 所属する Lifecycle ID（Lifecycle 経由のジョブのみ） |
+| `job_type` | string | `execute` \| `evaluate` \| `refine` |
 | `status` | string | `queued` \| `running` \| `done` \| `failed` |
 | `pid` | integer\|null | 子プロセスの PID |
 | `exit_code` | integer\|null | 終了コード |
 | `started_at` | string\|null | 開始日時（ISO 8601形式） |
 | `finished_at` | string\|null | 終了日時（ISO 8601形式） |
 
+注: `lifecycle_id` は `Job` dataclass に保持されるが、`to_dict()` の出力（status レスポンス）には含まれない。
+
 ### status レスポンス例
 
 ```json
 {"ok": true, "jobs": [
-  {"dispatch_id": "bo-1", "project_id": "bo", "status": "running", "pid": 12345, "exit_code": null, "started_at": "2026-03-01T10:00:00+09:00", "finished_at": null},
-  {"dispatch_id": "bo-2", "project_id": "bo", "status": "queued", "pid": null, "exit_code": null, "started_at": null, "finished_at": null}
+  {"dispatch_id": "bo-1", "project_id": "bo", "job_type": "execute", "status": "running", "pid": 12345, "exit_code": null, "started_at": "2026-03-01T10:00:00+09:00", "finished_at": null},
+  {"dispatch_id": "bo-2", "project_id": "bo", "job_type": "refine", "status": "queued", "pid": null, "exit_code": null, "started_at": null, "finished_at": null}
+], "lifecycles": [
+  {"lifecycle_id": "lc-1", "project_id": "bo", "prompt": "API実装", "context_path": "/run/user/1000/my-tasks-dispatch/lc-1.context.md", "status": "running", "suspend_reason": null, "run_count": 0, "max_runs": 5, "current_dispatch_id": "bo-1", "created_at": "2026-03-01T10:00:00+09:00", "updated_at": "2026-03-01T10:05:00+09:00"}
 ]}
 ```
