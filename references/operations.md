@@ -328,24 +328,6 @@ suspend 中のライフサイクルを再開する。
 
 ---
 
-## 8. 精査・ディスパッチ
-
-`pending` タスクを精査・ディスパッチする。
-
-### 手順
-
-- **Lifecycle 経由（操作3 dispatch）**: スキル側で `pending` → `in_progress` にステータスを更新し、`dispatcher dispatch --project X --prompt "title" --context-file tasks/ID.md` で Lifecycle を開始する
-
-### 制約
-
-- git commit は不要（tasks/ は gitignore 対象）
-
-### 例
-
-- 「これをディスパッチして」→ 操作3 dispatch を実行
-
----
-
 ## 9. 対話セッション
 
 ジョブ管理の対象外で対話セッションを起動する。
