@@ -26,7 +26,7 @@ Unix ドメインソケット C/S アーキテクチャのジョブランナー�
 │  ┌─ サンドボックス ──────────────────────────────────┐ │
 │  │    │                                              │ │
 │  │  Claude Code (スキル実行中)                       │ │
-│  │    └─ dispatcher run --task 20260301-001       │ │
+│  │    └─ dispatcher run --project bo             │ │
 │  │        └─ connect(SOCKET_PATH) → ホストへ到達     │ │
 │  └───────────────────────────────────────────────────┘ │
 └────────────────────────────────────────────────────────┘
@@ -40,9 +40,9 @@ JSON over Unix ドメインソケット。改行区切り（1行1メッセージ
 
 | コマンド | フィールド | 説明 |
 |---------|-----------|------|
-| `dispatch` | `task_id?`, `project_id?`, `prompt?` | ライフサイクルを開始（精査→実行→評価を自動制御） |
+| `dispatch` | `project_id?`, `prompt?`, `context?` | ライフサイクルを開始（精査→実行→評価を自動制御） |
 | `resume` | `lifecycle_id`, `project_id?` | suspend 中のライフサイクルを再開 |
-| `run` | `task_id?`, `project_id`, `prompt`, `job_type?` | ジョブを実行（sandbox_profile はプロジェクト設定から自動解決） |
+| `run` | `project_id`, `prompt`, `job_type?` | ジョブを実行（sandbox_profile はプロジェクト設定から自動解決） |
 | `open` | `project_id`, `session?` | 対話的セッションを tmux で開く |
 | `status` | | 全ジョブ + ライフサイクルのステータスを返す |
 | `cancel` | `dispatch_id` | キュー内ジョブを取消 |
@@ -52,9 +52,9 @@ JSON over Unix ドメインソケット。改行区切り（1行1メッセージ
 | `log` | (CLI のみ) | ジョブの stdout/stderr ログを表示（ファイル直接読み取り） |
 
 ```json
-{"command": "run", "task_id": "20260301-001", "project_id": "ubs-mgmt-tool", "prompt": "...", "job_type": "execute"}
+{"command": "run", "project_id": "ubs-mgmt-tool", "prompt": "...", "job_type": "execute"}
 {"command": "run", "project_id": "bo", "prompt": "バグを修正してください"}
-{"command": "run", "project_id": "bo", "task_id": "20260301-001", "prompt": "...", "job_type": "refine"}
+{"command": "run", "project_id": "bo", "prompt": "...", "job_type": "refine"}
 {"command": "open", "project_id": "ubs-mgmt-tool", "session": "main"}
 {"command": "status"}
 {"command": "cancel", "dispatch_id": "ubs-mgmt-tool-1"}
@@ -69,8 +69,8 @@ JSON over Unix ドメインソケット。改行区切り（1行1メッセージ
 {"ok": true, "dispatch_id": "ubs-mgmt-tool-1", "message": "Job started"}
 {"ok": true, "dispatch_id": "ubs-mgmt-tool-2", "message": "Job queued (slot full)"}
 {"ok": true, "jobs": [
-  {"dispatch_id": "ubs-mgmt-tool-1", "task_id": "20260301-001", "status": "running", "pid": 12345},
-  {"dispatch_id": "ubs-mgmt-tool-2", "task_id": "20260301-003", "status": "queued", "pid": null}
+  {"dispatch_id": "ubs-mgmt-tool-1", "status": "running", "pid": 12345},
+  {"dispatch_id": "ubs-mgmt-tool-2", "status": "queued", "pid": null}
 ]}
 {"ok": false, "error": "Unknown dispatch_id: xyz"}
 ```
@@ -140,7 +140,7 @@ queued ──→ running ──→ done
 
 #### データモデル
 
-- `Lifecycle` dataclass: lifecycle_id, task_id, project_id, prompt, status, suspend_reason, run_count, max_runs, current_dispatch_id, timestamps
+- `Lifecycle` dataclass: lifecycle_id, project_id, prompt, status, suspend_reason, run_count, max_runs, current_dispatch_id, timestamps
 - 永続化: `$XDG_RUNTIME_DIR/my-tasks-dispatch/lifecycles.jsonl` (状態変更のたびに全件書き出し)
 - Job に `lifecycle_id` フィールドを追加（Lifecycle 経由のジョブを識別）
 
@@ -148,7 +148,7 @@ queued ──→ running ──→ done
 
 | コマンド | フィールド | 説明 |
 |---------|-----------|------|
-| `dispatch` | `task_id?`, `project_id?`, `prompt?` | ライフサイクル開始。精査→承認→実行→評価を自動制御 |
+| `dispatch` | `project_id?`, `prompt?`, `context?` | ライフサイクル開始。精査→承認→実行→評価を自動制御 |
 | `resume` | `lifecycle_id`, `project_id?` | suspend 中のライフサイクルを再開 |
 
 #### ステートマシンフロー
@@ -207,7 +207,7 @@ async def client_send(request: dict) -> dict:
 
 ```bash
 # ライフサイクル開始（推奨）
-dispatcher dispatch --task 20260301-001
+dispatcher dispatch --project bo --prompt "タスクタイトル" --context-file /path/to/task.md
 dispatcher dispatch --project bo --prompt "バグを修正して"
 
 # ライフサイクル再開
@@ -234,17 +234,10 @@ dispatcher log --id ubs-mgmt-tool-1
 dispatcher server [--max-slots 8]
 ```
 
-### `run --task` の処理
-
-1. `tasks/index.jsonl` から `task_id` に対応するエントリを取得
-2. `tasks/{task_id}.md` から実行プロンプトセクションを読み取り
-3. エントリの `project_id` を使用
-4. サーバに `run` コマンドを送信
-
-### `run --project` の処理
+### `run` の処理
 
 1. stdin からプロンプトを読み取り
-2. サーバに `run` コマンドを送信
+2. サーバに `run` コマンドを送信（`--project` 必須）
 
 ## tmux セッション決定
 

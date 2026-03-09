@@ -98,21 +98,22 @@
 
 ## 3. dispatch（ライフサイクル開始）
 
-ジョブチェーン（Lifecycle）を開始する。CLI がタスク情報を解決し、サーバーにはコンテキストとして送信する。
+ジョブチェーン（Lifecycle）を開始する。タスク情報の解決とステータス更新はスキル側（呼び出し元）が行い、dispatcher にはコンテキストとして送信する。
 Lifecycle はタスク管理の知識を持たない純粋なジョブオーケストレータ。
 
 ### 手順
 
-1. ライフサイクルを開始:
+1. タスク情報を読み込む（`tasks/index.jsonl` + `tasks/{id}.md`）
+2. タスクステータスを `in_progress` に更新（`tasks/index.jsonl` と `tasks/{id}.md`）
+3. ライフサイクルを開始:
    ```bash
-   # タスク ID 指定（CLI がタスク .md を読み、コンテキストとしてサーバーに送信）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch --task 20260301-001
+   # タスクをディスパッチ（スキル側でタスク解決後に呼び出す）
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
+     --project bo --prompt "タスクタイトル" --context-file /path/to/task.md
 
-   # プロジェクト + プロンプト指定（タスクなしの直接投入）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch --project bo --prompt "バグを修正して"
-
-   # プロジェクト未指定（LLM で自動判定）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch --task 20260301-001
+   # タスクなしの直接投入
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
+     --project bo --prompt "バグを修正して"
    ```
 
 2. ステータスを確認:
@@ -134,13 +135,15 @@ dispatch → reshaping → 精査ジョブ → scoped
 精査ジョブ → reshaping（問題なし）→ done
 ```
 
-### タスクステータス遷移（CLI/スキル側で管理）
+### タスクステータス遷移（スキル側で管理）
+
+dispatch 時の `pending → in_progress` はスキル側で実行する（dispatcher CLI はタスク管理を行わない）。
 
 ```
-dispatch 時:           pending → in_progress
-Lifecycle suspend:     in_progress → suspended
-Lifecycle resume:      suspended → in_progress
-Lifecycle done(PASS):  in_progress → done
+dispatch 時（スキル側）: pending → in_progress
+Lifecycle suspend:       in_progress → suspended
+Lifecycle resume:        suspended → in_progress
+Lifecycle done(PASS):    in_progress → done
 Lifecycle done(ABORT/max_runs): in_progress → aborted
 ```
 
@@ -331,7 +334,7 @@ suspend 中のライフサイクルを再開する。
 
 ### 手順
 
-- **Lifecycle 経由（操作3 dispatch）**: `pending` タスクを指定して dispatch すると、CLI が `pending` → `in_progress` に自動遷移し、タスク .md をコンテキストとして Lifecycle に送信する
+- **Lifecycle 経由（操作3 dispatch）**: スキル側で `pending` → `in_progress` にステータスを更新し、`dispatcher dispatch --project X --prompt "title" --context-file tasks/ID.md` で Lifecycle を開始する
 - **refine.py 経由（直接精査）**: `pending` タスクを refine.py で精査ジョブとして投入する（Lifecycle を経由しない単発精査）
 
 ### 制約

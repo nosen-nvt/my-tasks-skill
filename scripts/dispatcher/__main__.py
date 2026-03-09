@@ -25,11 +25,8 @@ if __package__ is None or __package__ == "":
 
 from .models import (
     DEFAULT_MAX_SLOTS, DEFAULT_REPO, SOCKET_DIR_NAME,
-    get_socket_path, get_repo_dir, is_inside_sandbox,
+    get_socket_path, is_inside_sandbox,
 )
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import task_helpers
 
 
 # ---------------------------------------------------------------------------
@@ -95,42 +92,18 @@ def _start_server_background():
 # ---------------------------------------------------------------------------
 
 def cmd_run(args: argparse.Namespace) -> None:
-    if args.task:
-        repo_dir = get_repo_dir(args.repo)
-        task_info = task_helpers.load_task_entry(repo_dir / "tasks", args.task)
-        if not task_info:
-            print(f"エラー: タスクが見つかりません: {args.task}", file=sys.stderr)
-            sys.exit(1)
+    prompt = sys.stdin.read().strip()
+    if not prompt:
+        print("エラー: プロンプトが空です（stdin からプロンプトを読み取ります）", file=sys.stderr)
+        sys.exit(1)
 
-        project_id = task_info.get("project_id", "")
-        if not project_id:
-            print(f"エラー: タスク {args.task} に project_id が設定されていません", file=sys.stderr)
-            sys.exit(1)
-
-        prompt = task_helpers.read_execution_prompt(repo_dir, args.task)
-        if not prompt:
-            print(f"エラー: タスク {args.task} に実行プロンプトがありません", file=sys.stderr)
-            sys.exit(1)
-
-        request = {
-            "command": "run",
-            "project_id": project_id,
-            "job_type": "execute",
-            "prompt": prompt,
-        }
-    else:
-        prompt = sys.stdin.read().strip()
-        if not prompt:
-            print("エラー: プロンプトが空です（stdin からプロンプトを読み取ります）", file=sys.stderr)
-            sys.exit(1)
-
-        request = {
-            "command": "run",
-            "project_id": args.project,
-            "prompt": prompt,
-        }
-        if args.job_type:
-            request["job_type"] = args.job_type
+    request: dict[str, Any] = {
+        "command": "run",
+        "project_id": args.project,
+        "prompt": prompt,
+    }
+    if args.job_type:
+        request["job_type"] = args.job_type
 
     if args.sandbox_profile:
         request["sandbox_profile"] = args.sandbox_profile
@@ -210,31 +183,14 @@ def cmd_status(args: argparse.Namespace) -> None:
 def cmd_dispatch_cli(args: argparse.Namespace) -> None:
     request: dict[str, Any] = {"command": "dispatch"}
 
-    if args.task:
-        repo_dir = get_repo_dir(args.repo)
-        tasks_dir = repo_dir / "tasks"
-        task_entry = task_helpers.load_task_entry(tasks_dir, args.task)
-        if not task_entry:
-            print(f"エラー: タスクが見つかりません: {args.task}", file=sys.stderr)
-            sys.exit(1)
-        project_id = args.project or task_entry.get("project_id", "")
-        prompt = args.prompt or task_entry.get("title", "")
-        task_md = task_helpers.read_file(tasks_dir / f"{args.task}.md")
-        request["project_id"] = project_id
-        request["prompt"] = prompt
-        if task_md:
-            request["context"] = task_md
-        # タスクステータスを CLI 側で更新
-        if task_entry.get("status") == "pending":
-            task_helpers.update_task_index(tasks_dir, args.task, {"status": "in_progress"})
-            task_helpers.update_task_md_status(tasks_dir, args.task, "in_progress")
-    else:
-        if args.project:
-            request["project_id"] = args.project
-        if args.prompt:
-            request["prompt"] = args.prompt
-        elif not sys.stdin.isatty():
-            request["prompt"] = sys.stdin.read().strip()
+    if args.project:
+        request["project_id"] = args.project
+    if args.prompt:
+        request["prompt"] = args.prompt
+    elif not sys.stdin.isatty():
+        request["prompt"] = sys.stdin.read().strip()
+    if args.context_file:
+        request["context"] = Path(args.context_file).read_text(encoding="utf-8")
 
     response = asyncio.run(client_send(request))
     if response.get("ok"):
@@ -333,13 +289,7 @@ def main() -> None:
 
     # run
     p_run = subparsers.add_parser("run", help="ジョブを投入する")
-    run_group = p_run.add_mutually_exclusive_group(required=True)
-    run_group.add_argument("--task", help="タスク ID（index.jsonl + .md からプロンプトを読み取る）")
-    run_group.add_argument("--project", help="プロジェクト ID（プロンプトは stdin から）")
-    p_run.add_argument(
-        "--repo", default=DEFAULT_REPO, metavar="PATH",
-        help=f"タスク管理リポジトリのパス（デフォルト: {DEFAULT_REPO}）",
-    )
+    p_run.add_argument("--project", required=True, help="プロジェクト ID（プロンプトは stdin から）")
     p_run.add_argument("--job-type", default=None, help="ジョブタイプ: execute, evaluate, refine")
     p_run.add_argument("--sandbox-profile", help="サンドボックスプロファイルを上書き指定")
     p_run.set_defaults(func=cmd_run)
@@ -353,13 +303,9 @@ def main() -> None:
 
     # dispatch
     p_dispatch = subparsers.add_parser("dispatch", help="ライフサイクルを開始する")
-    p_dispatch.add_argument("--task", help="タスク ID")
     p_dispatch.add_argument("--project", help="プロジェクト ID")
     p_dispatch.add_argument("--prompt", help="プロンプト（省略時は stdin）")
-    p_dispatch.add_argument(
-        "--repo", default=DEFAULT_REPO, metavar="PATH",
-        help=f"タスク管理リポジトリのパス（デフォルト: {DEFAULT_REPO}）",
-    )
+    p_dispatch.add_argument("--context-file", help="コンテキストファイルのパス")
     p_dispatch.set_defaults(func=cmd_dispatch_cli)
 
     # resume
