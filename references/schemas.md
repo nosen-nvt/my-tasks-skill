@@ -71,7 +71,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
   "operations": {
     "mark_read": {
       "description": "メールを既読にする",
-      "command": "msgraph mail update --message-id {remote_id} --is-read true"
+      "command": "msgraph patch \"/me/messages/{remote_id}\" --body '{\"isRead\": true}'"
     }
   }
 }

@@ -174,46 +174,6 @@ Lifecycle ステートマシンがこのファイルを読んで次の状態を�
 
 `dispatch` 時に `project_id` 未指定の場合、`claude` CLI でプロジェクトを自動判定する。
 
-### オーケストレーション（従来方式、後方互換）
-
-プロジェクト定義に `orchestration` フィールドが設定されている場合、ジョブ完了後に自動でチェーンジョブをディスパッチする。
-**注意**: Lifecycle 経由（`lifecycle_id` あり）のジョブはこの従来オーケストレーションをバイパスし、Lifecycle ステートマシンで処理される。
-
-#### ジョブタイプ (`job_type`)
-
-| タイプ | 説明 |
-|--------|------|
-| `execute` | タスク実行ジョブ（デフォルト） |
-| `evaluate` | 実行結果の評価ジョブ（達成条件の判定） |
-| `refine` | タスク精査ジョブ |
-
-#### チェーンフロー
-
-```
-execute 完了
-    ↓
-evaluate を自動ディスパッチ（実行ログ + タスク MD を含むプロンプト）
-    ↓
-evaluate 完了 → 評価エージェントが index.jsonl を更新
-    ↓ (verdict に応じて)
-    ├── PASS (status=done)       → 完了
-    ├── RETRY (status=reshaping) → refine を自動ディスパッチ
-    ├── BLOCKED (status=needs_input) → ユーザ待ち
-    └── ABORT (status=aborted)   → 停止
-
-refine 完了 → 精査エージェントが index.jsonl を更新
-    ↓ (status に応じて)
-    ├── scoped + auto_approve → status を approved に更新 → execute を自動ディスパッチ
-    ├── needs_input → ユーザ待ち
-    └── reshaping → 完了確認待ち
-```
-
-#### 自動承認条件
-
-`_should_auto_approve(orchestration, run_count)`:
-- `auto_approve == true` かつ
-- `require_first_approval == false` または `run_count > 0`
-
 ### SIGTERM ハンドラ
 
 全子プロセスに SIGTERM を送信してからサーバを終了する。
@@ -252,12 +212,6 @@ dispatcher.py dispatch --project bo --prompt "バグを修正して"
 
 # ライフサイクル再開
 dispatcher.py resume --id lc-1
-
-# タスクの実行プロンプトを index + Markdown から読み取ってジョブ投入（従来方式）
-dispatcher.py run --task 20260301-001
-
-# プロンプトを stdin から読み取ってジョブ投入
-echo "..." | dispatcher.py run --project ubs-mgmt-tool
 
 # 対話的セッション
 dispatcher.py open --project ubs-mgmt-tool [--session main]

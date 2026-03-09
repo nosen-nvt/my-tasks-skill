@@ -2,9 +2,6 @@
 
 タスク管理スキルが提供するオペレーションの詳細手順。
 
-**推奨**: dispatch/resume を使用すると、精査→承認→実行→評価のフローが自動制御される。
-従来のオペレーション 3〜6, 9, 11 は dispatch に統合されたが、後方互換として引き続き使用可能。
-
 ---
 
 ## 1. タスク収集
@@ -81,9 +78,8 @@
      - Gmail: `google mail get {id} --account {alias}`
 
 4. 非アクション対象を既読化（datasource の `operations.mark_read` を使用）:
-   - Outlook: `msgraph mail update --message-id {remote_id} --is-read true`
+   - Outlook: `msgraph patch "/me/messages/{remote_id}" --body '{"isRead": true}'`
    - Gmail: `google mail modify {remote_id} --remove-label UNREAD --account {alias}`
-     （google-cli に `modify` コマンド未実装の場合はスキップ）
 
 5. アクション対象のメールを JSONL に出力し `sync-tasks.py` でタスク化:
    ```bash
@@ -97,7 +93,6 @@
 ### 注意
 
 - メールトリアージはエージェント対話が必要なため `fetch-all.sh` には含めない
-- Gmail の既読化（`google mail modify`）は google-cli への機能追加が前提
 
 ---
 
@@ -146,6 +141,37 @@ dispatch → reshaping → 精査ジョブ → scoped
 | `needs_input` | ユーザ入力が必要 | 再精査ジョブをディスパッチ |
 | `project_confirmation` | プロジェクト判定の確認 | 指定プロジェクトで精査開始 |
 
+### 精査ジョブの動作
+
+精査ジョブは以下を実行する:
+
+1. タスク md とプロジェクト定義を読み込み
+2. 必要に応じて作業ディレクトリ配下のソースコードを調査
+3. 未決事項を分析:
+   - **未決事項がある場合**: `## 未決事項` にチェックボックス形式で質問を記載し、`needs_input` に遷移
+   - **未決事項がない場合**: `## 概要`、`## 事前条件`、`## 達成条件`、`## 完了時アクション` を記載し、`scoped` に遷移。`## 実行プロンプト` も同時に生成
+4. `tasks/{id}.md` と `tasks/index.jsonl` を更新
+
+### 達成条件の記述ルール
+
+- `manual` 以外のプロジェクトのタスクは AI エージェントが実装・実行する前提
+- **達成条件は AI エージェント自身がローカルで検証可能な内容** にすること
+- OK: ファイル内容の確認、YAML/JSON のパース検証、テスト実行（`dotnet test`, `npm test` 等）、ビルド成功、`az pipelines run` + 結果確認
+- NG: ブラウザでの手動確認、外部サービスの目視確認など、エージェントが実行できない操作
+
+### 再精査（`run_count > 0`）
+
+ジョブ実行後に `reshaping` に戻ったタスク（`run_count > 0`）は、実行履歴を踏まえた再精査が行われる:
+- `## 実行履歴` セクションの内容（成功/失敗、結果要約）を参照
+- レビュー指摘や不具合があれば、達成条件・実行プロンプトを修正して `scoped` に遷移
+- 問題がなければ、ユーザーに完了確認を促す
+
+### manual プロジェクト
+
+`working_directory` が未設定のプロジェクトは manual 扱い。精査ジョブはスキップされ、メインセッションで直接処理する:
+- `scoped` / `approved` / `running` をスキップし `done` に直接遷移
+- 完了時アクション（データソース側のステータス更新等）は通常通り実行する
+
 ---
 
 ## 4. resume（ライフサイクル再開）
@@ -172,181 +198,7 @@ suspend 中のライフサイクルを再開する。
 
 ---
 
-## 5. タスク精査（従来方式、dispatch に統合済み）
-
-`reshaping` タスクの精査、および全回答済み `needs_input` タスクの再精査を行う。
-`refine.py` を使い、**1タスク1ジョブ**としてディスパッチャーに投入する。
-各ジョブは専用のコンテキストでタスクを精査し、`scoped` 遷移時には実行プロンプトも同時に生成する。
-
-### 手順
-
-1. `refine.py` を実行してジョブを投入:
-   ```bash
-   # 全 reshaping タスクを精査ジョブとして投入
-   python3 ~/.claude/skills/my-tasks/scripts/refine.py \
-     --repo ~/.local/share/my-tasks
-
-   # 特定タスクのみ
-   python3 ~/.claude/skills/my-tasks/scripts/refine.py \
-     --repo ~/.local/share/my-tasks \
-     --task 20260301-001
-
-   # 全回答済み needs_input タスクも含める
-   python3 ~/.claude/skills/my-tasks/scripts/refine.py \
-     --repo ~/.local/share/my-tasks \
-     --include-clarified
-
-   # ドライラン（プロンプトを表示するだけで投入しない）
-   python3 ~/.claude/skills/my-tasks/scripts/refine.py \
-     --repo ~/.local/share/my-tasks \
-     --dry-run
-   ```
-
-2. ジョブ完了を待機（必要に応じて）:
-   ```bash
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py status
-   ```
-
-3. 結果を確認:
-   - `needs_input` に遷移したタスク → ユーザーに質問を提示し、回答を収集
-   - `scoped` に遷移したタスク → 実行プロンプトが生成済み。操作5（承認）へ
-
-4. ユーザーが `needs_input` タスクの質問に回答したら:
-   - 回答済みの項目を `[x]` に更新し、回答を追記
-   - 全項目が `[x]` になったら `refine.py --include-clarified` で再精査
-
-### 精査ジョブの動作
-
-各ジョブは以下を実行する（`refine.py` がプロンプトを自動組み立て）:
-
-1. タスク md とプロジェクト定義を読み込み
-2. 必要に応じて作業ディレクトリ配下のソースコードを調査
-3. 未決事項を分析:
-   - **未決事項がある場合**: `## 未決事項` にチェックボックス形式で質問を記載し、`needs_input` に遷移
-   - **未決事項がない場合**: `## 概要`、`## 事前条件`、`## 達成条件`、`## 完了時アクション` を記載し、`scoped` に遷移。`## 実行プロンプト` も同時に生成
-4. `tasks/{id}.md` と `tasks/index.jsonl` を更新
-
-### 達成条件の記述ルール
-
-- `manual` 以外のプロジェクトのタスクは AI エージェントが実装・実行する前提
-- **達成条件は AI エージェント自身がローカルで検証可能な内容** にすること
-- OK: ファイル内容の確認、YAML/JSON のパース検証、テスト実行（`dotnet test`, `npm test` 等）、ビルド成功、`az pipelines run` + 結果確認
-- NG: ブラウザでの手動確認、外部サービスの目視確認など、エージェントが実行できない操作
-
-### 再精査（`run_count > 0`）
-
-ジョブ実行後に `reshaping` に戻ったタスク（`run_count > 0`）は、実行履歴を踏まえた再精査が行われる:
-- `## 実行履歴` セクションの内容（成功/失敗、結果要約）を参照
-- レビュー指摘や不具合があれば、達成条件・実行プロンプトを修正して `scoped` に遷移
-- 問題がなければ、ユーザーに完了確認を促す（操作9 へ）
-
-### manual プロジェクト
-
-`working_directory` が未設定のプロジェクトは manual 扱い。`refine.py` はスキップし、メインセッションで直接処理する:
-- `scoped` / `approved` / `running` をスキップし `done` に直接遷移
-- 完了時アクション（操作9）を実行する
-
----
-
-## 4. プロンプト再生成
-
-`scoped` タスクの実行プロンプトを再生成する。通常は操作3（精査）で自動生成されるため、このステップは修正が必要な場合にのみ使用する。
-
-### 手順
-
-1. `tasks/index.jsonl` から `status=scoped` のタスクを一覧
-
-2. 対象タスクの `tasks/{id}.md` を読み込み
-
-3. 未決事項の回答、事前条件、達成条件を元に実行プロンプトを再生成
-
-4. `## 実行プロンプト` セクションにプロンプトを書き込み
-
----
-
-## 5. プロンプト承認
-
-生成されたプロンプトをユーザーに提示し、承認を得る。
-
-### 手順
-
-1. `tasks/index.jsonl` から `status=scoped` のタスクを一覧
-
-2. `tasks/{id}.md` の `## 実行プロンプト` セクションをユーザーに提示
-
-3. ユーザーが承認したら `index.jsonl` と `.md` の status を `approved` に更新
-
----
-
-## 6. タスク実行
-
-`approved` タスクをディスパッチャー経由で実行する。
-
-### 手順
-
-1. `tasks/index.jsonl` から `status=approved` のタスクを一覧（または特定のタスク ID を指定）
-
-2. ディスパッチャーにジョブを投入:
-   ```bash
-   # タスク ID 指定（index.jsonl + .md から自動読み取り）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py run --task 20260301-001
-
-   # プロジェクト ID + stdin プロンプト指定
-   echo "..." | python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py run --project bo
-
-   # サンドボックスプロファイルを上書き指定（例: unrestricted で調査タスクを実行）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py run --task 20260301-001 --sandbox-profile unrestricted
-   ```
-
-3. `index.jsonl` と `.md` の status を `running` に更新
-
-### ジョブ完了後の処理
-
-#### オーケストレーション有効時（プロジェクトに `orchestration` 設定あり）
-
-ジョブ完了後の処理は自動化される:
-
-1. **実行ジョブ完了** → 評価ジョブが自動ディスパッチされる
-2. **評価ジョブ**が達成条件を判定し、verdict を出力:
-   - **PASS** → `done`（完了）
-   - **RETRY** → `reshaping` → 精査ジョブが自動ディスパッチされ、`scoped` → 自動承認 → 再実行（ループ）
-   - **BLOCKED** → `needs_input`（ユーザの追加情報が必要、ループ停止）
-   - **ABORT** → `aborted`（実行不可能、ループ停止）
-3. `max_runs_per_generation` に到達した場合は自動で `aborted` に遷移
-
-#### オーケストレーション無効時（手動フロー）
-
-ジョブ完了（成功・失敗問わず）後、手動でタスクを `reshaping` に戻す:
-
-1. ディスパッチャーのジョブ結果を確認（`dispatcher.py status` または `dispatcher.py log --id {dispatch_id}`）
-
-2. `tasks/{id}.md` の `## 実行履歴` セクションに結果を追記:
-   ```markdown
-   ### Run {run_count + 1}
-
-   - 日時: {finished_at}
-   - 結果: {成功 or 失敗}
-   - 終了コード: {exit_code}
-   - 要約: （ジョブログから主要な結果を要約）
-   ```
-
-3. `index.jsonl` の `run_count` をインクリメント
-
-4. `index.jsonl` と `.md` の status を `reshaping` に更新
-
-### 対話セッション
-
-ジョブ管理の対象外で対話セッションを起動する場合:
-```bash
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo [--session main]
-
-# サンドボックスプロファイルを上書きして対話セッションを起動
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --sandbox-profile unrestricted
-```
-
----
-
-## 7. ステータス確認
+## 5. ステータス確認
 
 タスク一覧やジョブ状況を表示する。
 
@@ -372,7 +224,7 @@ python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --sand
 
 ---
 
-## 8. タスク操作（データソース側）
+## 6. タスク操作（データソース側）
 
 データソース側のタスクを操作する（ステータス変更、担当者変更、新規作成等）。
 
@@ -390,36 +242,11 @@ python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --sand
    atl jira issue update --key UBS-101 --status "Done" --site urbanb
    ```
 
-4. 操作後、タスク収集を実行（操作1）してリポジトリに反映
+4. 操作後、必要に応じてタスク収集を実行（操作1）してリポジトリに反映
 
 ---
 
-## 9. 完了確認・完了時アクション
-
-`reshaping` タスク（`run_count > 0`）の結果を確認し、完了と判断した場合に `done` に遷移させ、後処理を実行する。
-
-### 手順
-
-1. `tasks/index.jsonl` から `status=reshaping` かつ `run_count > 0` のタスクを一覧
-
-2. 各タスクの `tasks/{id}.md` の `## 実行履歴` セクションを確認し、ユーザーに結果を提示
-
-3. ユーザーが完了を確認した場合:
-   a. `## 完了時アクション` セクションに記載されたアクションを実行:
-      - データソース側のステータス更新（操作8を活用）
-      - PR の作成
-      - 通知の送信
-      - etc.
-   b. `index.jsonl` と `.md` の status を `done` に更新
-
-4. ユーザーが再作業が必要と判断した場合:
-   - タスクは `reshaping` のまま。操作3（タスク精査）で再精査 → `scoped` → 操作5 → 操作6 のフローを繰り返す
-
-5. 完了後、必要に応じてタスク収集（操作1）を実行して GC させる
-
----
-
-## 10. 設定管理
+## 7. 設定管理
 
 プロジェクト・データソースの CRUD を行う。
 
@@ -484,7 +311,7 @@ python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --sand
 
 ---
 
-## 11. 精査対象選択
+## 8. 精査対象選択
 
 `pending` タスクを `reshaping`（精査対象）にする。ユーザが明示的に精査対象を選択するステップ。
 
@@ -503,4 +330,19 @@ python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --sand
 
 ### 例
 
-- 「これを精査して」「次にやる」→ `pending` → `reshaping`（その後、操作3 タスク精査を実行）
+- 「これを精査して」「次にやる」→ `pending` → `reshaping`（その後、操作3 dispatch を実行）
+
+---
+
+## 9. 対話セッション
+
+ジョブ管理の対象外で対話セッションを起動する。
+
+### 手順
+
+```bash
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo [--session main]
+
+# サンドボックスプロファイルを上書きして対話セッションを起動
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher.py open --project bo --sandbox-profile unrestricted
+```
