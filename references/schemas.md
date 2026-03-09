@@ -128,57 +128,36 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 | `title` | string | Yes | タスクタイトル |
 | `status` | string | Yes | タスクステータス |
 | `project_id` | string | No | 紐づくプロジェクトの ID |
-| `run_count` | integer | No | ジョブ実行回数（デフォルト: `0`）。評価ジョブが完了時にインクリメントする |
+| `lifecycle_id` | string | No | 関連する Lifecycle ID（dispatch 済みの場合） |
 | `generation` | integer | No | 再オープン世代（デフォルト: `1`）。done タスクが同じ remote_id で再度取り込まれた際にインクリメントする |
 
 ### ステータス定義
 
 ```
-pending → reshaping ⇄ needs_input
-            ↑  ↓
-            │  scoped → [auto_approve / 初回は手動] → approved → running
-            │                                                       ↓
-            │                                                  evaluating
-            │                                                 ↙    ↓    ↘
-            │                                           RETRY   PASS   BLOCKED
-            │                                             ↓       ↓       ↓
-            └─────────────────────────────────────────────┘     done   needs_input
-                                                                         ↓
-                                                                     [ユーザ回答]
-                                                                         ↓
-                                                                     reshaping
-                                                                     (ループ継続)
+pending → in_progress → done
+              ↕          ↗
+          suspended → aborted
 
-※ ABORT / max_runs 到達 → aborted
-※ done → sync で同じ remote_id が再出現 → reshaping（再オープン、generation++）
+※ done → sync で同じ remote_id が再出現 → pending（再オープン、generation++）
 ```
 
 | ステータス | 意味 |
 |-----------|------|
 | `pending` | データソースから取り込まれた初期状態 |
-| `reshaping` | 精査・見直しプロセス中。初回精査（`run_count=0`）とジョブ実行後の再精査（`run_count>0`）の両方を含む |
-| `needs_input` | 質問が生成されたが、未回答の項目がある。精査時（仕様の曖昧さ）と評価時（実行時ブロッカー）の両方で使用される。manual プロジェクトでは全回答後 `done` へ直接遷移 |
-| `scoped` | 前提条件・達成条件が明確で、実行プロンプトが生成済み（精査ジョブが scoped 遷移時に同時生成） |
-| `approved` | ユーザがプロンプトを承認し、実行待ち。オーケストレーション有効時は自動遷移も可能 |
-| `running` | ディスパッチャーで実行中 |
-| `done` | 完了（評価ジョブの PASS 判定、またはユーザが明示的に完了とした状態） |
-| `aborted` | 実行不可能と判断された状態（ABORT 判定、または max_runs 到達） |
+| `in_progress` | Lifecycle にディスパッチ済み |
+| `suspended` | ユーザーアクション待ち（詳細は Lifecycle の suspend_reason を参照） |
+| `done` | 完了 |
+| `aborted` | 中止 |
 
 ### 遷移ルール補足
 
-- `pending` → `reshaping`: ユーザが精査対象として選択したとき
-- `reshaping` → `scoped`: 精査ジョブで未決事項がなく達成条件が明確な場合
-- `reshaping` → `needs_input`: 精査ジョブで未決事項がある場合
-- `scoped` → `approved`: ユーザが承認、またはオーケストレーションによる自動承認
-- `approved` → `running`: ディスパッチャーでジョブ実行開始
-- `running` → 評価ジョブ: 実行ジョブ完了後、オーケストレーション有効時は自動で評価ジョブをディスパッチ
-- 評価ジョブ → `done`: PASS 判定
-- 評価ジョブ → `reshaping`: RETRY 判定（`run_count` をインクリメント）。オーケストレーション有効時は自動で精査ジョブをディスパッチし、ループ継続
-- 評価ジョブ → `needs_input`: BLOCKED 判定（ユーザの追加情報が必要）
-- 評価ジョブ → `aborted`: ABORT 判定、または `max_runs_per_generation` 到達
-- `reshaping` → `done`: ユーザがタスクの完了を確認したとき（操作9）。完了時アクションも同時に実行する
-- `done` → `reshaping`: 同じ remote_id のタスクが再度取り込まれたとき（再オープン、`generation` をインクリメント）
-- **manual プロジェクト短縮フロー**: プロジェクト定義に `working_directory` がないプロジェクトは manual 扱い。`needs_input` で全未決事項が `[x]` になったら `scoped` / `approved` / `running` をスキップし `done` へ直接遷移する。完了時アクション（操作9）は通常通り実行する
+- dispatch 時: `pending` → `in_progress`
+- Lifecycle suspend: `in_progress` → `suspended`
+- Lifecycle resume: `suspended` → `in_progress`
+- Lifecycle done(PASS): `in_progress` → `done`
+- Lifecycle done(ABORT/max_runs): `in_progress` → `aborted`
+- `done` → `pending`: 同じ remote_id のタスクが再度取り込まれたとき（再オープン、`generation` をインクリメント）
+- **manual プロジェクト短縮フロー**: プロジェクト定義に `working_directory` がないプロジェクトは manual 扱い。`suspended` で全未決事項が `[x]` になったら `done` へ直接遷移する。完了時アクション（操作9）は通常通り実行する
 
 ### ID 生成規則
 
@@ -189,8 +168,8 @@ pending → reshaping ⇄ needs_input
 ### 例
 
 ```jsonl
-{"id":"20260301-001","remote_id":"UBS-101","datasource_id":"jira","title":"API実装","status":"pending","project_id":"ubs-mgmt-tool","run_count":0,"generation":1}
-{"id":"20260301-002","remote_id":"abc123","datasource_id":"ms-todo","title":"書類提出","status":"needs_input","project_id":"","run_count":0,"generation":1}
+{"id":"20260301-001","remote_id":"UBS-101","datasource_id":"jira","title":"API実装","status":"pending","project_id":"ubs-mgmt-tool","generation":1}
+{"id":"20260301-002","remote_id":"abc123","datasource_id":"ms-todo","title":"書類提出","status":"suspended","project_id":"","generation":1}
 ```
 
 ---
@@ -480,17 +459,18 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 
 ## 6. Lifecycle（ライフサイクル状態）
 
-タスクのライフサイクルを管理するステートマシン。
+ジョブチェーンの状態を管理するステートマシン。タスク管理の知識を持たない純粋なジョブオーケストレータ。
 永続化: `$XDG_RUNTIME_DIR/my-tasks-dispatch/lifecycles.jsonl`
+コンテキスト: `$XDG_RUNTIME_DIR/my-tasks-dispatch/{lifecycle_id}.context.md`
 
 ### フィールド
 
 | フィールド | 型 | 説明 |
 |---|---|---|
 | `lifecycle_id` | string | 識別子（`lc-{連番}` 形式） |
-| `task_id` | string\|null | タスク ID（直接投入時は null） |
 | `project_id` | string | プロジェクト ID |
 | `prompt` | string | 元の依頼内容 |
+| `context_path` | string | コンテキストファイルの絶対パス（直接投入時は空） |
 | `status` | string | `reshaping` \| `running` \| `evaluating` \| `suspend` \| `done` |
 | `suspend_reason` | string\|null | suspend 時の理由: `needs_input`, `approval_required`, `project_confirmation` |
 | `run_count` | integer | 実行回数 |
@@ -502,8 +482,8 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 ### 例
 
 ```jsonl
-{"lifecycle_id":"lc-1","task_id":"20260301-001","project_id":"bo","prompt":"API実装","status":"running","suspend_reason":null,"run_count":0,"max_runs":5,"current_dispatch_id":"bo-3","created_at":"2026-03-01T10:00:00+09:00","updated_at":"2026-03-01T10:05:00+09:00"}
-{"lifecycle_id":"lc-2","task_id":"20260301-002","project_id":"ubs","prompt":"バグ修正","status":"suspend","suspend_reason":"needs_input","run_count":1,"max_runs":5,"current_dispatch_id":null,"created_at":"2026-03-01T09:00:00+09:00","updated_at":"2026-03-01T09:30:00+09:00"}
+{"lifecycle_id":"lc-1","project_id":"bo","prompt":"API実装","context_path":"/run/user/1000/my-tasks-dispatch/lc-1.context.md","status":"running","suspend_reason":null,"run_count":0,"max_runs":5,"current_dispatch_id":"bo-3","created_at":"2026-03-01T10:00:00+09:00","updated_at":"2026-03-01T10:05:00+09:00"}
+{"lifecycle_id":"lc-2","project_id":"ubs","prompt":"バグ修正","context_path":"/run/user/1000/my-tasks-dispatch/lc-2.context.md","status":"suspend","suspend_reason":"needs_input","run_count":1,"max_runs":5,"current_dispatch_id":null,"created_at":"2026-03-01T09:00:00+09:00","updated_at":"2026-03-01T09:30:00+09:00"}
 ```
 
 ---
@@ -548,7 +528,6 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 |---|---|---|
 | `dispatch_id` | string | 識別子（`{project_id}-{連番}` 形式、例: `bo-1`） |
 | `project_id` | string | プロジェクト ID |
-| `task_id` | string\|null | タスク ID（`run --task` の場合） |
 | `lifecycle_id` | string\|null | 所属する Lifecycle ID（Lifecycle 経由のジョブのみ） |
 | `status` | string | `queued` \| `running` \| `done` \| `failed` |
 | `pid` | integer\|null | 子プロセスの PID |
@@ -560,7 +539,7 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 
 ```json
 {"ok": true, "jobs": [
-  {"dispatch_id": "bo-1", "project_id": "bo", "task_id": "20260301-001", "status": "running", "pid": 12345, "exit_code": null, "started_at": "2026-03-01T10:00:00+09:00", "finished_at": null},
-  {"dispatch_id": "bo-2", "project_id": "bo", "task_id": null, "status": "queued", "pid": null, "exit_code": null, "started_at": null, "finished_at": null}
+  {"dispatch_id": "bo-1", "project_id": "bo", "status": "running", "pid": 12345, "exit_code": null, "started_at": "2026-03-01T10:00:00+09:00", "finished_at": null},
+  {"dispatch_id": "bo-2", "project_id": "bo", "status": "queued", "pid": null, "exit_code": null, "started_at": null, "finished_at": null}
 ]}
 ```

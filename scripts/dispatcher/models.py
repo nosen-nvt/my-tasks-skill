@@ -44,9 +44,9 @@ def is_inside_sandbox() -> bool:
 @dataclass
 class Lifecycle:
     lifecycle_id: str
-    task_id: str | None
     project_id: str
     prompt: str
+    context_path: str = ""
     status: str = "reshaping"
     suspend_reason: str | None = None
     run_count: int = 0
@@ -58,9 +58,9 @@ class Lifecycle:
     def to_dict(self) -> dict:
         return {
             "lifecycle_id": self.lifecycle_id,
-            "task_id": self.task_id,
             "project_id": self.project_id,
             "prompt": self.prompt,
+            "context_path": self.context_path,
             "status": self.status,
             "suspend_reason": self.suspend_reason,
             "run_count": self.run_count,
@@ -75,7 +75,6 @@ class Lifecycle:
 class Job:
     dispatch_id: str
     project_id: str
-    task_id: str | None
     prompt: str
     working_dir: str
     job_type: str = "execute"  # "execute" | "evaluate" | "refine"
@@ -93,7 +92,6 @@ class Job:
         return {
             "dispatch_id": self.dispatch_id,
             "project_id": self.project_id,
-            "task_id": self.task_id,
             "job_type": self.job_type,
             "status": self.status,
             "pid": self.pid,

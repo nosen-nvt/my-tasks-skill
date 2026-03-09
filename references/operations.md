@@ -98,13 +98,14 @@
 
 ## 3. dispatch（ライフサイクル開始）
 
-タスクのライフサイクルを開始する。Lifecycle ステートマシンが精査→承認→実行→評価を自動制御する。
+ジョブチェーン（Lifecycle）を開始する。CLI がタスク情報を解決し、サーバーにはコンテキストとして送信する。
+Lifecycle はタスク管理の知識を持たない純粋なジョブオーケストレータ。
 
 ### 手順
 
 1. ライフサイクルを開始:
    ```bash
-   # タスク ID 指定（pending → reshaping 自動遷移、精査ジョブ自動実行）
+   # タスク ID 指定（CLI がタスク .md を読み、コンテキストとしてサーバーに送信）
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch --task 20260301-001
 
    # プロジェクト + プロンプト指定（タスクなしの直接投入）
@@ -119,7 +120,7 @@
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher status
    ```
 
-### ステートマシン
+### Lifecycle ステートマシン
 
 ```
 dispatch → reshaping → 精査ジョブ → scoped
@@ -131,6 +132,16 @@ dispatch → reshaping → 精査ジョブ → scoped
                                        └── 手動承認が必要 → suspend (approval_required)
 精査ジョブ → needs_input → suspend (needs_input)
 精査ジョブ → reshaping（問題なし）→ done
+```
+
+### タスクステータス遷移（CLI/スキル側で管理）
+
+```
+dispatch 時:           pending → in_progress
+Lifecycle suspend:     in_progress → suspended
+Lifecycle resume:      suspended → in_progress
+Lifecycle done(PASS):  in_progress → done
+Lifecycle done(ABORT/max_runs): in_progress → aborted
 ```
 
 ### suspend 理由
@@ -145,12 +156,12 @@ dispatch → reshaping → 精査ジョブ → scoped
 
 精査ジョブは以下を実行する:
 
-1. タスク md とプロジェクト定義を読み込み
+1. コンテキストファイル（`.context.md`）とプロジェクト定義を読み込み
 2. 必要に応じて作業ディレクトリ配下のソースコードを調査
 3. 未決事項を分析:
    - **未決事項がある場合**: `## 未決事項` にチェックボックス形式で質問を記載し、`needs_input` に遷移
    - **未決事項がない場合**: `## 概要`、`## 事前条件`、`## 達成条件`、`## 完了時アクション` を記載し、`scoped` に遷移。`## 実行プロンプト` も同時に生成
-4. `tasks/{id}.md` と `tasks/index.jsonl` を更新
+4. コンテキストファイルを更新
 
 ### 達成条件の記述ルール
 
@@ -169,7 +180,7 @@ dispatch → reshaping → 精査ジョブ → scoped
 ### manual プロジェクト
 
 `working_directory` が未設定のプロジェクトは manual 扱い。精査ジョブはスキップされ、メインセッションで直接処理する:
-- `scoped` / `approved` / `running` をスキップし `done` に直接遷移
+- `done` に直接遷移
 - 完了時アクション（データソース側のステータス更新等）は通常通り実行する
 
 ---
@@ -185,12 +196,15 @@ suspend 中のライフサイクルを再開する。
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher status
    ```
 
-2. `needs_input` の場合: タスク md の未決事項に回答し `[x]` に更新
+2. `needs_input` の場合: コンテキストファイルの未決事項に回答し `[x]` に更新
 
 3. ライフサイクルを再開:
    ```bash
    # 通常の再開（needs_input 回答済み / approval_required 承認）
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher resume --id lc-1
+
+   # コンテキスト更新付きの再開（更新済みファイルを渡す）
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher resume --id lc-1 --context-file /path/to/updated.md
 
    # プロジェクト確認の場合（project_confirmation）
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher resume --id lc-1 --project correct-project-id
@@ -311,26 +325,23 @@ suspend 中のライフサイクルを再開する。
 
 ---
 
-## 8. 精査対象選択
+## 8. 精査・ディスパッチ
 
-`pending` タスクを `reshaping`（精査対象）にする。ユーザが明示的に精査対象を選択するステップ。
+`pending` タスクを精査・ディスパッチする。
 
-### 手順（pending → reshaping）
+### 手順
 
-1. 対象タスクの `tasks/index.jsonl` エントリを確認し、`status` が `pending` であることを確認
-
-2. `index.jsonl` の当該エントリの `status` を `reshaping` に更新
-
-3. `tasks/{id}.md` の `- Status:` 行を `reshaping` に更新
+- **Lifecycle 経由（操作3 dispatch）**: `pending` タスクを指定して dispatch すると、CLI が `pending` → `in_progress` に自動遷移し、タスク .md をコンテキストとして Lifecycle に送信する
+- **refine.py 経由（直接精査）**: `pending` タスクを refine.py で精査ジョブとして投入する（Lifecycle を経由しない単発精査）
 
 ### 制約
 
-- `pending` → `reshaping` 遷移は `status=pending` のタスクのみ可
 - git commit は不要（tasks/ は gitignore 対象）
 
 ### 例
 
-- 「これを精査して」「次にやる」→ `pending` → `reshaping`（その後、操作3 dispatch を実行）
+- 「これをディスパッチして」→ 操作3 dispatch を実行
+- 「精査して」→ refine.py で直接精査
 
 ---
 

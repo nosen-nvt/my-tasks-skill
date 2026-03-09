@@ -27,7 +27,9 @@ from .models import (
     DEFAULT_MAX_SLOTS, DEFAULT_REPO, SOCKET_DIR_NAME,
     get_socket_path, get_repo_dir, is_inside_sandbox,
 )
-from . import tasks as task_helpers
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import task_helpers
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +115,6 @@ def cmd_run(args: argparse.Namespace) -> None:
         request = {
             "command": "run",
             "project_id": project_id,
-            "task_id": args.task,
             "job_type": "execute",
             "prompt": prompt,
         }
@@ -128,8 +129,6 @@ def cmd_run(args: argparse.Namespace) -> None:
             "project_id": args.project,
             "prompt": prompt,
         }
-        if args.task_id:
-            request["task_id"] = args.task_id
         if args.job_type:
             request["job_type"] = args.job_type
 
@@ -181,9 +180,8 @@ def cmd_status(args: argparse.Namespace) -> None:
     if active_lcs:
         print("Lifecycles:", file=sys.stderr)
         for lc in active_lcs:
-            task_str = lc.get("task_id", "") or "-"
             reason = f" ({lc['suspend_reason']})" if lc.get("suspend_reason") else ""
-            print(f"  {lc['lifecycle_id']:<10} {lc['status']:<12}{reason}  project={lc['project_id']:<12} task={task_str:<16} runs={lc.get('run_count', 0)}/{lc.get('max_runs', 5)}")
+            print(f"  {lc['lifecycle_id']:<10} {lc['status']:<12}{reason}  project={lc['project_id']:<12} runs={lc.get('run_count', 0)}/{lc.get('max_runs', 5)}")
         print(file=sys.stderr)
 
     if not jobs and not active_lcs:
@@ -194,9 +192,8 @@ def cmd_status(args: argparse.Namespace) -> None:
         print("Jobs:", file=sys.stderr)
         for job in jobs:
             pid_str = str(job.get("pid", "")) or "-"
-            task_str = job.get("task_id", "") or "-"
             jtype = job.get("job_type", "execute")
-            print(f"  {job['dispatch_id']:<20} {job['status']:<10} {jtype:<10} pid={pid_str:<8} task={task_str:<16} {job.get('started_at') or '-'}")
+            print(f"  {job['dispatch_id']:<20} {job['status']:<10} {jtype:<10} pid={pid_str:<8} {job.get('started_at') or '-'}")
 
         counts: dict[str, int] = {}
         for job in jobs:
@@ -212,14 +209,32 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 def cmd_dispatch_cli(args: argparse.Namespace) -> None:
     request: dict[str, Any] = {"command": "dispatch"}
+
     if args.task:
-        request["task_id"] = args.task
-    if args.project:
-        request["project_id"] = args.project
-    if args.prompt:
-        request["prompt"] = args.prompt
-    elif not args.task and not sys.stdin.isatty():
-        request["prompt"] = sys.stdin.read().strip()
+        repo_dir = get_repo_dir(args.repo)
+        tasks_dir = repo_dir / "tasks"
+        task_entry = task_helpers.load_task_entry(tasks_dir, args.task)
+        if not task_entry:
+            print(f"エラー: タスクが見つかりません: {args.task}", file=sys.stderr)
+            sys.exit(1)
+        project_id = args.project or task_entry.get("project_id", "")
+        prompt = args.prompt or task_entry.get("title", "")
+        task_md = task_helpers.read_file(tasks_dir / f"{args.task}.md")
+        request["project_id"] = project_id
+        request["prompt"] = prompt
+        if task_md:
+            request["context"] = task_md
+        # タスクステータスを CLI 側で更新
+        if task_entry.get("status") == "pending":
+            task_helpers.update_task_index(tasks_dir, args.task, {"status": "in_progress"})
+            task_helpers.update_task_md_status(tasks_dir, args.task, "in_progress")
+    else:
+        if args.project:
+            request["project_id"] = args.project
+        if args.prompt:
+            request["prompt"] = args.prompt
+        elif not sys.stdin.isatty():
+            request["prompt"] = sys.stdin.read().strip()
 
     response = asyncio.run(client_send(request))
     if response.get("ok"):
@@ -235,6 +250,8 @@ def cmd_resume_cli(args: argparse.Namespace) -> None:
     request: dict[str, Any] = {"command": "resume", "lifecycle_id": args.id}
     if args.project:
         request["project_id"] = args.project
+    if args.context_file:
+        request["context_update"] = Path(args.context_file).read_text(encoding="utf-8")
 
     response = asyncio.run(client_send(request))
     if response.get("ok"):
@@ -323,7 +340,6 @@ def main() -> None:
         "--repo", default=DEFAULT_REPO, metavar="PATH",
         help=f"タスク管理リポジトリのパス（デフォルト: {DEFAULT_REPO}）",
     )
-    p_run.add_argument("--task-id", help="タスク ID（--project モードでオーケストレーション用に指定）")
     p_run.add_argument("--job-type", default=None, help="ジョブタイプ: execute, evaluate, refine")
     p_run.add_argument("--sandbox-profile", help="サンドボックスプロファイルを上書き指定")
     p_run.set_defaults(func=cmd_run)
@@ -340,12 +356,17 @@ def main() -> None:
     p_dispatch.add_argument("--task", help="タスク ID")
     p_dispatch.add_argument("--project", help="プロジェクト ID")
     p_dispatch.add_argument("--prompt", help="プロンプト（省略時は stdin）")
+    p_dispatch.add_argument(
+        "--repo", default=DEFAULT_REPO, metavar="PATH",
+        help=f"タスク管理リポジトリのパス（デフォルト: {DEFAULT_REPO}）",
+    )
     p_dispatch.set_defaults(func=cmd_dispatch_cli)
 
     # resume
     p_resume = subparsers.add_parser("resume", help="suspend 中のライフサイクルを再開する")
     p_resume.add_argument("--id", required=True, help="ライフサイクル ID")
     p_resume.add_argument("--project", default=None, help="プロジェクト ID（project_confirmation 時に指定）")
+    p_resume.add_argument("--context-file", default=None, help="更新されたコンテキストファイル")
     p_resume.set_defaults(func=cmd_resume_cli)
 
     # status

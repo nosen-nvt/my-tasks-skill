@@ -105,9 +105,9 @@ def find_targets(
 
         status = entry.get("status", "")
 
-        if status == "reshaping":
+        if status in ("pending", "reshaping"):  # reshaping は後方互換
             targets.append(entry)
-        elif status == "needs_input" and include_clarified:
+        elif status in ("suspended", "needs_input") and include_clarified:  # needs_input は後方互換
             md = read_task_md(tasks_dir, entry["id"])
             if md and is_all_answered(md):
                 targets.append(entry)
@@ -315,9 +315,9 @@ def build_prompt(
     status = entry.get("status", "")
     run_count = entry.get("run_count", 0)
 
-    if status == "needs_input":
+    if status in ("suspended", "needs_input"):  # needs_input は後方互換
         template = RECLARIFY_TEMPLATE
-    elif status == "reshaping" and run_count > 0:
+    elif run_count > 0:
         template = REREFINEMENT_TEMPLATE
     else:
         template = TRIAGE_TEMPLATE
@@ -351,7 +351,6 @@ async def dispatch_one(
         sys.executable, str(DISPATCHER),
         "run",
         "--project", entry["project_id"],
-        "--task-id", entry["id"],
         "--job-type", "refine",
         "--repo", repo,
     ]

@@ -18,7 +18,6 @@ from .models import (
     DEFAULT_SESSION_NAME, SOCKET_DIR_NAME,
     get_socket_path, get_cred_broker_socket_path, get_repo_dir,
 )
-from . import tasks as task_helpers
 from .cred import CredentialBroker
 from .lifecycle import LifecycleManager
 
@@ -123,7 +122,6 @@ class DispatchServer:
 
     async def cmd_run(self, request: dict) -> dict:
         project_id = request.get("project_id", "")
-        task_id = request.get("task_id")
         prompt = request.get("prompt", "")
         job_type = request.get("job_type", "execute")
 
@@ -155,7 +153,6 @@ class DispatchServer:
         job = Job(
             dispatch_id=dispatch_id,
             project_id=project_id,
-            task_id=task_id,
             prompt=prompt,
             working_dir=working_dir,
             job_type=job_type,
@@ -272,20 +269,10 @@ class DispatchServer:
     # --- dispatch / resume コマンド ---
 
     async def cmd_dispatch(self, request: dict) -> dict:
-        task_id = request.get("task_id")
         project_id = request.get("project_id")
         prompt = request.get("prompt", "")
-
-        if task_id:
-            task_entry = task_helpers.load_task_entry(self.repo_dir / "tasks", task_id)
-            if not task_entry:
-                return {"ok": False, "error": f"Task not found: {task_id}"}
-            project_id = project_id or task_entry.get("project_id")
-            prompt = prompt or task_entry.get("title", "")
-
-            if task_entry.get("status") == "pending":
-                task_helpers.update_task_index(self.repo_dir / "tasks", task_id, {"status": "reshaping"})
-                task_helpers.update_task_md_status(self.repo_dir / "tasks", task_id, "reshaping")
+        context = request.get("context", "")
+        max_runs = request.get("max_runs")
 
         if not project_id:
             project_id = await self._classify_project(prompt)
@@ -298,13 +285,13 @@ class DispatchServer:
         if not project.get("working_directory"):
             return {"ok": False, "error": f"manual project: {project_id}"}
 
-        orchestration = project.get("orchestration", {})
-        max_runs = orchestration.get("max_runs_per_generation", 5)
+        if max_runs is None:
+            orchestration = project.get("orchestration", {})
+            max_runs = orchestration.get("max_runs_per_generation", 5)
 
         mgr = self.lifecycle_mgr
         lc = Lifecycle(
             lifecycle_id=mgr.generate_id(),
-            task_id=task_id,
             project_id=project_id,
             prompt=prompt,
             max_runs=max_runs,
@@ -312,6 +299,8 @@ class DispatchServer:
             updated_at=now_iso(),
         )
         mgr.lifecycles[lc.lifecycle_id] = lc
+        if context:
+            mgr._init_context(lc, context)
         mgr._save()
 
         await mgr.dispatch_refine(lc)
@@ -325,6 +314,7 @@ class DispatchServer:
 
     async def cmd_resume(self, request: dict) -> dict:
         lifecycle_id = request.get("lifecycle_id")
+        context_update = request.get("context_update")
         mgr = self.lifecycle_mgr
         lc = mgr.lifecycles.get(lifecycle_id) if lifecycle_id else None
         if not lc:
@@ -332,9 +322,14 @@ class DispatchServer:
         if lc.status != "suspend":
             return {"ok": False, "error": f"Lifecycle is not suspended (current: {lc.status})"}
 
+        if context_update and lc.context_path:
+            Path(lc.context_path).write_text(context_update, encoding="utf-8")
+
+        prev_reason = lc.suspend_reason
+
         if lc.suspend_reason == "needs_input":
             mgr._update_status(lc, "reshaping")
-            await mgr.dispatch_refine(lc)
+            await mgr.dispatch_refine(lc, prev_suspend_reason=prev_reason)
         elif lc.suspend_reason == "approval_required":
             mgr._update_status(lc, "running")
             await mgr.dispatch_execute(lc)
@@ -463,7 +458,7 @@ class DispatchServer:
     # --- 内部ディスパッチ ---
 
     async def _dispatch_internal(
-        self, project_id: str, task_id: str | None, prompt: str, job_type: str,
+        self, project_id: str, prompt: str, job_type: str,
         lifecycle_id: str | None = None, dispatch_id_hint: str | None = None,
     ) -> str:
         project = sandbox_exec.load_project(project_id, self.repo_dir)
@@ -488,7 +483,6 @@ class DispatchServer:
         job = Job(
             dispatch_id=dispatch_id,
             project_id=project_id,
-            task_id=task_id,
             prompt=prompt,
             working_dir=working_dir,
             job_type=job_type,
@@ -642,7 +636,10 @@ class DispatchServer:
             try:
                 log_dir = self._log_path("_").parent
                 now = datetime.now().timestamp()
-                for p in list(log_dir.glob("*.log")) + list(log_dir.glob("*.result.json")):
+                done_lc_ids = {lc.lifecycle_id for lc in self.lifecycle_mgr.lifecycles.values() if lc.status == "done"}
+                for p in list(log_dir.glob("*.log")) + list(log_dir.glob("*.result.json")) + list(log_dir.glob("*.context.md")):
+                    if p.suffix == ".md" and p.stem.replace(".context", "") not in done_lc_ids:
+                        continue
                     if now - p.stat().st_mtime > max_age:
                         p.unlink()
                         log.info(f"Cleaned up old file: {p.name}")

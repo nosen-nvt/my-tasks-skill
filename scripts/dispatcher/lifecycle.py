@@ -1,4 +1,4 @@
-"""Lifecycle ステートマシン + 評価テンプレート。"""
+"""Lifecycle ステートマシン + テンプレート。"""
 
 import json
 import os
@@ -10,18 +10,196 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import sandbox_exec
 
 from .models import Lifecycle, Job, log, now_iso, SOCKET_DIR_NAME
-from . import tasks as task_helpers
 
+
+# ---------------------------------------------------------------------------
+# 精査テンプレート
+# ---------------------------------------------------------------------------
+
+REFINE_TRIAGE_TEMPLATE = """\
+あなたはタスク精査エージェントです。以下のタスクを精査し、ステータスを遷移させてください。
+
+# 対象タスク
+
+ファイル: `{context_path}`
+
+```markdown
+{context}
+```
+
+# プロジェクト情報
+
+- プロジェクトID: {project_id}
+- プロジェクト名: {project_name}
+- 説明: {project_description}
+- 作業ディレクトリ: {working_directory}
+
+# 指示
+
+1. タスクの内容を分析してください。必要に応じて作業ディレクトリ配下のソースコードを調査してください。
+
+2. 以下の観点で未決事項を洗い出してください:
+   - タスクの目的・スコープが明確か
+   - 実装方針に曖昧さがないか
+   - 事前条件・依存関係が特定されているか
+   - 達成条件がAIエージェント自身でローカル検証可能か（ファイル確認、テスト実行、ビルド成功など）
+
+3. 判定:
+   - **未決事項がある場合**: `## 未決事項` セクションにチェックボックス形式で質問を記載し、`needs_input` に遷移
+   - **未決事項がない場合**: `## 概要`、`## 事前条件`、`## 達成条件`、`## 完了時アクション` を記載し、`scoped` に遷移。さらに `## 実行プロンプト` セクションに実行プロンプトを生成
+
+4. 達成条件のルール（重要）:
+   - このタスクは AI エージェントが実装・実行する前提です
+   - 達成条件は AI エージェント自身がローカルで検証可能な内容にしてください
+   - OK: ファイル内容の確認、YAML/JSON のパース検証、テスト実行結果、ビルド成功
+   - NG: ブラウザでの手動確認、外部サービスの目視確認など
+
+5. 実行プロンプト生成時の注意（scoped の場合）:
+   - 実行プロンプトは、別の AI エージェントがこのタスクを実行するための指示書です
+   - 背景・目的、具体的な作業手順、達成条件を含めてください
+   - 実行エージェントはタスク md の他のセクションを読まない前提で、自己完結した内容にしてください
+
+# ファイル更新
+
+`{context_path}` を更新してください（精査結果を反映）。
+
+# 結果ファイル出力
+
+以下のパスに結果 JSON を書き出してください:
+  {result_file_path}
+
+フォーマット:
+  {{"next_status": "scoped"}} — 精査完了、実行可能
+  {{"next_status": "needs_input"}} — ユーザへの質問あり
+"""
+
+REFINE_RECLARIFY_TEMPLATE = """\
+あなたはタスク精査エージェントです。以下のタスクは質問への回答が完了しています。回答を踏まえて精査を完了させてください。
+
+# 対象タスク
+
+ファイル: `{context_path}`
+
+```markdown
+{context}
+```
+
+# プロジェクト情報
+
+- プロジェクトID: {project_id}
+- プロジェクト名: {project_name}
+- 説明: {project_description}
+- 作業ディレクトリ: {working_directory}
+
+# 指示
+
+1. `## 未決事項` セクションの回答内容を確認してください。必要に応じて作業ディレクトリ配下のソースコードを調査してください。
+
+2. 回答を踏まえて以下を実施:
+   - `## 概要`、`## 事前条件`、`## 達成条件`、`## 完了時アクション` を記載（既存内容があれば更新）
+   - `scoped` に遷移
+   - `## 実行プロンプト` セクションに実行プロンプトを生成
+
+3. 達成条件のルール（重要）:
+   - このタスクは AI エージェントが実装・実行する前提です
+   - 達成条件は AI エージェント自身がローカルで検証可能な内容にしてください
+   - OK: ファイル内容の確認、YAML/JSON のパース検証、テスト実行結果、ビルド成功
+   - NG: ブラウザでの手動確認、外部サービスの目視確認など
+
+4. 実行プロンプト生成の注意:
+   - 実行プロンプトは、別の AI エージェントがこのタスクを実行するための指示書です
+   - 背景・目的、具体的な作業手順、達成条件を含めてください
+   - 実行エージェントはタスク md の他のセクションを読まない前提で、自己完結した内容にしてください
+
+# ファイル更新
+
+`{context_path}` を更新してください（精査結果を反映）。
+
+# 結果ファイル出力
+
+以下のパスに結果 JSON を書き出してください:
+  {result_file_path}
+
+フォーマット:
+  {{"next_status": "scoped"}} — 精査完了、実行可能
+"""
+
+REFINE_REREFINEMENT_TEMPLATE = """\
+あなたはタスク精査エージェントです。以下のタスクはジョブ実行後に reshaping に戻されました。実行履歴を踏まえて再精査してください。
+
+# 対象タスク
+
+ファイル: `{context_path}`
+
+```markdown
+{context}
+```
+
+# プロジェクト情報
+
+- プロジェクトID: {project_id}
+- プロジェクト名: {project_name}
+- 説明: {project_description}
+- 作業ディレクトリ: {working_directory}
+
+# 実行回数: {run_count}
+
+# 指示
+
+1. `## 実行履歴` セクションを確認し、前回の実行結果を把握してください。必要に応じて作業ディレクトリ配下のソースコードや変更差分を調査してください。
+
+2. 判定:
+   - **再作業が必要な場合**（失敗、レビュー指摘、不具合など）:
+     - `## 事前条件`、`## 達成条件` を必要に応じて修正
+     - `## 実行プロンプト` を前回の結果を踏まえて修正（何が問題だったか、どう修正すべきかを明記）
+     - `scoped` に遷移
+   - **追加の未決事項がある場合**:
+     - `## 未決事項` にチェックボックス形式で質問を記載
+     - `needs_input` に遷移
+   - **問題がない場合**（タスクは正常完了している）:
+     - `reshaping` のまま変更しない（完了確認待ち）
+     - `## 概要` の末尾に「精査結果: 正常完了を確認。完了確認待ち。」と追記
+
+3. 達成条件のルール（重要）:
+   - このタスクは AI エージェントが実装・実行する前提です
+   - 達成条件は AI エージェント自身がローカルで検証可能な内容にしてください
+   - OK: ファイル内容の確認、YAML/JSON のパース検証、テスト実行結果、ビルド成功
+   - NG: ブラウザでの手動確認、外部サービスの目視確認など
+
+4. 実行プロンプト修正時の注意:
+   - 実行プロンプトは、別の AI エージェントがこのタスクを実行するための指示書です
+   - 前回の実行で何が起きたか、今回何を修正すべきかを明確に記載してください
+   - 実行エージェントはタスク md の他のセクションを読まない前提で、自己完結した内容にしてください
+
+# ファイル更新
+
+`{context_path}` を更新してください（精査結果を反映）。
+
+# 結果ファイル出力
+
+以下のパスに結果 JSON を書き出してください:
+  {result_file_path}
+
+フォーマット:
+  {{"next_status": "scoped"}} — 精査完了、実行可能
+  {{"next_status": "needs_input"}} — ユーザへの質問あり
+  {{"next_status": "reshaping"}} — 問題なし（完了確認待ち）
+"""
+
+
+# ---------------------------------------------------------------------------
+# 評価テンプレート
+# ---------------------------------------------------------------------------
 
 EVALUATION_TEMPLATE = """\
 あなたはタスク評価エージェントです。直前の実行ジョブの結果を評価し、タスクの達成条件が満たされたか判定してください。
 
 # 対象タスク
 
-ファイル: `{tasks_dir}/{task_id}.md`
+ファイル: `{context_path}`
 
 ```markdown
-{task_md}
+{context}
 ```
 
 # 実行ログ（直前のジョブ、末尾 {log_lines} 行）
@@ -48,7 +226,7 @@ EVALUATION_TEMPLATE = """\
 
 必要に応じて作業ディレクトリ配下のソースコードや変更差分を調査してください。
 
-1. `{tasks_dir}/{task_id}.md` の「## 実行履歴」セクションに以下を追記:
+1. `{context_path}` の「## 実行履歴」セクションに以下を追記:
    ```markdown
    ### Run {next_run}
 
@@ -61,16 +239,6 @@ EVALUATION_TEMPLATE = """\
 
 2. verdict が BLOCKED の場合:
    - 「## 未決事項」セクションに質問をチェックボックス形式で追記
-
-3. `{tasks_dir}/index.jsonl` を更新:
-   - `run_count` を `{next_run}` に更新
-   - `status` を verdict に応じて設定:
-     - PASS → `done`
-     - RETRY → `reshaping`
-     - BLOCKED → `needs_input`
-     - ABORT → `aborted`
-
-index.jsonl は JSONL 形式（1行1タスク）です。該当行のみ変更し、他の行は変更しないでください。
 
 # 結果ファイル出力
 
@@ -151,6 +319,52 @@ class LifecycleManager:
         except (json.JSONDecodeError, OSError):
             return None
 
+    # --- コンテキストファイル管理 ---
+
+    def _context_dir(self) -> Path:
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}")
+        return Path(runtime_dir) / SOCKET_DIR_NAME
+
+    def _init_context(self, lc: Lifecycle, content: str):
+        """コンテキストファイルを作成し、lc.context_path を設定。"""
+        path = self._context_dir() / f"{lc.lifecycle_id}.context.md"
+        path.write_text(content, encoding="utf-8")
+        lc.context_path = str(path)
+
+    def _read_context(self, lc: Lifecycle) -> str | None:
+        """コンテキストファイルを読み込む。"""
+        if not lc.context_path:
+            return None
+        path = Path(lc.context_path)
+        return path.read_text(encoding="utf-8") if path.exists() else None
+
+    def _read_section(self, lc: Lifecycle, section: str) -> str | None:
+        """コンテキストから指定セクション（## で始まる）の内容を抽出。"""
+        context = self._read_context(lc)
+        if not context:
+            return None
+        marker = f"## {section}"
+        idx = context.find(marker)
+        if idx == -1:
+            return None
+        body = context[idx + len(marker):]
+        lines = []
+        for line in body.split("\n"):
+            if line.startswith("## "):
+                break
+            lines.append(line)
+        return "\n".join(lines).strip() or None
+
+    # --- テンプレート選択 ---
+
+    def _select_refine_template(self, lc: Lifecycle, prev_suspend_reason: str | None = None) -> str:
+        if prev_suspend_reason == "needs_input":
+            return REFINE_RECLARIFY_TEMPLATE
+        elif lc.run_count > 0:
+            return REFINE_REREFINEMENT_TEMPLATE
+        else:
+            return REFINE_TRIAGE_TEMPLATE
+
     # --- ステートマシン ---
 
     async def on_job_complete(self, job: Job):
@@ -170,9 +384,9 @@ class LifecycleManager:
     async def _on_refine_complete(self, lc: Lifecycle, job: Job, result: dict | None):
         next_status = (result or {}).get("next_status")
 
-        if not next_status and lc.task_id:
-            entry = task_helpers.load_task_entry(self.repo_dir / "tasks", lc.task_id)
-            next_status = entry.get("status") if entry else None
+        if not next_status:
+            log.error(f"Lifecycle: no refine result for {lc.lifecycle_id}")
+            return
 
         if next_status == "scoped":
             project = sandbox_exec.load_project(lc.project_id, self.repo_dir)
@@ -190,9 +404,6 @@ class LifecycleManager:
 
         elif next_status == "reshaping":
             self._update_status(lc, "done")
-            if lc.task_id:
-                task_helpers.update_task_index(self.repo_dir / "tasks", lc.task_id, {"status": "done"})
-                task_helpers.update_task_md_status(self.repo_dir / "tasks", lc.task_id, "done")
 
         else:
             log.error(f"Lifecycle: unexpected refine result for {lc.lifecycle_id}: {next_status}")
@@ -204,11 +415,9 @@ class LifecycleManager:
     async def _on_evaluate_complete(self, lc: Lifecycle, job: Job, result: dict | None):
         verdict = (result or {}).get("verdict")
 
-        if not verdict and lc.task_id:
-            entry = task_helpers.load_task_entry(self.repo_dir / "tasks", lc.task_id)
-            status = entry.get("status") if entry else None
-            verdict = {"done": "PASS", "reshaping": "RETRY",
-                       "needs_input": "BLOCKED", "aborted": "ABORT"}.get(status)
+        if not verdict:
+            log.error(f"Lifecycle: no evaluate result for {lc.lifecycle_id}")
+            return
 
         lc.run_count += 1
 
@@ -217,8 +426,6 @@ class LifecycleManager:
         elif verdict == "RETRY":
             if lc.run_count >= lc.max_runs:
                 self._update_status(lc, "done")
-                if lc.task_id:
-                    task_helpers.update_task_index(self.repo_dir / "tasks", lc.task_id, {"status": "aborted"})
             else:
                 self._update_status(lc, "reshaping")
                 await self.dispatch_refine(lc)
@@ -227,39 +434,41 @@ class LifecycleManager:
             self._update_status(lc, "suspend")
         elif verdict == "ABORT":
             self._update_status(lc, "done")
-            if lc.task_id:
-                task_helpers.update_task_index(self.repo_dir / "tasks", lc.task_id, {"status": "aborted"})
         else:
             log.error(f"Lifecycle: unknown verdict for {lc.lifecycle_id}: {verdict}")
 
     # --- ディスパッチヘルパー ---
 
-    async def dispatch_refine(self, lc: Lifecycle):
-        import refine as refine_mod
-
-        tasks_dir = self.repo_dir / "tasks"
-        projects_dir = self.repo_dir / "projects"
-
-        if lc.task_id:
-            task_entry = task_helpers.load_task_entry(tasks_dir, lc.task_id)
-            task_md = task_helpers.read_file(tasks_dir / f"{lc.task_id}.md")
-            project = refine_mod.load_project(projects_dir, lc.project_id)
-            if not all([task_entry, task_md, project]):
-                log.error(f"Lifecycle: missing data for refine: {lc.lifecycle_id}")
-                return
-
-            dispatch_id = self._generate_dispatch_id(lc.project_id)
-            result_file_path = str(self._result_path(dispatch_id))
-            prompt = refine_mod.build_prompt(task_entry, task_md, project, tasks_dir,
-                                             result_file_path=result_file_path)
-        else:
+    async def dispatch_refine(self, lc: Lifecycle, prev_suspend_reason: str | None = None):
+        context = self._read_context(lc)
+        if not context:
+            # context なし → refine スキップ、直接 execute
             self._update_status(lc, "running")
             await self.dispatch_execute(lc)
             return
 
+        template = self._select_refine_template(lc, prev_suspend_reason)
+        project = sandbox_exec.load_project(lc.project_id, self.repo_dir)
+        if not project:
+            log.error(f"Lifecycle: project not found: {lc.project_id}")
+            return
+
+        dispatch_id = self._generate_dispatch_id(lc.project_id)
+        result_file_path = str(self._result_path(dispatch_id))
+
+        prompt = template.format(
+            context_path=lc.context_path,
+            context=context,
+            project_id=lc.project_id,
+            project_name=project.get("name", ""),
+            project_description=project.get("description", ""),
+            working_directory=project.get("working_directory", ""),
+            run_count=lc.run_count,
+            result_file_path=result_file_path,
+        )
+
         actual_dispatch_id = await self._dispatch_fn(
             project_id=lc.project_id,
-            task_id=lc.task_id,
             prompt=prompt,
             job_type="refine",
             lifecycle_id=lc.lifecycle_id,
@@ -269,32 +478,20 @@ class LifecycleManager:
         self._save()
 
     async def dispatch_execute(self, lc: Lifecycle):
-        if lc.task_id:
-            prompt = task_helpers.read_execution_prompt(self.repo_dir, lc.task_id)
-            if not prompt:
-                log.error(f"Lifecycle: no execution prompt for {lc.lifecycle_id}")
-                return
-            task_helpers.update_task_index(self.repo_dir / "tasks", lc.task_id, {"status": "approved"})
-            task_helpers.update_task_md_status(self.repo_dir / "tasks", lc.task_id, "approved")
-        else:
-            prompt = lc.prompt
+        prompt = self._read_section(lc, "実行プロンプト")
+        if not prompt:
+            prompt = lc.prompt  # fallback
 
         dispatch_id = await self._dispatch_fn(
             project_id=lc.project_id,
-            task_id=lc.task_id,
             prompt=prompt,
             job_type="execute",
             lifecycle_id=lc.lifecycle_id,
         )
         lc.current_dispatch_id = dispatch_id
-        if lc.task_id:
-            task_helpers.update_task_index(self.repo_dir / "tasks", lc.task_id, {"status": "running"})
-            task_helpers.update_task_md_status(self.repo_dir / "tasks", lc.task_id, "running")
         self._save()
 
     async def dispatch_evaluate(self, lc: Lifecycle, execute_job: Job):
-        tasks_dir = self.repo_dir / "tasks"
-
         log_path = self._log_path(execute_job.dispatch_id)
         execution_log = ""
         if log_path.exists():
@@ -304,15 +501,12 @@ class LifecycleManager:
                 lines = lines[-200:]
             execution_log += "\n".join(lines)
 
-        task_md = ""
+        context = self._read_context(lc) or ""
         next_run = lc.run_count + 1
-        if lc.task_id:
-            task_md = task_helpers.read_file(tasks_dir / f"{lc.task_id}.md") or ""
 
         prompt = EVALUATION_TEMPLATE.format(
-            tasks_dir=tasks_dir,
-            task_id=lc.task_id or "(direct)",
-            task_md=task_md,
+            context_path=lc.context_path,
+            context=context,
             execution_log=execution_log,
             log_lines=min(len(execution_log.splitlines()), 200),
             next_run=next_run,
@@ -323,7 +517,6 @@ class LifecycleManager:
 
         dispatch_id = await self._dispatch_fn(
             project_id=lc.project_id,
-            task_id=lc.task_id,
             prompt=prompt,
             job_type="evaluate",
             lifecycle_id=lc.lifecycle_id,

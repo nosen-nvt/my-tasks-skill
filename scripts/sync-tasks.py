@@ -358,8 +358,8 @@ def process_datasource(
             entry = existing_entries[remote_id]
 
             if entry.get("status") == "done":
-                # 再オープン: 履歴を保持したまま reshaping に戻す
-                entry["status"] = "reshaping"
+                # 再オープン: 履歴を保持したまま pending に戻す
+                entry["status"] = "pending"
                 entry["generation"] = entry.get("generation", 1) + 1
                 if entry.get("title") != t["title"]:
                     entry["title"] = t["title"]
