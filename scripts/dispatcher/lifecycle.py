@@ -368,6 +368,8 @@ class LifecycleManager:
     # --- ステートマシン ---
 
     async def on_job_complete(self, job: Job):
+        if not job.lifecycle_id:
+            return
         lc = self.lifecycles.get(job.lifecycle_id)
         if not lc:
             return

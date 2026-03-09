@@ -1,9 +1,12 @@
 """ジョブ実行 Mixin。"""
 
+from __future__ import annotations
+
 import asyncio
 import sys
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import sandbox_exec
@@ -11,16 +14,29 @@ import sandbox_exec
 from .models import Job, log, now_iso, get_cred_broker_socket_path
 from .prompt import build_system_prompt
 
+if TYPE_CHECKING:
+    from .cred import CredentialBroker
+    from .lifecycle import LifecycleManager
+
 
 class ExecutorMixin:
-    """DispatchServer にジョブ実行機能を提供する Mixin。
+    """DispatchServer にジョブ実行機能を提供する Mixin。"""
 
-    ホストクラスに以下の属性・メソッドを期待する:
-      属性: jobs, queue, waiters, _processes, max_slots, repo_dir,
-            cred_broker, lifecycle_mgr
-      メソッド: _log_path, _result_path, generate_dispatch_id,
-               count_running, running_project_ids
-    """
+    # ホストクラスが提供する属性
+    jobs: dict[str, Job]
+    queue: list[Job]
+    waiters: dict[str, list[asyncio.Future]]
+    _processes: dict[str, asyncio.subprocess.Process]
+    max_slots: int
+    repo_dir: Path
+    cred_broker: CredentialBroker
+    lifecycle_mgr: LifecycleManager
+
+    def _log_path(self, dispatch_id: str) -> Path: raise NotImplementedError
+    def _result_path(self, dispatch_id: str) -> Path: raise NotImplementedError
+    def generate_dispatch_id(self, project_id: str) -> str: raise NotImplementedError
+    def count_running(self) -> int: raise NotImplementedError
+    def running_project_ids(self) -> set[str]: raise NotImplementedError
 
     async def execute_job(self, job: Job):
         job.status = "running"
