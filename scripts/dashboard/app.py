@@ -45,12 +45,14 @@ def read_json_dir(directory: Path) -> list[dict]:
     return result
 
 
-def create_app(repo: str) -> FastAPI:
+def create_app(repo: str, base_path: str = "") -> FastAPI:
     repo_dir = Path(repo).expanduser().resolve()
     runtime_dir = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}"))
     dispatch_dir = runtime_dir / "my-tasks-dispatch"
 
-    app = FastAPI(title="my-tasks dashboard")
+    base_path = base_path.rstrip("/") if base_path else ""
+
+    app = FastAPI(title="my-tasks dashboard", root_path=base_path)
 
     watcher: FileWatcher | None = None
 
@@ -152,7 +154,15 @@ def create_app(repo: str) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
         html_path = STATIC_DIR / "index.html"
-        return HTMLResponse(html_path.read_text(encoding="utf-8"))
+        html = html_path.read_text(encoding="utf-8")
+        if base_path:
+            html = html.replace("/static/style.css", f"{base_path}/static/style.css")
+            html = html.replace("/static/app.js", f"{base_path}/static/app.js")
+        html = html.replace(
+            "</head>",
+            f'<script>window.__BASE_PATH__ = "{base_path}";</script>\n</head>',
+        )
+        return HTMLResponse(html)
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

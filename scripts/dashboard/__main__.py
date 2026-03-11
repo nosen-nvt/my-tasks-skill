@@ -22,10 +22,11 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1", help="バインドアドレス")
     parser.add_argument("--port", type=int, default=8321, help="ポート番号")
     parser.add_argument("--repo", default="~/.local/share/my-tasks", help="タスクリポジトリのパス")
+    parser.add_argument("--base-path", default="", help="リバースプロキシのベースパス (例: /dashboard)")
     args = parser.parse_args()
 
     import uvicorn
-    app = create_app(args.repo)
+    app = create_app(args.repo, args.base_path)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 

@@ -1,5 +1,7 @@
 /* my-tasks dashboard */
 
+const BASE = window.__BASE_PATH__ || "";
+
 const state = {
   projects: [],
   datasources: [],
@@ -19,11 +21,11 @@ async function fetchJSON(url) {
 
 async function loadAll() {
   const [projects, datasources, tasks, lifecycles, jobs] = await Promise.all([
-    fetchJSON("/api/projects"),
-    fetchJSON("/api/datasources"),
-    fetchJSON("/api/tasks"),
-    fetchJSON("/api/lifecycles"),
-    fetchJSON("/api/jobs"),
+    fetchJSON(`${BASE}/api/projects`),
+    fetchJSON(`${BASE}/api/datasources`),
+    fetchJSON(`${BASE}/api/tasks`),
+    fetchJSON(`${BASE}/api/lifecycles`),
+    fetchJSON(`${BASE}/api/jobs`),
   ]);
   state.projects = projects;
   state.datasources = datasources;
@@ -36,7 +38,7 @@ async function loadAll() {
 // --- SSE ---
 
 function connectSSE() {
-  const es = new EventSource("/api/events");
+  const es = new EventSource(`${BASE}/api/events`);
   const dot = document.getElementById("connection-status");
 
   es.onopen = () => {
@@ -52,18 +54,18 @@ function connectSSE() {
   };
 
   es.addEventListener("tasks_updated", async () => {
-    state.tasks = await fetchJSON("/api/tasks");
+    state.tasks = await fetchJSON(`${BASE}/api/tasks`);
     renderTasks();
     renderSidebar();
   });
 
   es.addEventListener("jobs_updated", async () => {
-    state.jobs = await fetchJSON("/api/jobs");
+    state.jobs = await fetchJSON(`${BASE}/api/jobs`);
     renderJobs();
   });
 
   es.addEventListener("lifecycles_updated", async () => {
-    state.lifecycles = await fetchJSON("/api/lifecycles");
+    state.lifecycles = await fetchJSON(`${BASE}/api/lifecycles`);
     renderLifecycles();
   });
 }
@@ -290,7 +292,7 @@ async function showTaskDetail(taskId) {
   overlay.classList.remove("hidden");
 
   try {
-    const data = await fetchJSON(`/api/tasks/${taskId}`);
+    const data = await fetchJSON(`${BASE}/api/tasks/${taskId}`);
     content.textContent = data.content || "No content";
   } catch {
     content.textContent = "Failed to load";
@@ -309,7 +311,7 @@ async function showJobLog(dispatchId) {
   overlay.classList.remove("hidden");
 
   try {
-    const data = await fetchJSON(`/api/jobs/${dispatchId}/log`);
+    const data = await fetchJSON(`${BASE}/api/jobs/${dispatchId}/log`);
     content.textContent = (data.lines || []).join("\n") || "No log";
   } catch {
     content.textContent = "Failed to load";
