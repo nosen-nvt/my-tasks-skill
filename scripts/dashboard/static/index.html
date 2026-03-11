@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>my-tasks dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <button id="menu-toggle" class="menu-btn" aria-label="メニュー">&#9776;</button>
+      <h1>my-tasks</h1>
+    </div>
+    <div class="header-right">
+      <span id="connection-status" class="status-dot disconnected" title="SSE disconnected"></span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside id="sidebar">
+      <div class="sidebar-section">
+        <h2>Projects</h2>
+        <ul id="project-list"></ul>
+      </div>
+      <div class="sidebar-section">
+        <h2>Datasources</h2>
+        <ul id="datasource-list"></ul>
+      </div>
+    </aside>
+
+    <main>
+      <nav id="tab-nav" class="tab-nav">
+        <button class="tab-btn active" data-tab="tasks">Tasks</button>
+        <button class="tab-btn" data-tab="lifecycles">Lifecycles</button>
+        <button class="tab-btn" data-tab="jobs">Jobs</button>
+      </nav>
+
+      <section id="section-tasks" class="content-section active">
+        <h2>Tasks</h2>
+        <div id="tasks-container"></div>
+      </section>
+
+      <section id="section-lifecycles" class="content-section">
+        <h2>Lifecycles</h2>
+        <div id="lifecycles-container"></div>
+      </section>
+
+      <section id="section-jobs" class="content-section">
+        <h2>Jobs</h2>
+        <div id="jobs-container"></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="detail-panel" class="detail-panel hidden">
+    <div class="detail-header">
+      <h3 id="detail-title"></h3>
+      <button id="detail-close" class="close-btn">&times;</button>
+    </div>
+    <pre id="detail-content"></pre>
+  </div>
+  <div id="detail-overlay" class="detail-overlay hidden"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

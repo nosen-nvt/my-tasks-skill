@@ -38,6 +38,7 @@ class ExecutorMixin:
     def generate_dispatch_id(self, project_id: str) -> str: raise NotImplementedError
     def count_running(self) -> int: raise NotImplementedError
     def running_project_ids(self) -> set[str]: raise NotImplementedError
+    def _save_jobs(self) -> None: raise NotImplementedError
 
     def _dispatch_dir(self) -> Path:
         runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}")
@@ -62,6 +63,7 @@ class ExecutorMixin:
     async def execute_job(self, job: Job):
         job.status = "running"
         job.started_at = now_iso()
+        self._save_jobs()
 
         cred_token = None
         if job.allowed_credentials:
@@ -100,6 +102,7 @@ class ExecutorMixin:
             )
             job.pid = proc.pid
             self._processes[job.dispatch_id] = proc
+            self._save_jobs()
             log.info(f"Job executing: {job.dispatch_id} pid={proc.pid} log={log_path}")
 
             # Primary: proc.wait(). Fallback: poll .exit file from job-wrapper.
@@ -144,6 +147,7 @@ class ExecutorMixin:
             job.finished_at = now_iso()
             self._processes.pop(job.dispatch_id, None)
             self._cleanup_sentinels(job.dispatch_id)
+            self._save_jobs()
             log.info(f"Job finished: {job.dispatch_id} status={job.status} exit_code={job.exit_code}")
 
         self._notify_waiters(job)
@@ -166,6 +170,7 @@ class ExecutorMixin:
         if job.status == "queued":
             self.queue = [j for j in self.queue if j.dispatch_id != job.dispatch_id]
             del self.jobs[job.dispatch_id]
+            self._save_jobs()
             return
 
         if job.status == "running":
@@ -184,6 +189,7 @@ class ExecutorMixin:
             job.finished_at = now_iso()
             self._processes.pop(job.dispatch_id, None)
             self._cleanup_sentinels(job.dispatch_id)
+            self._save_jobs()
             self._notify_waiters(job)
 
     def _notify_waiters(self, job: Job):
@@ -228,6 +234,7 @@ class ExecutorMixin:
             lifecycle_id=lifecycle_id,
         )
         self.jobs[dispatch_id] = job
+        self._save_jobs()
 
         if self.count_running() < self.max_slots and project_id not in self.running_project_ids():
             asyncio.create_task(self.execute_job(job))

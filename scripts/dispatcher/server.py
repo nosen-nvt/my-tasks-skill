@@ -63,6 +63,60 @@ class DispatchServer(ExecutorMixin):
         except (json.JSONDecodeError, OSError):
             return None
 
+    # --- jobs.jsonl 永続化 ---
+
+    def _jobs_path(self) -> Path:
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}")
+        return Path(runtime_dir) / SOCKET_DIR_NAME / "jobs.jsonl"
+
+    def _save_jobs(self) -> None:
+        path = self._jobs_path()
+        with open(path, "w", encoding="utf-8") as f:
+            for job in self.jobs.values():
+                f.write(json.dumps(job.to_dict(), ensure_ascii=False) + "\n")
+
+    def _load_jobs(self) -> None:
+        path = self._jobs_path()
+        if not path.exists():
+            return
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                data = json.loads(line)
+                dispatch_id = data["dispatch_id"]
+                # running/queued ジョブは再起動時に failed にフォールバック
+                if data.get("status") in ("running", "queued"):
+                    data["status"] = "failed"
+                    if not data.get("finished_at"):
+                        data["finished_at"] = now_iso()
+                job = Job(
+                    dispatch_id=dispatch_id,
+                    project_id=data["project_id"],
+                    prompt="",
+                    working_dir="",
+                    job_type=data.get("job_type", "execute"),
+                    lifecycle_id=data.get("lifecycle_id"),
+                    status=data["status"],
+                    pid=data.get("pid"),
+                    exit_code=data.get("exit_code"),
+                    started_at=data.get("started_at"),
+                    finished_at=data.get("finished_at"),
+                )
+                self.jobs[dispatch_id] = job
+                # _counter 復元: dispatch_id = "{project_id}-{seq}"
+                parts = dispatch_id.rsplit("-", 1)
+                if len(parts) == 2:
+                    try:
+                        seq = int(parts[1])
+                        project_id = parts[0]
+                        self._counter[project_id] = max(self._counter.get(project_id, 0), seq)
+                    except ValueError:
+                        pass
+        log.info(f"Loaded {len(self.jobs)} jobs from jobs.jsonl")
+        self._save_jobs()
+
     # --- ジョブ管理 ---
 
     def generate_dispatch_id(self, project_id: str) -> str:
@@ -163,6 +217,7 @@ class DispatchServer(ExecutorMixin):
             allowed_credentials=allowed_credentials,
         )
         self.jobs[dispatch_id] = job
+        self._save_jobs()
 
         if self.count_running() < self.max_slots and project_id not in self.running_project_ids():
             asyncio.create_task(self.execute_job(job))
@@ -232,6 +287,7 @@ class DispatchServer(ExecutorMixin):
 
         self.queue = [j for j in self.queue if j.dispatch_id != dispatch_id]
         del self.jobs[dispatch_id]
+        self._save_jobs()
         log.info(f"Job cancelled: {dispatch_id}")
         return {"ok": True, "dispatch_id": dispatch_id, "message": "Job cancelled"}
 
@@ -356,6 +412,7 @@ class DispatchServer(ExecutorMixin):
 
     async def cleanup_old_logs(self):
         max_age = 6 * 3600
+        job_max_age = 24 * 3600
         while True:
             await asyncio.sleep(1800)
             try:
@@ -368,6 +425,22 @@ class DispatchServer(ExecutorMixin):
                     if now - p.stat().st_mtime > max_age:
                         p.unlink()
                         log.info(f"Cleaned up old file: {p.name}")
+
+                # 完了済みジョブのプルーニング (24時間経過)
+                pruned = []
+                for dispatch_id, job in list(self.jobs.items()):
+                    if job.status in ("done", "failed") and job.finished_at:
+                        try:
+                            finished = datetime.fromisoformat(job.finished_at).timestamp()
+                            if now - finished > job_max_age:
+                                pruned.append(dispatch_id)
+                        except (ValueError, OSError):
+                            pass
+                for dispatch_id in pruned:
+                    del self.jobs[dispatch_id]
+                    log.info(f"Pruned old job: {dispatch_id}")
+                if pruned:
+                    self._save_jobs()
             except Exception as e:
                 log.error(f"Log cleanup error: {e}")
 
@@ -414,6 +487,7 @@ async def run_server(max_slots: int, repo: str):
     server = DispatchServer(max_slots=max_slots, repo_dir=repo_dir)
     server.lifecycle_mgr._load()
     log.info(f"Loaded {len(server.lifecycle_mgr.lifecycles)} lifecycles ({sum(1 for lc in server.lifecycle_mgr.lifecycles.values() if lc.status == 'suspend')} suspended)")
+    server._load_jobs()
 
     loop = asyncio.get_event_loop()
     loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(_shutdown(server, srv, cred_srv)))

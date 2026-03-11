@@ -93,6 +93,7 @@ class Job:
             "dispatch_id": self.dispatch_id,
             "project_id": self.project_id,
             "job_type": self.job_type,
+            "lifecycle_id": self.lifecycle_id,
             "status": self.status,
             "pid": self.pid,
             "exit_code": self.exit_code,
