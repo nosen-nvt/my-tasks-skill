@@ -106,6 +106,21 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
     async def api_lifecycles() -> list[dict]:
         return read_jsonl(dispatch_dir / "lifecycles.jsonl")
 
+    @app.get("/api/lifecycles/{lifecycle_id}/context")
+    async def api_lifecycle_context(lifecycle_id: str) -> JSONResponse:
+        lifecycles = read_jsonl(dispatch_dir / "lifecycles.jsonl")
+        entry = next((lc for lc in lifecycles if lc.get("lifecycle_id") == lifecycle_id), None)
+        if entry is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        context_path_str = entry.get("context_path")
+        if not context_path_str:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        context_path = Path(context_path_str)
+        if not context_path.exists() or context_path.stat().st_size == 0:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        content = context_path.read_text(encoding="utf-8")
+        return JSONResponse({"lifecycle_id": lifecycle_id, "content": content})
+
     @app.get("/api/jobs")
     async def api_jobs(lifecycle_id: str | None = Query(default=None)) -> list[dict]:
         jobs = read_jsonl(dispatch_dir / "jobs.jsonl")

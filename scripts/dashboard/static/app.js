@@ -198,7 +198,7 @@ function renderLifecycles() {
   const tbody = lcs
     .map(
       (lc) =>
-        `<tr>
+        `<tr class="clickable" data-lifecycle-id="${lc.lifecycle_id}">
       <td>${lc.lifecycle_id}</td>
       <td>${lc.project_id}</td>
       <td>${statusBadge(lc.status)}${lc.suspend_reason ? ` <span class="elapsed">(${lc.suspend_reason})</span>` : ""}</td>
@@ -212,7 +212,7 @@ function renderLifecycles() {
   const cards = lcs
     .map(
       (lc) =>
-        `<div class="card">
+        `<div class="card" data-lifecycle-id="${lc.lifecycle_id}">
       <div class="card-title">${lc.lifecycle_id} - ${lc.project_id}</div>
       <div class="card-meta">
         ${statusBadge(lc.status)}
@@ -224,6 +224,10 @@ function renderLifecycles() {
     .join("");
 
   container.innerHTML = `<table>${thead}${tbody}</table><div class="card-list">${cards}</div>`;
+
+  container.querySelectorAll("[data-lifecycle-id]").forEach((el) => {
+    el.addEventListener("click", () => showLifecycleContext(el.dataset.lifecycleId));
+  });
 }
 
 function renderJobs() {
@@ -355,6 +359,25 @@ async function showTaskDetail(taskId) {
         showJobLog(el.dataset.dispatchId);
       });
     });
+  } catch {
+    content.textContent = "Failed to load";
+  }
+}
+
+async function showLifecycleContext(lifecycleId) {
+  const panel = document.getElementById("detail-panel");
+  const overlay = document.getElementById("detail-overlay");
+  const title = document.getElementById("detail-title");
+  const content = document.getElementById("detail-content");
+
+  title.textContent = `Lifecycle: ${lifecycleId}`;
+  content.textContent = "Loading...";
+  panel.classList.remove("hidden");
+  overlay.classList.remove("hidden");
+
+  try {
+    const data = await fetchJSON(`${BASE}/api/lifecycles/${lifecycleId}/context`);
+    content.innerHTML = `<pre class="task-content">${escapeHtml(data.content || "No content")}</pre>`;
   } catch {
     content.textContent = "Failed to load";
   }
