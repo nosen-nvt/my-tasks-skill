@@ -40,7 +40,7 @@ JSON over Unix ドメインソケット。改行区切り（1行1メッセージ
 
 | コマンド | フィールド | 説明 |
 |---------|-----------|------|
-| `dispatch` | `project_id?`, `prompt?`, `context?`, `max_runs?` | ライフサイクルを開始（精査→実行→評価を自動制御） |
+| `dispatch` | `project_id?`, `prompt?`, `context?`, `max_runs?`, `lifecycle_id?` | ライフサイクルを開始（精査→実行→評価を自動制御） |
 | `resume` | `lifecycle_id`, `project_id?`, `context_update?` | suspend 中のライフサイクルを再開 |
 | `run` | `project_id`, `prompt`, `job_type?`, `sandbox_profile?` | ジョブを実行（sandbox_profile はプロジェクト設定から自動解決、上書き可） |
 | `open` | `project_id`, `session?`, `sandbox_profile?` | 対話的セッションを tmux で開く |
@@ -154,7 +154,7 @@ queued ──→ running ──→ done
 
 | コマンド | フィールド | 説明 |
 |---------|-----------|------|
-| `dispatch` | `project_id?`, `prompt?`, `context?`, `max_runs?` | ライフサイクル開始。精査→承認→実行→評価を自動制御 |
+| `dispatch` | `project_id?`, `prompt?`, `context?`, `max_runs?`, `lifecycle_id?` | ライフサイクル開始。精査→承認→実行→評価を自動制御 |
 | `resume` | `lifecycle_id`, `project_id?`, `context_update?` | suspend 中のライフサイクルを再開 |
 
 #### ステートマシンフロー
@@ -236,6 +236,7 @@ async def client_send(request: dict) -> dict:
 ```bash
 # ライフサイクル開始（推奨）
 dispatcher dispatch --project bo --prompt "タスクタイトル" --context-file /path/to/task.md
+dispatcher dispatch --project bo --prompt "タスクタイトル" --context-file /path/to/task.md --lifecycle-id "20260312-001-g1"
 dispatcher dispatch --project bo --prompt "バグを修正して"
 
 # ライフサイクル再開

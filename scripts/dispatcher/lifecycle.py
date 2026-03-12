@@ -294,8 +294,12 @@ class LifecycleManager:
                 data = json.loads(line)
                 lc = Lifecycle(**data)
                 self.lifecycles[lc.lifecycle_id] = lc
-                seq = int(lc.lifecycle_id.split("-")[1])
-                self._lc_counter = max(self._lc_counter, seq)
+                if lc.lifecycle_id.startswith("lc-"):
+                    try:
+                        seq = int(lc.lifecycle_id.split("-")[1])
+                        self._lc_counter = max(self._lc_counter, seq)
+                    except (ValueError, IndexError):
+                        pass
 
     def _update_status(self, lc: Lifecycle, new_status: str):
         lc.status = new_status
@@ -473,6 +477,7 @@ class LifecycleManager:
             job_type="refine",
             lifecycle_id=lc.lifecycle_id,
             dispatch_id_hint=dispatch_id,
+            run=lc.run_count,
         )
         lc.current_dispatch_id = actual_dispatch_id
         self._save()
@@ -487,6 +492,7 @@ class LifecycleManager:
             prompt=prompt,
             job_type="execute",
             lifecycle_id=lc.lifecycle_id,
+            run=lc.run_count,
         )
         lc.current_dispatch_id = dispatch_id
         self._save()
@@ -520,6 +526,7 @@ class LifecycleManager:
             prompt=prompt,
             job_type="evaluate",
             lifecycle_id=lc.lifecycle_id,
+            run=lc.run_count,
         )
         lc.current_dispatch_id = dispatch_id
         self._save()

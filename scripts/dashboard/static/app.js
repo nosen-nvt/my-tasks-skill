@@ -235,13 +235,15 @@ function renderJobs() {
     return;
   }
 
-  const thead = `<tr><th>Dispatch ID</th><th>Type</th><th>Status</th><th>PID</th><th>Started</th><th>Elapsed</th></tr>`;
+  const thead = `<tr><th>Dispatch ID</th><th>Type</th><th>Lifecycle</th><th>Run</th><th>Status</th><th>PID</th><th>Started</th><th>Elapsed</th></tr>`;
   const tbody = jobs
     .map(
       (j) =>
         `<tr class="clickable" data-dispatch-id="${j.dispatch_id}">
       <td>${j.dispatch_id}</td>
       <td>${j.job_type || "execute"}</td>
+      <td>${j.lifecycle_id || "-"}</td>
+      <td>${j.run != null ? j.run : "-"}</td>
       <td>${statusBadge(j.status)}</td>
       <td>${j.pid || "-"}</td>
       <td>${j.started_at || "-"}</td>
@@ -293,7 +295,66 @@ async function showTaskDetail(taskId) {
 
   try {
     const data = await fetchJSON(`${BASE}/api/tasks/${taskId}`);
-    content.textContent = data.content || "No content";
+    const task = state.tasks.find((t) => t.id === taskId);
+    const generation = task ? (task.generation || 1) : 1;
+    const lifecycleId = `${taskId}-g${generation}`;
+
+    let html = `<pre class="task-content">${escapeHtml(data.content || "No content")}</pre>`;
+
+    // Find matching lifecycles and jobs
+    const matchedLc = state.lifecycles.find((lc) => lc.lifecycle_id === lifecycleId);
+    const matchedJobs = state.jobs.filter((j) => j.lifecycle_id === lifecycleId);
+
+    if (matchedLc || matchedJobs.length) {
+      html += `<div class="lifecycle-tree">`;
+      html += `<h4>Lifecycle: ${escapeHtml(lifecycleId)}</h4>`;
+
+      if (matchedLc) {
+        html += `<div class="lc-status">Status: ${statusBadge(matchedLc.status)} Runs: ${matchedLc.run_count || 0}/${matchedLc.max_runs || 5}</div>`;
+      }
+
+      if (matchedJobs.length) {
+        // Group jobs by run
+        const byRun = {};
+        matchedJobs.forEach((j) => {
+          const run = j.run != null ? j.run : "-";
+          if (!byRun[run]) byRun[run] = [];
+          byRun[run].push(j);
+        });
+
+        const runKeys = Object.keys(byRun).sort((a, b) => {
+          if (a === "-") return -1;
+          if (b === "-") return 1;
+          return Number(a) - Number(b);
+        });
+
+        for (const run of runKeys) {
+          html += `<div class="run-group">`;
+          html += `<div class="run-header">Run ${run}</div>`;
+          for (const j of byRun[run]) {
+            html += `<div class="run-job clickable" data-dispatch-id="${j.dispatch_id}">`;
+            html += `<span class="run-job-type">${j.job_type || "execute"}</span> `;
+            html += `${statusBadge(j.status)} `;
+            html += `<span class="run-job-id">${j.dispatch_id}</span>`;
+            if (j.finished_at) html += ` <span class="elapsed">${elapsed(j.started_at)}</span>`;
+            html += `</div>`;
+          }
+          html += `</div>`;
+        }
+      }
+
+      html += `</div>`;
+    }
+
+    content.innerHTML = html;
+
+    // Attach click handlers for job log
+    content.querySelectorAll("[data-dispatch-id]").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        showJobLog(el.dataset.dispatchId);
+      });
+    });
   } catch {
     content.textContent = "Failed to load";
   }

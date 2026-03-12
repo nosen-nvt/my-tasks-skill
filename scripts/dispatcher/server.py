@@ -98,6 +98,7 @@ class DispatchServer(ExecutorMixin):
                     working_dir="",
                     job_type=data.get("job_type", "execute"),
                     lifecycle_id=data.get("lifecycle_id"),
+                    run=data.get("run"),
                     status=data["status"],
                     pid=data.get("pid"),
                     exit_code=data.get("exit_code"),
@@ -349,7 +350,7 @@ class DispatchServer(ExecutorMixin):
 
         mgr = self.lifecycle_mgr
         lc = Lifecycle(
-            lifecycle_id=mgr.generate_id(),
+            lifecycle_id=request.get("lifecycle_id") or mgr.generate_id(),
             project_id=project_id,
             prompt=prompt,
             max_runs=max_runs,

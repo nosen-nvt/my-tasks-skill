@@ -308,6 +308,70 @@ tr.clickable:hover { background: var(--bg-hover); }
   font-size: 11px;
 }
 
+/* Lifecycle tree in task detail */
+.task-content {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.lifecycle-tree {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.lifecycle-tree h4 {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--accent);
+}
+
+.lc-status {
+  font-size: 12px;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.run-group {
+  margin-left: 16px;
+  margin-bottom: 8px;
+  border-left: 2px solid var(--border);
+  padding-left: 12px;
+}
+
+.run-header {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.run-job {
+  font-size: 12px;
+  padding: 3px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.run-job:hover { color: var(--accent); }
+
+.run-job-type {
+  color: var(--text-muted);
+  min-width: 60px;
+}
+
+.run-job-id {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 .empty-state {
   color: var(--text-muted);
   font-style: italic;

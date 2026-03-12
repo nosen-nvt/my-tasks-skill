@@ -464,7 +464,7 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 
 | フィールド | 型 | 説明 |
 |---|---|---|
-| `lifecycle_id` | string | 識別子（`lc-{連番}` 形式） |
+| `lifecycle_id` | string | 識別子。内部生成時は `lc-{連番}` 形式、外部指定時は任意文字列（例: `{task_id}-g{generation}`） |
 | `project_id` | string | プロジェクト ID |
 | `prompt` | string | 元の依頼内容 |
 | `context_path` | string | コンテキストファイルの絶対パス（直接投入時は空） |
@@ -526,13 +526,13 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 | `dispatch_id` | string | 識別子（`{project_id}-{連番}` 形式、例: `bo-1`） |
 | `project_id` | string | プロジェクト ID |
 | `job_type` | string | `execute` \| `evaluate` \| `refine` |
+| `lifecycle_id` | string\|null | 関連する Lifecycle ID |
+| `run` | integer\|null | ライフサイクル内の実行回数（0始まり） |
 | `status` | string | `queued` \| `running` \| `done` \| `failed` |
 | `pid` | integer\|null | 子プロセスの PID |
 | `exit_code` | integer\|null | 終了コード |
 | `started_at` | string\|null | 開始日時（ISO 8601形式） |
 | `finished_at` | string\|null | 終了日時（ISO 8601形式） |
-
-注: `lifecycle_id` は `Job` dataclass に保持されるが、`to_dict()` の出力（status レスポンス）には含まれない。
 
 ### status レスポンス例
 

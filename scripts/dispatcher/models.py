@@ -82,6 +82,7 @@ class Job:
     env_files: list[str] = field(default_factory=list)
     allowed_credentials: list[str] | str = field(default_factory=list)
     lifecycle_id: str | None = None
+    run: int | None = None
     status: str = "queued"
     pid: int | None = None
     exit_code: int | None = None
@@ -94,6 +95,7 @@ class Job:
             "project_id": self.project_id,
             "job_type": self.job_type,
             "lifecycle_id": self.lifecycle_id,
+            "run": self.run,
             "status": self.status,
             "pid": self.pid,
             "exit_code": self.exit_code,

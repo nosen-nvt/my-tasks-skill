@@ -202,6 +202,7 @@ class ExecutorMixin:
     async def _dispatch_internal(
         self, project_id: str, prompt: str, job_type: str,
         lifecycle_id: str | None = None, dispatch_id_hint: str | None = None,
+        run: int | None = None,
     ) -> str:
         project = sandbox_exec.load_project(project_id, self.repo_dir)
         if not project:
@@ -232,6 +233,7 @@ class ExecutorMixin:
             env_files=env_files,
             allowed_credentials=allowed_credentials,
             lifecycle_id=lifecycle_id,
+            run=run,
         )
         self.jobs[dispatch_id] = job
         self._save_jobs()

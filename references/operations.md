@@ -110,6 +110,11 @@ Lifecycle はタスク管理の知識を持たない純粋なジョブオーケ�
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
      --project bo --prompt "タスクタイトル" --context-file /path/to/task.md
 
+   # lifecycle_id を外部指定（タスクとのトレーサビリティ確保）
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
+     --project bo --prompt "タスクタイトル" --context-file /path/to/task.md \
+     --lifecycle-id "20260312-001-g1"
+
    # タスクなしの直接投入（プロンプトから最小コンテキストを自動生成し精査を実行）
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
      --project bo --prompt "バグを修正して"

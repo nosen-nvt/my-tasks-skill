@@ -107,8 +107,11 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         return read_jsonl(dispatch_dir / "lifecycles.jsonl")
 
     @app.get("/api/jobs")
-    async def api_jobs() -> list[dict]:
-        return read_jsonl(dispatch_dir / "jobs.jsonl")
+    async def api_jobs(lifecycle_id: str | None = Query(default=None)) -> list[dict]:
+        jobs = read_jsonl(dispatch_dir / "jobs.jsonl")
+        if lifecycle_id:
+            jobs = [j for j in jobs if j.get("lifecycle_id") == lifecycle_id]
+        return jobs
 
     @app.get("/api/jobs/{dispatch_id}/log")
     async def api_job_log(dispatch_id: str, tail: int = Query(default=200)) -> JSONResponse:
