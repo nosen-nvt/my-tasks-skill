@@ -9,7 +9,7 @@
 <body>
   <header>
     <div class="header-left">
-      <button id="menu-toggle" class="menu-btn" aria-label="メニュー">&#9776;</button>
+      <button id="nav-back" class="nav-btn hidden" aria-label="戻る">&#8592;</button>
       <h1>my-tasks</h1>
     </div>
     <div class="header-right">
@@ -17,50 +17,24 @@
     </div>
   </header>
 
-  <div class="layout">
-    <aside id="sidebar">
-      <div class="sidebar-section">
-        <h2>Projects</h2>
-        <ul id="project-list"></ul>
-      </div>
-      <div class="sidebar-section">
-        <h2>Datasources</h2>
-        <ul id="datasource-list"></ul>
-      </div>
-    </aside>
-
-    <main>
-      <nav id="tab-nav" class="tab-nav">
-        <button class="tab-btn active" data-tab="tasks">Tasks</button>
-        <button class="tab-btn" data-tab="lifecycles">Lifecycles</button>
-        <button class="tab-btn" data-tab="jobs">Jobs</button>
-      </nav>
-
-      <section id="section-tasks" class="content-section active">
-        <h2>Tasks</h2>
-        <div id="tasks-container"></div>
-      </section>
-
-      <section id="section-lifecycles" class="content-section">
-        <h2>Lifecycles</h2>
-        <div id="lifecycles-container"></div>
-      </section>
-
-      <section id="section-jobs" class="content-section">
-        <h2>Jobs</h2>
-        <div id="jobs-container"></div>
-      </section>
-    </main>
-  </div>
-
-  <div id="detail-panel" class="detail-panel hidden">
-    <div class="detail-header">
-      <h3 id="detail-title"></h3>
-      <button id="detail-close" class="close-btn">&times;</button>
+  <div class="columns">
+    <div class="column mobile-active" id="col-tasks">
+      <div class="column-header">Tasks</div>
+      <div class="column-body" id="tasks-list"></div>
     </div>
-    <pre id="detail-content"></pre>
+    <div class="column" id="col-lifecycles">
+      <div class="column-header">Lifecycles</div>
+      <div class="column-body" id="lifecycles-list"></div>
+    </div>
+    <div class="column" id="col-jobs">
+      <div class="column-header">Jobs</div>
+      <div class="column-body" id="jobs-list"></div>
+    </div>
+    <div class="column column-preview" id="col-preview">
+      <div class="column-header" id="preview-title">Preview</div>
+      <div class="column-body" id="preview-content"></div>
+    </div>
   </div>
-  <div id="detail-overlay" class="detail-overlay hidden"></div>
 
   <script src="/static/app.js"></script>
 </body>

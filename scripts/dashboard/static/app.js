@@ -1,15 +1,15 @@
-/* my-tasks dashboard */
+/* my-tasks dashboard – Finder column view */
 
 const BASE = window.__BASE_PATH__ || "";
 
 const state = {
-  projects: [],
-  datasources: [],
   tasks: [],
   lifecycles: [],
   jobs: [],
-  selectedProject: null,
-  activeTab: "tasks",
+  selectedTaskId: null,
+  selectedLifecycleId: null,
+  selectedJobId: null,
+  mobileColumn: 0,
 };
 
 // --- Fetch helpers ---
@@ -20,15 +20,11 @@ async function fetchJSON(url) {
 }
 
 async function loadAll() {
-  const [projects, datasources, tasks, lifecycles, jobs] = await Promise.all([
-    fetchJSON(`${BASE}/api/projects`),
-    fetchJSON(`${BASE}/api/datasources`),
+  const [tasks, lifecycles, jobs] = await Promise.all([
     fetchJSON(`${BASE}/api/tasks`),
     fetchJSON(`${BASE}/api/lifecycles`),
     fetchJSON(`${BASE}/api/jobs`),
   ]);
-  state.projects = projects;
-  state.datasources = datasources;
   state.tasks = tasks;
   state.lifecycles = lifecycles;
   state.jobs = jobs;
@@ -55,359 +51,35 @@ function connectSSE() {
 
   es.addEventListener("tasks_updated", async () => {
     state.tasks = await fetchJSON(`${BASE}/api/tasks`);
-    renderTasks();
-    renderSidebar();
+    renderTasksColumn();
   });
 
   es.addEventListener("jobs_updated", async () => {
     state.jobs = await fetchJSON(`${BASE}/api/jobs`);
-    renderJobs();
+    renderJobsColumn();
   });
 
   es.addEventListener("lifecycles_updated", async () => {
     state.lifecycles = await fetchJSON(`${BASE}/api/lifecycles`);
-    renderLifecycles();
+    renderLifecyclesColumn();
   });
 }
 
-// --- Rendering ---
+// --- Helpers ---
 
 function statusBadge(status) {
-  const cls = `status status-${status || "unknown"}`;
-  return `<span class="${cls}">${status || "-"}</span>`;
+  return `<span class="status status-${status || "unknown"}">${status || "-"}</span>`;
 }
 
-function elapsed(startedAt) {
+function duration(startedAt, finishedAt) {
   if (!startedAt) return "";
   const start = new Date(startedAt).getTime();
-  const diff = Math.floor((Date.now() - start) / 1000);
+  const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
+  const diff = Math.floor((end - start) / 1000);
   if (diff < 60) return `${diff}s`;
   if (diff < 3600) return `${Math.floor(diff / 60)}m${diff % 60}s`;
   return `${Math.floor(diff / 3600)}h${Math.floor((diff % 3600) / 60)}m`;
 }
-
-function renderSidebar() {
-  const projectList = document.getElementById("project-list");
-  const dsList = document.getElementById("datasource-list");
-
-  // Projects
-  const projectIds = new Set();
-  state.tasks.forEach((t) => {
-    const pid = t.project_id || t.project || "";
-    if (pid) projectIds.add(pid);
-  });
-  state.projects.forEach((p) => {
-    const pid = p.id || p._filename || "";
-    if (pid) projectIds.add(pid);
-  });
-
-  const allItem = `<li class="${!state.selectedProject ? "active" : ""}" data-project="">All (${state.tasks.length})</li>`;
-  const items = [...projectIds]
-    .sort()
-    .map((pid) => {
-      const count = state.tasks.filter((t) => (t.project_id || t.project || "") === pid).length;
-      const active = state.selectedProject === pid ? "active" : "";
-      return `<li class="${active}" data-project="${pid}">${pid} <span class="badge">${count}</span></li>`;
-    });
-  projectList.innerHTML = allItem + items.join("");
-
-  projectList.querySelectorAll("li").forEach((li) => {
-    li.addEventListener("click", () => {
-      state.selectedProject = li.dataset.project || null;
-      renderAll();
-    });
-  });
-
-  // Datasources
-  dsList.innerHTML = state.datasources
-    .map((ds) => `<li>${ds.id || ds._filename || ""}</li>`)
-    .join("");
-}
-
-function filteredTasks() {
-  if (!state.selectedProject) return state.tasks;
-  return state.tasks.filter((t) => (t.project_id || t.project || "") === state.selectedProject);
-}
-
-function filteredLifecycles() {
-  if (!state.selectedProject) return state.lifecycles;
-  return state.lifecycles.filter((lc) => lc.project_id === state.selectedProject);
-}
-
-function filteredJobs() {
-  if (!state.selectedProject) return state.jobs;
-  return state.jobs.filter((j) => j.project_id === state.selectedProject);
-}
-
-function renderTasks() {
-  const container = document.getElementById("tasks-container");
-  const tasks = filteredTasks();
-
-  if (!tasks.length) {
-    container.innerHTML = '<div class="empty-state">No tasks</div>';
-    return;
-  }
-
-  // Table (desktop)
-  const thead = `<tr><th>ID</th><th>Title</th><th>Status</th><th>Project</th><th>Source</th></tr>`;
-  const tbody = tasks
-    .map(
-      (t) =>
-        `<tr class="clickable" data-task-id="${t.id}">
-      <td>${t.id}</td>
-      <td>${escapeHtml(t.title || "")}</td>
-      <td>${statusBadge(t.status)}</td>
-      <td>${t.project_id || t.project || ""}</td>
-      <td>${t.datasource_id || ""}</td>
-    </tr>`
-    )
-    .join("");
-
-  // Cards (mobile)
-  const cards = tasks
-    .map(
-      (t) =>
-        `<div class="card" data-task-id="${t.id}">
-      <div class="card-title">${escapeHtml(t.title || "")}</div>
-      <div class="card-meta">
-        ${statusBadge(t.status)}
-        <span>${t.project_id || t.project || ""}</span>
-        <span>${t.id}</span>
-      </div>
-    </div>`
-    )
-    .join("");
-
-  container.innerHTML = `<table>${thead}${tbody}</table><div class="card-list">${cards}</div>`;
-
-  container.querySelectorAll("[data-task-id]").forEach((el) => {
-    el.addEventListener("click", () => showTaskDetail(el.dataset.taskId));
-  });
-}
-
-function renderLifecycles() {
-  const container = document.getElementById("lifecycles-container");
-  const lcs = filteredLifecycles();
-
-  if (!lcs.length) {
-    container.innerHTML = '<div class="empty-state">No lifecycles</div>';
-    return;
-  }
-
-  const thead = `<tr><th>ID</th><th>Project</th><th>Status</th><th>Runs</th><th>Dispatch</th><th>Updated</th></tr>`;
-  const tbody = lcs
-    .map(
-      (lc) =>
-        `<tr class="clickable" data-lifecycle-id="${lc.lifecycle_id}">
-      <td>${lc.lifecycle_id}</td>
-      <td>${lc.project_id}</td>
-      <td>${statusBadge(lc.status)}${lc.suspend_reason ? ` <span class="elapsed">(${lc.suspend_reason})</span>` : ""}</td>
-      <td>${lc.run_count || 0}/${lc.max_runs || 5}</td>
-      <td>${lc.current_dispatch_id || "-"}</td>
-      <td>${lc.updated_at || ""}</td>
-    </tr>`
-    )
-    .join("");
-
-  const cards = lcs
-    .map(
-      (lc) =>
-        `<div class="card" data-lifecycle-id="${lc.lifecycle_id}">
-      <div class="card-title">${lc.lifecycle_id} - ${lc.project_id}</div>
-      <div class="card-meta">
-        ${statusBadge(lc.status)}
-        <span>Runs: ${lc.run_count || 0}/${lc.max_runs || 5}</span>
-        ${lc.suspend_reason ? `<span>(${lc.suspend_reason})</span>` : ""}
-      </div>
-    </div>`
-    )
-    .join("");
-
-  container.innerHTML = `<table>${thead}${tbody}</table><div class="card-list">${cards}</div>`;
-
-  container.querySelectorAll("[data-lifecycle-id]").forEach((el) => {
-    el.addEventListener("click", () => showLifecycleContext(el.dataset.lifecycleId));
-  });
-}
-
-function renderJobs() {
-  const container = document.getElementById("jobs-container");
-  const jobs = filteredJobs();
-
-  if (!jobs.length) {
-    container.innerHTML = '<div class="empty-state">No jobs</div>';
-    return;
-  }
-
-  const thead = `<tr><th>Dispatch ID</th><th>Type</th><th>Lifecycle</th><th>Run</th><th>Status</th><th>PID</th><th>Started</th><th>Elapsed</th></tr>`;
-  const tbody = jobs
-    .map(
-      (j) =>
-        `<tr class="clickable" data-dispatch-id="${j.dispatch_id}">
-      <td>${j.dispatch_id}</td>
-      <td>${j.job_type || "execute"}</td>
-      <td>${j.lifecycle_id || "-"}</td>
-      <td>${j.run != null ? j.run : "-"}</td>
-      <td>${statusBadge(j.status)}</td>
-      <td>${j.pid || "-"}</td>
-      <td>${j.started_at || "-"}</td>
-      <td class="elapsed-cell">${j.status === "running" ? elapsed(j.started_at) : (j.finished_at ? elapsed(j.started_at) : "-")}</td>
-    </tr>`
-    )
-    .join("");
-
-  const cards = jobs
-    .map(
-      (j) =>
-        `<div class="card" data-dispatch-id="${j.dispatch_id}">
-      <div class="card-title">${j.dispatch_id}</div>
-      <div class="card-meta">
-        ${statusBadge(j.status)}
-        <span>${j.job_type || "execute"}</span>
-        ${j.status === "running" ? `<span class="elapsed">${elapsed(j.started_at)}</span>` : ""}
-      </div>
-    </div>`
-    )
-    .join("");
-
-  container.innerHTML = `<table>${thead}${tbody}</table><div class="card-list">${cards}</div>`;
-
-  container.querySelectorAll("[data-dispatch-id]").forEach((el) => {
-    el.addEventListener("click", () => showJobLog(el.dataset.dispatchId));
-  });
-}
-
-function renderAll() {
-  renderSidebar();
-  renderTasks();
-  renderLifecycles();
-  renderJobs();
-}
-
-// --- Detail panel ---
-
-async function showTaskDetail(taskId) {
-  const panel = document.getElementById("detail-panel");
-  const overlay = document.getElementById("detail-overlay");
-  const title = document.getElementById("detail-title");
-  const content = document.getElementById("detail-content");
-
-  title.textContent = `Task: ${taskId}`;
-  content.textContent = "Loading...";
-  panel.classList.remove("hidden");
-  overlay.classList.remove("hidden");
-
-  try {
-    const data = await fetchJSON(`${BASE}/api/tasks/${taskId}`);
-    const task = state.tasks.find((t) => t.id === taskId);
-    const generation = task ? (task.generation || 1) : 1;
-    const lifecycleId = `${taskId}-g${generation}`;
-
-    let html = `<pre class="task-content">${escapeHtml(data.content || "No content")}</pre>`;
-
-    // Find matching lifecycles and jobs
-    const matchedLc = state.lifecycles.find((lc) => lc.lifecycle_id === lifecycleId);
-    const matchedJobs = state.jobs.filter((j) => j.lifecycle_id === lifecycleId);
-
-    if (matchedLc || matchedJobs.length) {
-      html += `<div class="lifecycle-tree">`;
-      html += `<h4>Lifecycle: ${escapeHtml(lifecycleId)}</h4>`;
-
-      if (matchedLc) {
-        html += `<div class="lc-status">Status: ${statusBadge(matchedLc.status)} Runs: ${matchedLc.run_count || 0}/${matchedLc.max_runs || 5}</div>`;
-      }
-
-      if (matchedJobs.length) {
-        // Group jobs by run
-        const byRun = {};
-        matchedJobs.forEach((j) => {
-          const run = j.run != null ? j.run : "-";
-          if (!byRun[run]) byRun[run] = [];
-          byRun[run].push(j);
-        });
-
-        const runKeys = Object.keys(byRun).sort((a, b) => {
-          if (a === "-") return -1;
-          if (b === "-") return 1;
-          return Number(a) - Number(b);
-        });
-
-        for (const run of runKeys) {
-          html += `<div class="run-group">`;
-          html += `<div class="run-header">Run ${run}</div>`;
-          for (const j of byRun[run]) {
-            html += `<div class="run-job clickable" data-dispatch-id="${j.dispatch_id}">`;
-            html += `<span class="run-job-type">${j.job_type || "execute"}</span> `;
-            html += `${statusBadge(j.status)} `;
-            html += `<span class="run-job-id">${j.dispatch_id}</span>`;
-            if (j.finished_at) html += ` <span class="elapsed">${elapsed(j.started_at)}</span>`;
-            html += `</div>`;
-          }
-          html += `</div>`;
-        }
-      }
-
-      html += `</div>`;
-    }
-
-    content.innerHTML = html;
-
-    // Attach click handlers for job log
-    content.querySelectorAll("[data-dispatch-id]").forEach((el) => {
-      el.addEventListener("click", (e) => {
-        e.stopPropagation();
-        showJobLog(el.dataset.dispatchId);
-      });
-    });
-  } catch {
-    content.textContent = "Failed to load";
-  }
-}
-
-async function showLifecycleContext(lifecycleId) {
-  const panel = document.getElementById("detail-panel");
-  const overlay = document.getElementById("detail-overlay");
-  const title = document.getElementById("detail-title");
-  const content = document.getElementById("detail-content");
-
-  title.textContent = `Lifecycle: ${lifecycleId}`;
-  content.textContent = "Loading...";
-  panel.classList.remove("hidden");
-  overlay.classList.remove("hidden");
-
-  try {
-    const data = await fetchJSON(`${BASE}/api/lifecycles/${lifecycleId}/context`);
-    content.innerHTML = `<pre class="task-content">${escapeHtml(data.content || "No content")}</pre>`;
-  } catch {
-    content.textContent = "Failed to load";
-  }
-}
-
-async function showJobLog(dispatchId) {
-  const panel = document.getElementById("detail-panel");
-  const overlay = document.getElementById("detail-overlay");
-  const title = document.getElementById("detail-title");
-  const content = document.getElementById("detail-content");
-
-  title.textContent = `Job Log: ${dispatchId}`;
-  content.textContent = "Loading...";
-  panel.classList.remove("hidden");
-  overlay.classList.remove("hidden");
-
-  try {
-    const data = await fetchJSON(`${BASE}/api/jobs/${dispatchId}/log`);
-    content.textContent = (data.lines || []).join("\n") || "No log";
-  } catch {
-    content.textContent = "Failed to load";
-  }
-}
-
-function closeDetail() {
-  document.getElementById("detail-panel").classList.add("hidden");
-  document.getElementById("detail-overlay").classList.add("hidden");
-}
-
-// --- Utility ---
 
 function escapeHtml(text) {
   const div = document.createElement("div");
@@ -415,49 +87,282 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// --- Column rendering ---
+
+function renderTasksColumn() {
+  const container = document.getElementById("tasks-list");
+  const tasks = state.tasks;
+
+  if (!tasks.length) {
+    container.innerHTML = '<div class="empty-state">No tasks</div>';
+    return;
+  }
+
+  // Group by project
+  const groups = {};
+  tasks.forEach((t) => {
+    const pid = t.project_id || t.project || "(none)";
+    if (!groups[pid]) groups[pid] = [];
+    groups[pid].push(t);
+  });
+
+  let html = "";
+  for (const pid of Object.keys(groups).sort()) {
+    html += `<div class="column-group-header">${escapeHtml(pid)}</div>`;
+    for (const t of groups[pid]) {
+      const selected = state.selectedTaskId === t.id ? "selected" : "";
+      html += `<div class="column-item ${selected}" data-task-id="${t.id}">
+        <div class="item-main">
+          ${statusBadge(t.status)}
+          <span class="item-title">${escapeHtml(t.title || t.id)}</span>
+        </div>
+        <span class="chevron">\u203a</span>
+      </div>`;
+    }
+  }
+
+  container.innerHTML = html;
+  container.querySelectorAll("[data-task-id]").forEach((el) => {
+    el.addEventListener("click", () => selectTask(el.dataset.taskId));
+  });
+}
+
+function renderLifecyclesColumn() {
+  const container = document.getElementById("lifecycles-list");
+
+  if (!state.selectedTaskId) {
+    container.innerHTML = '<div class="empty-state">Select a task</div>';
+    return;
+  }
+
+  const prefix = state.selectedTaskId + "-g";
+  const taskLifecycles = state.lifecycles.filter(
+    (lc) => lc.lifecycle_id && lc.lifecycle_id.startsWith(prefix)
+  );
+
+  if (!taskLifecycles.length) {
+    container.innerHTML = '<div class="empty-state">No lifecycles</div>';
+    return;
+  }
+
+  let html = "";
+  for (const lc of taskLifecycles) {
+    const selected = state.selectedLifecycleId === lc.lifecycle_id ? "selected" : "";
+    const genMatch = lc.lifecycle_id.match(/-g(\d+)$/);
+    const gen = genMatch ? genMatch[1] : "?";
+    const jobCount = state.jobs.filter((j) => j.lifecycle_id === lc.lifecycle_id).length;
+
+    html += `<div class="column-item ${selected}" data-lifecycle-id="${lc.lifecycle_id}">
+      <div class="item-main">
+        ${statusBadge(lc.status)}
+        <span class="item-title">Generation ${gen}</span>
+      </div>
+      <div class="item-detail">
+        <span class="item-meta">${lc.run_count || 0}/${lc.max_runs || 5} runs</span>
+        ${lc.suspend_reason ? `<span class="item-sub">${lc.suspend_reason}</span>` : ""}
+      </div>
+      ${jobCount > 0 ? '<span class="chevron">\u203a</span>' : ""}
+    </div>`;
+  }
+
+  container.innerHTML = html;
+  container.querySelectorAll("[data-lifecycle-id]").forEach((el) => {
+    el.addEventListener("click", () => selectLifecycle(el.dataset.lifecycleId));
+  });
+}
+
+function renderJobsColumn() {
+  const container = document.getElementById("jobs-list");
+
+  if (!state.selectedLifecycleId) {
+    container.innerHTML = '<div class="empty-state">Select a lifecycle</div>';
+    return;
+  }
+
+  const jobs = state.jobs.filter((j) => j.lifecycle_id === state.selectedLifecycleId);
+
+  if (!jobs.length) {
+    container.innerHTML = '<div class="empty-state">No jobs</div>';
+    return;
+  }
+
+  // Group by run
+  const byRun = {};
+  jobs.forEach((j) => {
+    const run = j.run != null ? j.run : 0;
+    if (!byRun[run]) byRun[run] = [];
+    byRun[run].push(j);
+  });
+
+  let html = "";
+  const runKeys = Object.keys(byRun).sort((a, b) => Number(a) - Number(b));
+
+  for (const run of runKeys) {
+    if (runKeys.length > 1) {
+      html += `<div class="column-group-header">Run ${run}</div>`;
+    }
+    for (const j of byRun[run]) {
+      const selected = state.selectedJobId === j.dispatch_id ? "selected" : "";
+      const dur = j.started_at ? duration(j.started_at, j.finished_at) : "";
+      html += `<div class="column-item ${selected}" data-dispatch-id="${j.dispatch_id}">
+        <div class="item-main">
+          ${statusBadge(j.status)}
+          <span class="item-title">${j.job_type || "execute"}</span>
+        </div>
+        <div class="item-detail">
+          <span class="item-meta">${j.dispatch_id}</span>
+          ${dur ? `<span class="elapsed">${dur}</span>` : ""}
+        </div>
+      </div>`;
+    }
+  }
+
+  container.innerHTML = html;
+  container.querySelectorAll("[data-dispatch-id]").forEach((el) => {
+    el.addEventListener("click", () => selectJob(el.dataset.dispatchId));
+  });
+}
+
+async function renderPreview() {
+  const titleEl = document.getElementById("preview-title");
+  const contentEl = document.getElementById("preview-content");
+
+  if (state.selectedJobId) {
+    titleEl.textContent = `Job: ${state.selectedJobId}`;
+    contentEl.innerHTML = '<div class="empty-state">Loading...</div>';
+    try {
+      const [data, resultData] = await Promise.all([
+        fetchJSON(`${BASE}/api/jobs/${state.selectedJobId}/log`),
+        fetchJSON(`${BASE}/api/jobs/${state.selectedJobId}/result`).catch(() => null),
+      ]);
+      let html = "";
+      if (resultData && resultData.verdict) {
+        html += `<div class="preview-result">
+          <span class="result-label">Verdict:</span> ${statusBadge(resultData.verdict)}
+          ${resultData.summary ? `<div class="result-summary">${escapeHtml(resultData.summary)}</div>` : ""}
+        </div>`;
+      }
+      html += `<pre class="preview-text">${escapeHtml((data.lines || []).join("\n") || "No log")}</pre>`;
+      contentEl.innerHTML = html;
+    } catch {
+      contentEl.innerHTML = '<div class="empty-state">Failed to load</div>';
+    }
+  } else if (state.selectedLifecycleId) {
+    titleEl.textContent = `Lifecycle: ${state.selectedLifecycleId}`;
+    contentEl.innerHTML = '<div class="empty-state">Loading...</div>';
+    try {
+      const data = await fetchJSON(`${BASE}/api/lifecycles/${state.selectedLifecycleId}/context`);
+      contentEl.innerHTML = `<pre class="preview-text">${escapeHtml(data.content || "No context")}</pre>`;
+    } catch {
+      contentEl.innerHTML = '<div class="empty-state">Failed to load</div>';
+    }
+  } else if (state.selectedTaskId) {
+    titleEl.textContent = `Task: ${state.selectedTaskId}`;
+    contentEl.innerHTML = '<div class="empty-state">Loading...</div>';
+    try {
+      const data = await fetchJSON(`${BASE}/api/tasks/${state.selectedTaskId}`);
+      contentEl.innerHTML = `<pre class="preview-text">${escapeHtml(data.content || "No content")}</pre>`;
+    } catch {
+      contentEl.innerHTML = '<div class="empty-state">Failed to load</div>';
+    }
+  } else {
+    titleEl.textContent = "Preview";
+    contentEl.innerHTML = '<div class="empty-state">Select an item</div>';
+  }
+}
+
+// --- Selection ---
+
+function selectTask(taskId) {
+  state.selectedTaskId = taskId;
+  state.selectedLifecycleId = null;
+  state.selectedJobId = null;
+
+  renderTasksColumn();
+  renderLifecyclesColumn();
+
+  // Auto-select if only one lifecycle
+  const prefix = taskId + "-g";
+  const taskLifecycles = state.lifecycles.filter(
+    (lc) => lc.lifecycle_id && lc.lifecycle_id.startsWith(prefix)
+  );
+  if (taskLifecycles.length === 1) {
+    state.selectedLifecycleId = taskLifecycles[0].lifecycle_id;
+    renderLifecyclesColumn();
+    renderJobsColumn();
+  } else {
+    renderJobsColumn();
+  }
+
+  renderPreview();
+
+  if (window.innerWidth < 768) {
+    navigateToColumn(1);
+  }
+}
+
+function selectLifecycle(lifecycleId) {
+  state.selectedLifecycleId = lifecycleId;
+  state.selectedJobId = null;
+
+  renderLifecyclesColumn();
+  renderJobsColumn();
+  renderPreview();
+
+  if (window.innerWidth < 768) {
+    navigateToColumn(2);
+  }
+}
+
+function selectJob(dispatchId) {
+  state.selectedJobId = dispatchId;
+
+  renderJobsColumn();
+  renderPreview();
+
+  if (window.innerWidth < 768) {
+    navigateToColumn(3);
+  }
+}
+
+// --- Mobile navigation ---
+
+function navigateToColumn(index) {
+  state.mobileColumn = index;
+  document.querySelectorAll(".column").forEach((col, i) => {
+    col.classList.toggle("mobile-active", i === index);
+  });
+  document.getElementById("nav-back").classList.toggle("hidden", index === 0);
+}
+
+function navigateBack() {
+  if (state.mobileColumn > 0) {
+    navigateToColumn(state.mobileColumn - 1);
+  }
+}
+
+// --- Render all ---
+
+function renderAll() {
+  renderTasksColumn();
+  renderLifecyclesColumn();
+  renderJobsColumn();
+  renderPreview();
+}
+
 // --- Init ---
 
 document.addEventListener("DOMContentLoaded", () => {
-  // Tab navigation (mobile)
-  document.querySelectorAll(".tab-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
-      document.querySelectorAll(".content-section").forEach((s) => s.classList.remove("active"));
-      btn.classList.add("active");
-      document.getElementById(`section-${btn.dataset.tab}`).classList.add("active");
-      state.activeTab = btn.dataset.tab;
-    });
-  });
-
-  // Mobile menu toggle
-  document.getElementById("menu-toggle").addEventListener("click", () => {
-    document.getElementById("sidebar").classList.toggle("open");
-  });
-
-  // Close sidebar on click outside (mobile)
-  document.addEventListener("click", (e) => {
-    const sidebar = document.getElementById("sidebar");
-    const toggle = document.getElementById("menu-toggle");
-    if (sidebar.classList.contains("open") && !sidebar.contains(e.target) && e.target !== toggle) {
-      sidebar.classList.remove("open");
-    }
-  });
-
-  // Detail panel close
-  document.getElementById("detail-close").addEventListener("click", closeDetail);
-  document.getElementById("detail-overlay").addEventListener("click", closeDetail);
+  document.getElementById("nav-back").addEventListener("click", navigateBack);
 
   // Elapsed time updater for running jobs
   setInterval(() => {
-    document.querySelectorAll(".elapsed-cell").forEach((cell) => {
-      const row = cell.closest("tr");
-      if (!row) return;
-      const dispatchId = row.dataset.dispatchId;
-      const job = state.jobs.find((j) => j.dispatch_id === dispatchId);
-      if (job && job.status === "running" && job.started_at) {
-        cell.textContent = elapsed(job.started_at);
-      }
-    });
+    if (state.selectedLifecycleId) {
+      const hasRunning = state.jobs.some(
+        (j) => j.lifecycle_id === state.selectedLifecycleId && j.status === "running"
+      );
+      if (hasRunning) renderJobsColumn();
+    }
   }, 5000);
 
   loadAll();
