@@ -12,11 +12,11 @@ from typing import TYPE_CHECKING
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import sandbox_exec
 
-from .models import Job, SOCKET_DIR_NAME, log, now_iso, get_cred_broker_socket_path
+from .models import Job, SOCKET_DIR_NAME, log, now_iso, get_host_cmd_broker_socket_path
 from .prompt import build_system_prompt
 
 if TYPE_CHECKING:
-    from .cred import CredentialBroker
+    from .host_cmd import HostCommandBroker
     from .lifecycle import LifecycleManager
 
 
@@ -30,7 +30,7 @@ class ExecutorMixin:
     _processes: dict[str, asyncio.subprocess.Process]
     max_slots: int
     repo_dir: Path
-    cred_broker: CredentialBroker
+    host_cmd_broker: HostCommandBroker
     lifecycle_mgr: LifecycleManager
 
     def _log_path(self, dispatch_id: str) -> Path: raise NotImplementedError
@@ -65,18 +65,18 @@ class ExecutorMixin:
         job.started_at = now_iso()
         self._save_jobs()
 
-        cred_token = None
-        if job.allowed_credentials:
-            cred_token = uuid.uuid4().hex
-            self.cred_broker.register(cred_token, job.allowed_credentials)
+        broker_token = None
+        if job.host_commands:
+            broker_token = uuid.uuid4().hex
+            self.host_cmd_broker.register(broker_token, job.host_commands)
 
         system_prompt = build_system_prompt(job, self._result_path(job.dispatch_id))
         log_path = self._log_path(job.dispatch_id)
         log_file = None
         try:
-            cred_env: dict[str, str] | None = None
-            if cred_token:
-                cred_env = {"CRED_TOKEN": cred_token, "CRED_BROKER_SOCK": get_cred_broker_socket_path()}
+            broker_env: dict[str, str] | None = None
+            if broker_token:
+                broker_env = {"HOST_CMD_TOKEN": broker_token, "HOST_CMD_BROKER_SOCK": get_host_cmd_broker_socket_path()}
 
             command = [
                 "claude", "--permission-mode", "bypassPermissions",
@@ -87,7 +87,8 @@ class ExecutorMixin:
             exec_args = sandbox_exec.build_exec_args(
                 sandbox_profile=job.sandbox_profile_id,
                 env_files=job.env_files,
-                cred_env=cred_env,
+                broker_env=broker_env,
+                host_commands=job.host_commands,
                 command=command,
                 working_dir=job.working_dir,
                 dispatch_id=job.dispatch_id,
@@ -140,8 +141,8 @@ class ExecutorMixin:
             job.status = "failed"
             job.exit_code = -1
         finally:
-            if cred_token:
-                self.cred_broker.revoke(cred_token)
+            if broker_token:
+                self.host_cmd_broker.revoke(broker_token)
             if log_file:
                 log_file.close()
             job.finished_at = now_iso()
@@ -215,7 +216,7 @@ class ExecutorMixin:
             return ""
 
         try:
-            sandbox_profile_id, env_files, allowed_credentials = \
+            sandbox_profile_id, env_files, host_commands = \
                 sandbox_exec.resolve_project_sandbox_params(project)
         except (FileNotFoundError, ValueError) as e:
             log.error(f"Internal dispatch: sandbox params error: {e}")
@@ -231,7 +232,7 @@ class ExecutorMixin:
             job_type=job_type,
             sandbox_profile_id=sandbox_profile_id,
             env_files=env_files,
-            allowed_credentials=allowed_credentials,
+            host_commands=host_commands,
             lifecycle_id=lifecycle_id,
             run=run,
         )

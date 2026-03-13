@@ -81,25 +81,13 @@ def ensure_netns() -> None:
 
 # --- 組み込みプロファイル -----------------------------------------------------
 
-CREDENTIAL_PROFILES_DIR = Path("~/.local/share/my-tasks/credential-profiles").expanduser()
-
-BUILTIN_CREDENTIAL_PROFILES: dict[str, dict] = {
-    "full-access": {
-        "credential_profile_id": "full-access",
-        "allowed_credentials": "*",
-    },
-    "none": {
-        "credential_profile_id": "none",
-        "allowed_credentials": [],
-    },
-}
-
-
 BUILTIN_PROFILES: dict[str, dict] = {
     "default": {
         "profile_id": "default",
         "proxy_profile": "full",
-        "credential_profile": "full-access",
+        "host_commands": [
+            {"name": "pass", "path": "/usr/bin/pass", "allowed_patterns": "*", "allow_stdin": True},
+        ],
         "extra_binds": [
             {"source": "$HOME/.nuget",  "target": "$HOME/.nuget",  "mode": "rw"},
             {"source": "$HOME/.dotnet", "target": "$HOME/.dotnet", "mode": "rw"},
@@ -111,7 +99,9 @@ BUILTIN_PROFILES: dict[str, dict] = {
     "unrestricted": {
         "profile_id": "unrestricted",
         "proxy_profile": None,
-        "credential_profile": "full-access",
+        "host_commands": [
+            {"name": "pass", "path": "/usr/bin/pass", "allowed_patterns": "*", "allow_stdin": True},
+        ],
         "extra_binds": [
             {"source": "$HOME/.local",       "target": "$HOME/.local",       "mode": "rw"},
             {"source": "$HOME/.claude.json",  "target": "$HOME/.claude.json", "mode": "rw"},
@@ -127,36 +117,24 @@ BUILTIN_PROFILES: dict[str, dict] = {
 SANDBOX_PROFILES_DIR = Path("~/.local/share/my-tasks/sandbox-profiles").expanduser()
 
 
-# --- クレデンシャルプロファイル解決 -------------------------------------------
+# --- ホストコマンド解決 -------------------------------------------------------
 
-def resolve_credential_profile(profile_id: str) -> dict | None:
-    """クレデンシャルプロファイルを解決する。ファイル → 組み込み の順。"""
-    sp = CREDENTIAL_PROFILES_DIR / f"{profile_id}.json"
-    if sp.is_file():
-        with open(sp, encoding="utf-8") as f:
-            return json.load(f)
-    return BUILTIN_CREDENTIAL_PROFILES.get(profile_id)
+def resolve_host_commands(profile: dict) -> list[dict]:
+    """サンドボックスプロファイルから host_commands を解決する。"""
+    return profile.get("host_commands", [])
 
 
-def resolve_allowed_credentials(profile: dict) -> list[str] | str:
-    """サンドボックスプロファイルから allowed_credentials を解決する。
-
-    解決優先順位:
-    1. allowed_credentials が直接存在 → そのまま返す（後方互換）
-    2. credential_profile が指定 → credential profile を読み込んで返す
-    3. どちらも未指定 → "*"（デフォルト全許可）
-    """
-    if "allowed_credentials" in profile:
-        return profile["allowed_credentials"]
-
-    credential_profile_id = profile.get("credential_profile")
-    if credential_profile_id:
-        cred_profile = resolve_credential_profile(credential_profile_id)
-        if not cred_profile:
-            raise FileNotFoundError(f"Credential profile not found: {credential_profile_id}")
-        return cred_profile["allowed_credentials"]
-
-    return "*"
+def _host_cmd_binds(host_commands: list[dict]) -> list[str]:
+    """host_commands リストに基づく bwrap bind 引数を生成する。"""
+    shim = str(SCRIPT_DIR / "host-cmd")
+    args: list[str] = []
+    seen: set[str] = set()
+    for cmd in host_commands:
+        name = cmd["name"]
+        if name not in seen:
+            seen.add(name)
+            args += ["--ro-bind", shim, f"/usr/bin/{name}"]
+    return args
 
 
 # --- プロファイル解決 ---------------------------------------------------------
@@ -375,7 +353,6 @@ def _base_binds() -> list[str]:
     return [
         "--ro-bind", "/etc", "/etc",
         "--ro-bind", "/usr", "/usr",
-        "--ro-bind", str(SCRIPT_DIR / "pass-shim"), "/usr/bin/pass",
         "--symlink", "usr/bin", "/bin",
         "--symlink", "usr/lib", "/lib",
         "--symlink", "usr/lib64", "/lib64",
@@ -393,11 +370,11 @@ def _socket_binds() -> list[str]:
     return ["--bind", d, d]
 
 
-def _env_args(env_file_args: list[str], cred_args: list[str]) -> list[str]:
+def _env_args(env_file_args: list[str], broker_args: list[str]) -> list[str]:
     return [
         "--clearenv",
         *env_file_args,
-        *cred_args,
+        *broker_args,
         "--setenv", "HOME", str(HOME),
         "--setenv", "TERM", "xterm-256color",
         "--setenv", "COLORTERM", "truecolor",
@@ -406,15 +383,15 @@ def _env_args(env_file_args: list[str], cred_args: list[str]) -> list[str]:
     ]
 
 
-# --- 組み込み Credential Broker -----------------------------------------------
+# --- 組み込み Host Command Broker ---------------------------------------------
 
-class EmbeddedCredBroker:
-    """CRED_TOKEN 未設定時に自動起動するフォールバック Credential Broker."""
+class EmbeddedHostCommandBroker:
+    """HOST_CMD_TOKEN 未設定時に自動起動するフォールバック Host Command Broker."""
 
-    def __init__(self, sock_path: str, token: str, allowed: list[str] | str):
+    def __init__(self, sock_path: str, token: str, host_commands: list[dict]):
         self._sock_path = sock_path
         self._token = token
-        self._allowed = allowed
+        self._host_commands = host_commands
         self._running = False
         self._server_sock: socket.socket | None = None
 
@@ -454,10 +431,10 @@ class EmbeddedCredBroker:
                 return
             request = json.loads(data.decode())
             token = request.get("token", "")
-            entry = request.get("entry", "")
-            operation = request.get("operation", "show")
-            value = request.get("value", "")
-            response = self._process(token, entry, operation, value)
+            command = request.get("command", "")
+            args = request.get("args", [])
+            stdin = request.get("stdin")
+            response = self._process(token, command, args, stdin)
             conn.sendall(json.dumps(response, ensure_ascii=False).encode() + b"\n")
         except Exception:
             try:
@@ -467,31 +444,37 @@ class EmbeddedCredBroker:
         finally:
             conn.close()
 
-    def _process(self, token: str, entry: str, operation: str = "show", value: str = "") -> dict:
+    def _process(self, token: str, command: str, args: list[str], stdin: str | None) -> dict:
         if not token or token != self._token:
             return {"ok": False, "error": "invalid token"}
-        if self._allowed != "*" and not any(fnmatch.fnmatch(entry, pat) for pat in self._allowed):
-            return {"ok": False, "error": f"entry not allowed: {entry}"}
+
+        cmd_def = next((c for c in self._host_commands if c["name"] == command), None)
+        if cmd_def is None:
+            return {"ok": False, "error": f"command not allowed: {command}"}
+
+        allowed_patterns = cmd_def.get("allowed_patterns", [])
+        if allowed_patterns != "*":
+            args_str = " ".join(args)
+            if not any(fnmatch.fnmatch(args_str, pat) for pat in allowed_patterns):
+                return {"ok": False, "error": f"args not allowed: {command} {args_str}"}
+
+        if stdin is not None and not cmd_def.get("allow_stdin", False):
+            return {"ok": False, "error": f"stdin not allowed for {command}"}
+
         try:
-            if operation == "insert":
-                proc = subprocess.run(
-                    ["/usr/bin/pass", "insert", "--force", "--echo", entry],
-                    input=value.encode(),
-                    capture_output=True,
-                )
-                if proc.returncode != 0:
-                    return {"ok": False, "error": "credential insert failed"}
-                return {"ok": True}
-            else:
-                proc = subprocess.run(
-                    ["/usr/bin/pass", "show", entry],
-                    capture_output=True,
-                )
-                if proc.returncode != 0:
-                    return {"ok": False, "error": "credential retrieval failed"}
-                return {"ok": True, "value": proc.stdout.decode()}
+            proc = subprocess.run(
+                [cmd_def["path"], *args],
+                input=stdin.encode() if stdin is not None else None,
+                capture_output=True,
+            )
+            return {
+                "ok": True,
+                "exit_code": proc.returncode,
+                "stdout": proc.stdout.decode(),
+                "stderr": proc.stderr.decode(),
+            }
         except Exception:
-            return {"ok": False, "error": "credential operation failed"}
+            return {"ok": False, "error": "execution failed"}
 
     def stop(self) -> None:
         self._running = False
@@ -510,9 +493,10 @@ def build_netns_args(
     proxy_port: int,
     profile_binds: list[str],
     env_file_args: list[str],
-    cred_args: list[str],
+    broker_args: list[str],
     command: list[str],
     host_forward_ports: list[int] | None = None,
+    host_cmd_binds: list[str] | None = None,
 ) -> list[str]:
     resolv = tempfile.NamedTemporaryFile(
         prefix="sandbox-resolv.", dir="/tmp", mode="w", delete=False,
@@ -526,6 +510,7 @@ def build_netns_args(
         "bwrap",
         "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--die-with-parent",
         *_base_binds(),
+        *(host_cmd_binds or []),
         "--ro-bind", "/opt/microsoft/powershell", "/opt/microsoft/powershell",
         "--ro-bind", "/opt/google/chrome", "/opt/google/chrome",
         "--ro-bind", resolv.name, "/run/systemd/resolve/stub-resolv.conf",
@@ -537,7 +522,7 @@ def build_netns_args(
         "--bind", work, work,
         "--bind", f"{HOME}/.local/share/my-tasks", f"{HOME}/.local/share/my-tasks",
         "--chdir", work,
-        *_env_args(env_file_args, cred_args),
+        *_env_args(env_file_args, broker_args),
         "--setenv", "PATH", f"/usr/bin:{HOME}/.local/bin:{HOME}/go/bin:{HOME}/.bun/bin:{HOME}/.volta/bin",
         "--setenv", "http_proxy", f"http://{LISTEN_ADDR}:{proxy_port}",
         "--setenv", "https_proxy", f"http://{LISTEN_ADDR}:{proxy_port}",
@@ -554,13 +539,15 @@ def build_host_network_args(
     work: str,
     profile_binds: list[str],
     env_file_args: list[str],
-    cred_args: list[str],
+    broker_args: list[str],
     command: list[str],
+    host_cmd_binds: list[str] | None = None,
 ) -> list[str]:
     return [
         "bwrap",
         "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--die-with-parent",
         *_base_binds(),
+        *(host_cmd_binds or []),
         "--ro-bind", "/run/systemd/resolve", "/run/systemd/resolve",
         *_socket_binds(),
         "--bind", f"{HOME}/.claude", f"{HOME}/.claude",
@@ -569,7 +556,7 @@ def build_host_network_args(
         *profile_binds,
         "--bind", work, work,
         "--chdir", work,
-        *_env_args(env_file_args, cred_args),
+        *_env_args(env_file_args, broker_args),
         "--setenv", "PATH", f"/usr/bin:{HOME}/.local/bin:{HOME}/.volta/bin:{HOME}/go/bin",
         "--setenv", "WORKDIR", work,
         "--cap-drop", "ALL",
@@ -583,11 +570,11 @@ def resolve_project_sandbox_params(
     project: dict,
     *,
     sandbox_profile_override: str | None = None,
-) -> tuple[str, list[str], list[str] | str]:
+) -> tuple[str, list[str], list[dict]]:
     """プロジェクト dict からサンドボックス実行に必要なパラメータを解決する。
 
     Returns:
-        (sandbox_profile_id, env_files, allowed_credentials)
+        (sandbox_profile_id, env_files, host_commands)
     """
     sandbox_profile_id = sandbox_profile_override or project.get("sandbox_profile", "default")
     profile = resolve_profile(sandbox_profile_id)
@@ -602,8 +589,8 @@ def resolve_project_sandbox_params(
         if dotenv.is_file():
             env_files.append(str(dotenv))
 
-    allowed_credentials = resolve_allowed_credentials(profile)
-    return sandbox_profile_id, env_files, allowed_credentials
+    host_commands = resolve_host_commands(profile)
+    return sandbox_profile_id, env_files, host_commands
 
 
 def build_exec_args(
@@ -611,7 +598,8 @@ def build_exec_args(
     sandbox_profile: str = "default",
     proxy_port: int | None = None,
     env_files: list[str] | None = None,
-    cred_env: dict[str, str] | None = None,
+    broker_env: dict[str, str] | None = None,
+    host_commands: list[dict] | None = None,
     command: list[str] | None = None,
     working_dir: str | None = None,
     dispatch_id: str | None = None,
@@ -628,10 +616,12 @@ def build_exec_args(
 
     env_file_args = load_env_files(env_files or [])
 
-    cred_args: list[str] = []
-    if cred_env:
-        for k, v in cred_env.items():
-            cred_args += ["--setenv", k, v]
+    broker_args: list[str] = []
+    if broker_env:
+        for k, v in broker_env.items():
+            broker_args += ["--setenv", k, v]
+
+    hc_binds = _host_cmd_binds(host_commands or [])
 
     if dispatch_id:
         dispatch_dir = f"/run/user/{UID}/my-tasks-dispatch"
@@ -646,9 +636,9 @@ def build_exec_args(
         ensure_netns()
         if host_forward_ports:
             setup_host_port_forwarding(host_forward_ports)
-        return build_netns_args(work, proxy_port, profile_binds, env_file_args, cred_args, command, host_forward_ports)
+        return build_netns_args(work, proxy_port, profile_binds, env_file_args, broker_args, command, host_forward_ports, hc_binds)
     else:
-        return build_host_network_args(work, profile_binds, env_file_args, cred_args, command)
+        return build_host_network_args(work, profile_binds, env_file_args, broker_args, command, hc_binds)
 
 
 def run(
@@ -661,26 +651,27 @@ def run(
 ) -> None:
     """サンドボックスを構築し、exec で置き換える."""
     profile = resolve_profile(sandbox_profile)
+    host_commands = resolve_host_commands(profile)
 
-    # dispatcher 経由でない場合: 組み込み Credential Broker を起動
-    cred_env: dict[str, str] | None = None
+    # dispatcher 経由でない場合: 組み込み Host Command Broker を起動
+    broker_env: dict[str, str] | None = None
     broker = None
-    if not os.environ.get("CRED_TOKEN"):
-        allowed = resolve_allowed_credentials(profile)
-        if allowed:
-            sock_path = f"/run/user/{UID}/my-tasks-dispatch/cred-broker-{os.getpid()}.sock"
+    if not os.environ.get("HOST_CMD_TOKEN"):
+        if host_commands:
+            sock_path = f"/run/user/{UID}/my-tasks-dispatch/host-cmd-broker-{os.getpid()}.sock"
             token = uuid.uuid4().hex
-            broker = EmbeddedCredBroker(sock_path, token, allowed)
+            broker = EmbeddedHostCommandBroker(sock_path, token, host_commands)
             broker.start()
-            cred_env = {"CRED_TOKEN": token, "CRED_BROKER_SOCK": sock_path}
+            broker_env = {"HOST_CMD_TOKEN": token, "HOST_CMD_BROKER_SOCK": sock_path}
     else:
-        cred_env = {k: os.environ[k] for k in ("CRED_TOKEN", "CRED_BROKER_SOCK") if k in os.environ}
+        broker_env = {k: os.environ[k] for k in ("HOST_CMD_TOKEN", "HOST_CMD_BROKER_SOCK") if k in os.environ}
 
     exec_args = build_exec_args(
         sandbox_profile=sandbox_profile,
         proxy_port=proxy_port,
         env_files=env_files,
-        cred_env=cred_env,
+        broker_env=broker_env,
+        host_commands=host_commands,
         command=command,
         working_dir=working_dir,
     )

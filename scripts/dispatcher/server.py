@@ -15,9 +15,9 @@ import sandbox_exec
 from .models import (
     Job, Lifecycle, log, now_iso,
     SOCKET_DIR_NAME,
-    get_socket_path, get_cred_broker_socket_path, get_repo_dir,
+    get_socket_path, get_host_cmd_broker_socket_path, get_repo_dir,
 )
-from .cred import CredentialBroker
+from .host_cmd import HostCommandBroker
 from .lifecycle import LifecycleManager
 from .tmux import detect_tmux_session, ensure_tmux_session
 from .project_classifier import classify_project
@@ -33,7 +33,7 @@ class DispatchServer(ExecutorMixin):
         self.waiters: dict[str, list[asyncio.Future]] = {}
         self._counter: dict[str, int] = {}
         self._processes: dict[str, asyncio.subprocess.Process] = {}
-        self.cred_broker = CredentialBroker()
+        self.host_cmd_broker = HostCommandBroker()
 
         self.lifecycle_mgr = LifecycleManager(
             repo_dir=repo_dir,
@@ -198,7 +198,7 @@ class DispatchServer(ExecutorMixin):
             return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
 
         try:
-            sandbox_profile_id, env_files, allowed_credentials = \
+            sandbox_profile_id, env_files, host_commands = \
                 sandbox_exec.resolve_project_sandbox_params(
                     project, sandbox_profile_override=request.get("sandbox_profile"),
                 )
@@ -215,7 +215,7 @@ class DispatchServer(ExecutorMixin):
             job_type=job_type,
             sandbox_profile_id=sandbox_profile_id,
             env_files=env_files,
-            allowed_credentials=allowed_credentials,
+            host_commands=host_commands,
         )
         self.jobs[dispatch_id] = job
         self._save_jobs()
@@ -248,7 +248,7 @@ class DispatchServer(ExecutorMixin):
             return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
 
         try:
-            sandbox_profile_id, env_files, _ = \
+            sandbox_profile_id, env_files, _host_cmds = \
                 sandbox_exec.resolve_project_sandbox_params(
                     project, sandbox_profile_override=request.get("sandbox_profile"),
                 )
@@ -481,9 +481,9 @@ async def run_server(max_slots: int, repo: str):
     if os.path.exists(socket_path):
         os.unlink(socket_path)
 
-    cred_broker_path = get_cred_broker_socket_path()
-    if os.path.exists(cred_broker_path):
-        os.unlink(cred_broker_path)
+    broker_path = get_host_cmd_broker_socket_path()
+    if os.path.exists(broker_path):
+        os.unlink(broker_path)
 
     server = DispatchServer(max_slots=max_slots, repo_dir=repo_dir)
     server.lifecycle_mgr._load()
@@ -491,27 +491,27 @@ async def run_server(max_slots: int, repo: str):
     server._load_jobs()
 
     loop = asyncio.get_event_loop()
-    loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(_shutdown(server, srv, cred_srv)))
-    loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(_shutdown(server, srv, cred_srv)))
+    loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(_shutdown(server, srv, broker_srv)))
+    loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(_shutdown(server, srv, broker_srv)))
 
     srv = await asyncio.start_unix_server(server.handle_client, path=socket_path)
     os.chmod(socket_path, 0o600)
 
-    cred_srv = await asyncio.start_unix_server(server.cred_broker.handle_client, path=cred_broker_path)
-    os.chmod(cred_broker_path, 0o600)
+    broker_srv = await asyncio.start_unix_server(server.host_cmd_broker.handle_client, path=broker_path)
+    os.chmod(broker_path, 0o600)
 
-    log.info(f"Dispatch server started: socket={socket_path} cred_broker={cred_broker_path} max_slots={max_slots} repo={repo_dir}")
+    log.info(f"Dispatch server started: socket={socket_path} host_cmd_broker={broker_path} max_slots={max_slots} repo={repo_dir}")
 
     asyncio.create_task(server.cleanup_old_logs())
 
-    async with srv, cred_srv:
+    async with srv, broker_srv:
         await srv.serve_forever()
 
 
-async def _shutdown(server: DispatchServer, srv, cred_srv):
+async def _shutdown(server: DispatchServer, srv, broker_srv):
     await server.shutdown()
     srv.close()
     await srv.wait_closed()
-    cred_srv.close()
-    await cred_srv.wait_closed()
+    broker_srv.close()
+    await broker_srv.wait_closed()
     asyncio.get_event_loop().stop()

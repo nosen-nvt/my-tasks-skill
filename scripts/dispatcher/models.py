@@ -13,7 +13,7 @@ DEFAULT_SESSION_NAME = "dispatch"
 
 SOCKET_DIR_NAME = "my-tasks-dispatch"
 SOCKET_FILE_NAME = "dispatcher.sock"
-CRED_BROKER_SOCK_NAME = "cred-broker.sock"
+HOST_CMD_BROKER_SOCK_NAME = "host-cmd-broker.sock"
 
 log = logging.getLogger("dispatcher")
 
@@ -27,9 +27,9 @@ def get_socket_path() -> str:
     return os.path.join(runtime_dir, SOCKET_DIR_NAME, SOCKET_FILE_NAME)
 
 
-def get_cred_broker_socket_path() -> str:
+def get_host_cmd_broker_socket_path() -> str:
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}")
-    return os.path.join(runtime_dir, SOCKET_DIR_NAME, CRED_BROKER_SOCK_NAME)
+    return os.path.join(runtime_dir, SOCKET_DIR_NAME, HOST_CMD_BROKER_SOCK_NAME)
 
 
 def get_repo_dir(repo: str = DEFAULT_REPO):
@@ -80,7 +80,7 @@ class Job:
     job_type: str = "execute"  # "execute" | "evaluate" | "refine"
     sandbox_profile_id: str = "default"
     env_files: list[str] = field(default_factory=list)
-    allowed_credentials: list[str] | str = field(default_factory=list)
+    host_commands: list[dict] = field(default_factory=list)
     lifecycle_id: str | None = None
     run: int | None = None
     status: str = "queued"

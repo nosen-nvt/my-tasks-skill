@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""host-cmd - Host Command Broker クライアントシム
+
+busybox パターン: symlink/bind 名でコマンドを判別し、
+ホスト側 broker に転送して実行結果を返す。
+
+環境変数:
+  HOST_CMD_TOKEN        - ジョブ固有の認証トークン
+  HOST_CMD_BROKER_SOCK  - Host Command Broker の Unix socket パス
+"""
+
+import json
+import os
+import socket
+import sys
+
+
+def main():
+    command = os.path.basename(sys.argv[0])
+    args = sys.argv[1:]
+
+    token = os.environ.get("HOST_CMD_TOKEN")
+    if not token:
+        print("Error: HOST_CMD_TOKEN is not set", file=sys.stderr)
+        sys.exit(127)
+
+    sock_path = os.environ.get("HOST_CMD_BROKER_SOCK")
+    if not sock_path:
+        print("Error: HOST_CMD_BROKER_SOCK is not set", file=sys.stderr)
+        sys.exit(127)
+
+    stdin_data = None
+    if not sys.stdin.isatty():
+        stdin_data = sys.stdin.read()
+
+    request = {"token": token, "command": command, "args": args}
+    if stdin_data:
+        request["stdin"] = stdin_data
+
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(sock_path)
+        sock.sendall(json.dumps(request).encode() + b"\n")
+
+        data = b""
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+            if b"\n" in data:
+                break
+        sock.close()
+
+        response = json.loads(data.decode().strip())
+        if response.get("ok"):
+            stdout = response.get("stdout", "")
+            stderr = response.get("stderr", "")
+            if stdout:
+                sys.stdout.write(stdout)
+            if stderr:
+                sys.stderr.write(stderr)
+            sys.exit(response.get("exit_code", 0))
+        else:
+            print(f"Error: {response.get('error', 'unknown error')}", file=sys.stderr)
+            sys.exit(127)
+
+    except FileNotFoundError:
+        print(f"Error: broker socket not found: {sock_path}", file=sys.stderr)
+        sys.exit(127)
+    except ConnectionRefusedError:
+        print(f"Error: broker connection refused: {sock_path}", file=sys.stderr)
+        sys.exit(127)
+    except json.JSONDecodeError:
+        print("Error: invalid response from broker", file=sys.stderr)
+        sys.exit(127)
+
+
+if __name__ == "__main__":
+    main()
