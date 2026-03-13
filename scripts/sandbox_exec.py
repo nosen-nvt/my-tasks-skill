@@ -363,6 +363,17 @@ def _base_binds() -> list[str]:
     ]
 
 
+def _my_tasks_binds() -> list[str]:
+    """my-tasks データディレクトリのバインド（設定ディレクトリは ro で保護）."""
+    base = f"{HOME}/.local/share/my-tasks"
+    return [
+        "--bind", base, base,
+        "--ro-bind-try", f"{base}/projects", f"{base}/projects",
+        "--ro-bind-try", f"{base}/sandbox-profiles", f"{base}/sandbox-profiles",
+        "--ro-bind-try", f"{base}/proxy-profiles", f"{base}/proxy-profiles",
+    ]
+
+
 def _socket_binds() -> list[str]:
     """dispatcher ソケットバインド."""
     d = f"/run/user/{UID}/my-tasks-dispatch"
@@ -515,12 +526,15 @@ def build_netns_args(
         "--ro-bind", "/opt/google/chrome", "/opt/google/chrome",
         "--ro-bind", resolv.name, "/run/systemd/resolve/stub-resolv.conf",
         *_socket_binds(),
-        "--bind", str(HOME), str(HOME),
+        "--tmpfs", str(HOME),
+        "--ro-bind-try", f"{HOME}/.gitconfig", f"{HOME}/.gitconfig",
+        "--ro-bind-try", f"{HOME}/.ssh", f"{HOME}/.ssh",
         "--ro-bind", f"{HOME}/src", f"{HOME}/src",
         "--bind", f"{HOME}/.claude", f"{HOME}/.claude",
+        "--ro-bind-try", f"{HOME}/.local/bin", f"{HOME}/.local/bin",
         *profile_binds,
         "--bind", work, work,
-        "--bind", f"{HOME}/.local/share/my-tasks", f"{HOME}/.local/share/my-tasks",
+        *_my_tasks_binds(),
         "--chdir", work,
         *_env_args(env_file_args, broker_args),
         "--setenv", "PATH", f"/usr/bin:{HOME}/.local/bin:{HOME}/go/bin:{HOME}/.bun/bin:{HOME}/.volta/bin",
