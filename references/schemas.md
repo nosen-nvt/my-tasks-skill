@@ -240,6 +240,8 @@ pending → in_progress → done
 | `working_directory` | string | No | ディスパッチャーが使用する作業ディレクトリ（未設定の場合 manual プロジェクト扱い） |
 | `sandbox_profile` | string | No | サンドボックスプロファイル ID（デフォルト: `"default"`）。ファイルベース（`sandbox-profiles/{id}.json`）または組み込みプロファイル（`default`, `unrestricted`）を参照 |
 | `env` | object | No | サンドボックス内で設定する環境変数。値は plain string または `{"pass": "entry"}` 形式（後者は `pass show` で解決）。`.env` ファイルより低優先度 |
+| `extra_binds` | array | No | プロジェクト固有の追加 bind mount。サンドボックスプロファイルの `extra_binds` に追加される |
+| `host_commands` | array | No | プロジェクト固有の追加ホストコマンド。サンドボックスプロファイルの `host_commands` に追加される |
 | `orchestration` | object | No | オーケストレーションポリシー。未設定の場合は手動フロー（従来動作） |
 
 ### 例
@@ -257,7 +259,13 @@ pending → in_progress → done
   "env": {
     "ATL_SITE": "ubs",
     "GITHUB_TOKEN": {"pass": "github/fine-grained-pat"}
-  }
+  },
+  "extra_binds": [
+    {"source": "$HOME/.project-cache", "target": "$HOME/.project-cache", "mode": "rw"}
+  ],
+  "host_commands": [
+    {"name": "az", "path": "/usr/bin/az", "allowed_patterns": ["pipelines run *", "pipelines runs show *"]}
+  ]
 }
 ```
 
@@ -305,6 +313,14 @@ pending → in_progress → done
 **優先順位**: project env < `.env` ファイル（`.env` がオーバーライド）。
 ディスパッチャーは project env を先に `--env-file` で渡し、`.env` を後に渡す。
 bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
+
+### `extra_binds`
+
+プロジェクト固有の追加 bind mount を定義する。サンドボックスプロファイルの `extra_binds` の**後**に追加される（プロファイル + プロジェクトのマージ）。要素のスキーマはサンドボックスプロファイルの `extra_binds` と同一。
+
+### `host_commands`
+
+プロジェクト固有の追加ホストコマンドを定義する。サンドボックスプロファイルの `host_commands` の**後**に追加される（プロファイル + プロジェクトのマージ）。要素のスキーマはサンドボックスプロファイルの `host_commands` と同一。
 
 
 ## 4.1. サンドボックスプロファイル

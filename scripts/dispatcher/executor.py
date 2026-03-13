@@ -89,6 +89,7 @@ class ExecutorMixin:
                 env_files=job.env_files,
                 broker_env=broker_env,
                 host_commands=job.host_commands,
+                extra_binds=job.extra_binds or None,
                 command=command,
                 working_dir=job.working_dir,
                 dispatch_id=job.dispatch_id,
@@ -216,7 +217,7 @@ class ExecutorMixin:
             return ""
 
         try:
-            sandbox_profile_id, env_files, host_commands = \
+            sandbox_profile_id, env_files, host_commands, extra_binds = \
                 sandbox_exec.resolve_project_sandbox_params(project)
         except (FileNotFoundError, ValueError) as e:
             log.error(f"Internal dispatch: sandbox params error: {e}")
@@ -233,6 +234,7 @@ class ExecutorMixin:
             sandbox_profile_id=sandbox_profile_id,
             env_files=env_files,
             host_commands=host_commands,
+            extra_binds=extra_binds,
             lifecycle_id=lifecycle_id,
             run=run,
         )

@@ -34,6 +34,8 @@ def main() -> None:
     working_dir = None
     sandbox_profile = args.sandbox_profile or "default"
     env_files = list(args.env_file)
+    host_commands: list[dict] | None = None
+    extra_binds: list[dict] | None = None
 
     if args.project:
         project = sandbox_exec.load_project(args.project)
@@ -42,9 +44,10 @@ def main() -> None:
         working_dir = project.get("working_directory", "")
         if not working_dir or not Path(working_dir).is_dir():
             sys.exit(f"エラー: プロジェクトの working_directory が無効です: {working_dir!r}")
-        profile_id, project_env_files, _ = sandbox_exec.resolve_project_sandbox_params(
-            project, sandbox_profile_override=args.sandbox_profile,
-        )
+        profile_id, project_env_files, host_commands, extra_binds = \
+            sandbox_exec.resolve_project_sandbox_params(
+                project, sandbox_profile_override=args.sandbox_profile,
+            )
         sandbox_profile = profile_id
         env_files = project_env_files + env_files
 
@@ -53,6 +56,8 @@ def main() -> None:
             proxy_port=args.proxy_port,
             sandbox_profile=sandbox_profile,
             env_files=env_files,
+            host_commands=host_commands,
+            extra_binds=extra_binds,
             command=args.command or None,
             working_dir=working_dir,
         )

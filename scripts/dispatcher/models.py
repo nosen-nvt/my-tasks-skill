@@ -81,6 +81,7 @@ class Job:
     sandbox_profile_id: str = "default"
     env_files: list[str] = field(default_factory=list)
     host_commands: list[dict] = field(default_factory=list)
+    extra_binds: list[dict] = field(default_factory=list)
     lifecycle_id: str | None = None
     run: int | None = None
     status: str = "queued"

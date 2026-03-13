@@ -198,7 +198,7 @@ class DispatchServer(ExecutorMixin):
             return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
 
         try:
-            sandbox_profile_id, env_files, host_commands = \
+            sandbox_profile_id, env_files, host_commands, extra_binds = \
                 sandbox_exec.resolve_project_sandbox_params(
                     project, sandbox_profile_override=request.get("sandbox_profile"),
                 )
@@ -216,6 +216,7 @@ class DispatchServer(ExecutorMixin):
             sandbox_profile_id=sandbox_profile_id,
             env_files=env_files,
             host_commands=host_commands,
+            extra_binds=extra_binds,
         )
         self.jobs[dispatch_id] = job
         self._save_jobs()
@@ -248,7 +249,7 @@ class DispatchServer(ExecutorMixin):
             return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
 
         try:
-            sandbox_profile_id, env_files, _host_cmds = \
+            sandbox_profile_id, env_files, _host_cmds, _extra_binds = \
                 sandbox_exec.resolve_project_sandbox_params(
                     project, sandbox_profile_override=request.get("sandbox_profile"),
                 )

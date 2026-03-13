@@ -181,10 +181,11 @@ def resolve_host_forward_ports(profile: dict) -> list[int]:
     return [int(p) for p in profile.get("host_forward_ports", [])]
 
 
-def resolve_extra_binds(profile: dict) -> list[str]:
+def resolve_extra_binds(binds: list[dict]) -> list[str]:
+    """extra_binds リストを bwrap 引数に変換する。"""
     args: list[str] = []
     home = str(HOME)
-    for bind in profile.get("extra_binds", []):
+    for bind in binds:
         src = bind["source"].replace("$HOME", home)
         tgt = bind["target"].replace("$HOME", home)
         flag = "--ro-bind" if bind.get("mode") == "ro" else "--bind"
@@ -592,11 +593,12 @@ def resolve_project_sandbox_params(
     project: dict,
     *,
     sandbox_profile_override: str | None = None,
-) -> tuple[str, list[str], list[dict]]:
+) -> tuple[str, list[str], list[dict], list[dict]]:
     """プロジェクト dict からサンドボックス実行に必要なパラメータを解決する。
 
     Returns:
-        (sandbox_profile_id, env_files, host_commands)
+        (sandbox_profile_id, env_files, host_commands, extra_binds)
+        host_commands と extra_binds はプロファイルとプロジェクトの定義をマージした結果。
     """
     sandbox_profile_id = sandbox_profile_override or project.get("sandbox_profile", "default")
     profile = resolve_profile(sandbox_profile_id)
@@ -611,8 +613,9 @@ def resolve_project_sandbox_params(
         if dotenv.is_file():
             env_files.append(str(dotenv))
 
-    host_commands = resolve_host_commands(profile)
-    return sandbox_profile_id, env_files, host_commands
+    host_commands = resolve_host_commands(profile) + project.get("host_commands", [])
+    extra_binds = profile.get("extra_binds", []) + project.get("extra_binds", [])
+    return sandbox_profile_id, env_files, host_commands, extra_binds
 
 
 def build_exec_args(
@@ -622,6 +625,7 @@ def build_exec_args(
     env_files: list[str] | None = None,
     broker_env: dict[str, str] | None = None,
     host_commands: list[dict] | None = None,
+    extra_binds: list[dict] | None = None,
     command: list[str] | None = None,
     working_dir: str | None = None,
     dispatch_id: str | None = None,
@@ -631,7 +635,9 @@ def build_exec_args(
 
     profile = resolve_profile(sandbox_profile)
     network_protected = uses_network_protection(profile)
-    profile_binds = resolve_extra_binds(profile)
+    profile_binds = resolve_extra_binds(
+        extra_binds if extra_binds is not None else profile.get("extra_binds", [])
+    )
 
     if command is None:
         command = [f"{HOME}/.local/bin/claude", "--permission-mode", "bypassPermissions"]
@@ -668,12 +674,15 @@ def run(
     proxy_port: int | None = None,
     sandbox_profile: str = "default",
     env_files: list[str] | None = None,
+    host_commands: list[dict] | None = None,
+    extra_binds: list[dict] | None = None,
     command: list[str] | None = None,
     working_dir: str | None = None,
 ) -> None:
     """サンドボックスを構築し、exec で置き換える."""
     profile = resolve_profile(sandbox_profile)
-    host_commands = resolve_host_commands(profile)
+    if host_commands is None:
+        host_commands = resolve_host_commands(profile)
 
     # dispatcher 経由でない場合: 組み込み Host Command Broker を起動
     broker_env: dict[str, str] | None = None
@@ -694,6 +703,7 @@ def run(
         env_files=env_files,
         broker_env=broker_env,
         host_commands=host_commands,
+        extra_binds=extra_binds,
         command=command,
         working_dir=working_dir,
     )
