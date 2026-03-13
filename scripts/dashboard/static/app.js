@@ -10,6 +10,7 @@ const state = {
   selectedLifecycleId: null,
   selectedJobId: null,
   mobileColumn: 0,
+  mobileColumnHistory: [],
 };
 
 // --- Fetch helpers ---
@@ -297,7 +298,11 @@ function selectTask(taskId) {
   renderPreview();
 
   if (window.innerWidth < 768) {
-    navigateToColumn(1);
+    if (taskLifecycles.length === 0) {
+      navigateToColumn(3);
+    } else {
+      navigateToColumn(1);
+    }
   }
 }
 
@@ -310,7 +315,12 @@ function selectLifecycle(lifecycleId) {
   renderPreview();
 
   if (window.innerWidth < 768) {
-    navigateToColumn(2);
+    const lcJobs = state.jobs.filter((j) => j.lifecycle_id === lifecycleId);
+    if (lcJobs.length === 0) {
+      navigateToColumn(3);
+    } else {
+      navigateToColumn(2);
+    }
   }
 }
 
@@ -328,6 +338,9 @@ function selectJob(dispatchId) {
 // --- Mobile navigation ---
 
 function navigateToColumn(index) {
+  if (state.mobileColumn !== index) {
+    state.mobileColumnHistory.push(state.mobileColumn);
+  }
   state.mobileColumn = index;
   document.querySelectorAll(".column").forEach((col, i) => {
     col.classList.toggle("mobile-active", i === index);
@@ -336,8 +349,13 @@ function navigateToColumn(index) {
 }
 
 function navigateBack() {
-  if (state.mobileColumn > 0) {
-    navigateToColumn(state.mobileColumn - 1);
+  const prev = state.mobileColumnHistory.pop();
+  if (prev != null) {
+    state.mobileColumn = prev;
+    document.querySelectorAll(".column").forEach((col, i) => {
+      col.classList.toggle("mobile-active", i === prev);
+    });
+    document.getElementById("nav-back").classList.toggle("hidden", prev === 0);
   }
 }
 
