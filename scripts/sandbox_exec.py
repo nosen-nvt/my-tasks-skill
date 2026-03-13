@@ -196,13 +196,12 @@ def resolve_extra_binds(binds: list[dict]) -> list[str]:
 
 # --- プロジェクト env 解決 ----------------------------------------------------
 
-def resolve_project_env_sync(project: dict) -> Path | None:
-    """プロジェクトの env フィールドを同期的に解決し、キャッシュディレクトリに書き出す。
+def _resolve_env_dict(env_dict: dict | None, cache_id: str) -> Path | None:
+    """env ディクショナリを同期的に解決し、キャッシュディレクトリに書き出す。
 
     Returns:
-        生成した env ファイルのパス。env フィールドが無い場合は None。
+        生成した env ファイルのパス。env_dict が空の場合は None。
     """
-    env_dict = project.get("env")
     if not env_dict:
         return None
 
@@ -224,13 +223,18 @@ def resolve_project_env_sync(project: dict) -> Path | None:
         return None
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    env_path = CACHE_DIR / f"env-{project['project_id']}.env"
+    env_path = CACHE_DIR / f"env-{cache_id}.env"
     env_path.write_text(
         "\n".join(f"{k}={v}" for k, v in resolved.items()) + "\n",
         encoding="utf-8",
     )
     os.chmod(env_path, 0o600)
     return env_path
+
+
+def resolve_project_env_sync(project: dict) -> Path | None:
+    """プロジェクトの env フィールドを同期的に解決し、キャッシュディレクトリに書き出す。"""
+    return _resolve_env_dict(project.get("env"), project["project_id"])
 
 
 # --- env ファイル読み込み -----------------------------------------------------
@@ -620,6 +624,9 @@ def resolve_project_sandbox_params(
     profile = resolve_profile(sandbox_profile_id)
 
     env_files: list[str] = []
+    profile_env_file = _resolve_env_dict(profile.get("env"), f"profile-{sandbox_profile_id}")
+    if profile_env_file:
+        env_files.append(str(profile_env_file))
     project_env_file = resolve_project_env_sync(project)
     if project_env_file:
         env_files.append(str(project_env_file))
