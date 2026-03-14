@@ -93,6 +93,18 @@ function statusBadge(status) {
   return `<span class="status status-${status || "unknown"}">${status || "-"}</span>`;
 }
 
+function taskDisplayStatus(task) {
+  if (task.status !== "in_progress") return task.status;
+  const prefix = task.id + "-g";
+  const taskLCs = state.lifecycles.filter(
+    (lc) => lc.lifecycle_id && lc.lifecycle_id.startsWith(prefix)
+  );
+  if (!taskLCs.length) return "in_review";
+  const latest = taskLCs[taskLCs.length - 1];
+  const activeStatuses = ["planning", "phase_executing", "phase_evaluating"];
+  return activeStatuses.includes(latest.status) ? "running" : "in_review";
+}
+
 function duration(startedAt, finishedAt) {
   if (!startedAt) return "";
   const start = new Date(startedAt).getTime();
@@ -188,7 +200,7 @@ function renderTaskList() {
     for (const t of groups[pid]) {
       html += `<div class="list-item" data-task-id="${t.id}">
         <div class="item-main">
-          ${statusBadge(t.status)}
+          ${statusBadge(taskDisplayStatus(t))}
           <span class="item-title">${escapeHtml(t.title || t.id)}</span>
         </div>
         <span class="chevron">\u203a</span>
@@ -289,7 +301,7 @@ async function renderTaskView(taskId) {
 }
 
 function buildTaskMetaHTML(task) {
-  let html = `<span class="meta-item">${statusBadge(task.status)}</span>`;
+  let html = `<span class="meta-item">${statusBadge(taskDisplayStatus(task))}</span>`;
   if (task.project_id)
     html += `<span class="meta-item">${escapeHtml(task.project_id)}</span>`;
   if (task.generation && task.generation > 1)

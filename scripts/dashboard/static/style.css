@@ -262,6 +262,7 @@ main {
 .status-SUSPEND { background: var(--status-suspend); color: #000; }
 .status-DONE { background: var(--status-done); color: #fff; }
 .status-needs_input { background: var(--status-suspend); color: #000; }
+.status-in_review { background: var(--status-reshaping); color: #fff; }
 .status-aborted { background: var(--status-failed); color: #fff; }
 
 @keyframes pulse {
