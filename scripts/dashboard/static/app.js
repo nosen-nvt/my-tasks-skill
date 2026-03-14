@@ -87,6 +87,42 @@ function handleSSEUpdate(dataType) {
   }
 }
 
+// --- Action helpers ---
+
+async function postAction(url) {
+  const res = await fetch(url, { method: "POST" });
+  return res.json();
+}
+
+function showNotification(message, isError = false) {
+  const el = document.createElement("div");
+  el.className = "notification" + (isError ? " error" : "");
+  el.textContent = message;
+  document.body.appendChild(el);
+  setTimeout(() => el.classList.add("fade-out"), 2500);
+  setTimeout(() => el.remove(), 3000);
+}
+
+async function handleAction(btn, url, loadingText) {
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = loadingText || "...";
+  try {
+    const result = await postAction(url);
+    if (result.ok) {
+      showNotification(result.message || "OK");
+    } else {
+      showNotification(result.error || "エラー", true);
+      btn.disabled = false;
+      btn.textContent = origText;
+    }
+  } catch {
+    showNotification("通信エラー", true);
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
+}
+
 // --- Helpers ---
 
 function statusBadge(status) {
@@ -261,6 +297,21 @@ function bindLifecycleClicks(root) {
   });
 }
 
+function bindTaskActions(root) {
+  root.querySelectorAll("[data-action=dispatch]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      handleAction(btn, `${BASE}/api/tasks/${btn.dataset.taskId}/dispatch`, "Dispatching...");
+    });
+  });
+  root.querySelectorAll("[data-action=redispatch]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      handleAction(btn, `${BASE}/api/tasks/${btn.dataset.taskId}/redispatch`, "Re-dispatching...");
+    });
+  });
+}
+
 async function renderTaskView(taskId) {
   const container = document.getElementById("view-container");
   const task = state.tasks.find((t) => t.id === taskId);
@@ -278,6 +329,7 @@ async function renderTaskView(taskId) {
 
   container.innerHTML = html;
   bindLifecycleClicks(container);
+  bindTaskActions(container);
 
   try {
     const data = await fetchJSON(`${BASE}/api/tasks/${taskId}`);
@@ -306,6 +358,10 @@ function buildTaskMetaHTML(task) {
     html += `<span class="meta-item">${escapeHtml(task.project_id)}</span>`;
   if (task.generation && task.generation > 1)
     html += `<span class="meta-item">Gen ${task.generation}</span>`;
+  if (task.status === "pending" && task.project_id)
+    html += `<button class="action-btn primary" data-action="dispatch" data-task-id="${task.id}">Dispatch</button>`;
+  if (task.status === "done" || task.status === "aborted")
+    html += `<button class="action-btn" data-action="redispatch" data-task-id="${task.id}">Re-dispatch</button>`;
   return html;
 }
 
@@ -315,6 +371,7 @@ function updateTaskSummary(taskId) {
   const task = state.tasks.find((t) => t.id === taskId);
   if (!task) return;
   meta.innerHTML = buildTaskMetaHTML(task);
+  bindTaskActions(meta);
   document.getElementById("header-title").textContent =
     task.title || task.id;
 }
@@ -435,6 +492,7 @@ async function renderLifecycleView(lifecycleId) {
 
   container.innerHTML = html;
   bindJobClicks(container);
+  bindLifecycleActions(container);
 
   try {
     const data = await fetchJSON(
@@ -470,7 +528,19 @@ function buildLifecycleMetaHTML(lc) {
   if (lc.suspend_reason) {
     html += `<span class="meta-item suspend">${lc.suspend_reason}</span>`;
   }
+  if (lc.status === "suspend" && lc.suspend_reason === "approval_required") {
+    html += `<button class="action-btn primary" data-action="approve" data-lifecycle-id="${lc.lifecycle_id}">Approve</button>`;
+  }
   return html;
+}
+
+function bindLifecycleActions(root) {
+  root.querySelectorAll("[data-action=approve]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      handleAction(btn, `${BASE}/api/lifecycles/${btn.dataset.lifecycleId}/approve`, "Approving...");
+    });
+  });
 }
 
 function updateLifecycleSummary(lifecycleId) {
@@ -479,6 +549,7 @@ function updateLifecycleSummary(lifecycleId) {
   const lc = state.lifecycles.find((l) => l.lifecycle_id === lifecycleId);
   if (!lc) return;
   meta.innerHTML = buildLifecycleMetaHTML(lc);
+  bindLifecycleActions(meta);
 }
 
 function updateJobList(lifecycleId) {
@@ -615,6 +686,27 @@ function updateElapsedTimes() {
 
 document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("nav-back").addEventListener("click", popView);
+
+  const syncBtn = document.getElementById("sync-btn");
+  syncBtn.addEventListener("click", async () => {
+    syncBtn.disabled = true;
+    syncBtn.classList.add("spinning");
+    try {
+      const result = await postAction(`${BASE}/api/sync`);
+      if (result.ok) {
+        showNotification("Sync started");
+      } else {
+        showNotification(result.error || "Sync failed", true);
+      }
+    } catch {
+      showNotification("通信エラー", true);
+    }
+    // sync 完了は SSE tasks_updated で通知されるため、少し待ってからボタンを復帰
+    setTimeout(() => {
+      syncBtn.disabled = false;
+      syncBtn.classList.remove("spinning");
+    }, 5000);
+  });
 
   setInterval(updateElapsedTimes, 5000);
 

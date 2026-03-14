@@ -1,10 +1,12 @@
 """FastAPI アプリケーション。"""
 
 import asyncio
+import importlib.util
 import json
 import os
 from pathlib import Path
 
+import yaml
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -12,6 +14,16 @@ from fastapi.staticfiles import StaticFiles
 from .watcher import FileWatcher
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+# sync-tasks.py をモジュールとしてインポート（ハイフン付きファイル名対応）
+_script_dir = Path(__file__).resolve().parent.parent
+_spec = importlib.util.spec_from_file_location("sync_tasks", _script_dir / "sync-tasks.py")
+_sync_tasks = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_sync_tasks)
+
+load_index = _sync_tasks.load_index
+save_index = _sync_tasks.save_index
+reopen_task_yaml = _sync_tasks.reopen_task_yaml
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -68,6 +80,19 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         if watcher:
             watcher.stop()
 
+    index_lock = asyncio.Lock()
+    sync_state = {"running": False, "error": None}
+
+    async def dispatcher_send(request: dict) -> dict:
+        sock_path = dispatch_dir / "dispatcher.sock"
+        reader, writer = await asyncio.open_unix_connection(str(sock_path))
+        writer.write(json.dumps(request, ensure_ascii=False).encode() + b"\n")
+        await writer.drain()
+        data = await reader.readline()
+        writer.close()
+        await writer.wait_closed()
+        return json.loads(data)
+
     # --- API ---
 
     @app.get("/api/projects")
@@ -98,7 +123,6 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
     async def api_task_detail(task_id: str) -> JSONResponse:
         yaml_path = repo_dir / "tasks" / f"{task_id}.yaml"
         if yaml_path.exists():
-            import yaml
             content = yaml_path.read_text(encoding="utf-8")
             try:
                 data = yaml.safe_load(content)
@@ -135,7 +159,6 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         # YAML ファイルなら構造化データとして返却
         if context_path.suffix == ".yaml":
             try:
-                import yaml
                 data = yaml.safe_load(content)
                 return JSONResponse({"lifecycle_id": lifecycle_id, "context": data})
             except Exception:
@@ -171,6 +194,139 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             return JSONResponse(data)
         except (json.JSONDecodeError, OSError):
             return JSONResponse({"error": "parse error"}, status_code=500)
+
+    # --- Action endpoints ---
+
+    def _load_task_data(tasks_dir: Path, task_id: str) -> dict:
+        """YAML タスクファイルを読み込む。なければ空 dict を返す。"""
+        yaml_path = tasks_dir / f"{task_id}.yaml"
+        if yaml_path.exists():
+            return yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+        return {}
+
+    @app.post("/api/tasks/{task_id}/dispatch")
+    async def api_dispatch(task_id: str) -> JSONResponse:
+        tasks_dir = repo_dir / "tasks"
+
+        async with index_lock:
+            index_entries = load_index(tasks_dir)
+        entry = next((e for e in index_entries if e.get("id") == task_id), None)
+        if entry is None:
+            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        if entry.get("status") != "pending":
+            return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（pending のみ実行可能）"})
+
+        project_id = entry.get("project_id", "")
+        generation = entry.get("generation", 1)
+
+        task_data = _load_task_data(tasks_dir, task_id)
+        lifecycle_id = f"{task_id}-g{generation}"
+
+        try:
+            result = await dispatcher_send({
+                "command": "dispatch",
+                "project_id": project_id,
+                "prompt": task_data.get("description") or entry.get("title", ""),
+                "context": task_data or None,
+                "lifecycle_id": lifecycle_id,
+            })
+        except (ConnectionRefusedError, FileNotFoundError):
+            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
+
+        if result.get("ok"):
+            async with index_lock:
+                index_entries = load_index(tasks_dir)
+                for e in index_entries:
+                    if e.get("id") == task_id:
+                        e["status"] = "in_progress"
+                        break
+                save_index(tasks_dir, index_entries)
+
+        return JSONResponse(result)
+
+    @app.post("/api/tasks/{task_id}/redispatch")
+    async def api_redispatch(task_id: str) -> JSONResponse:
+        tasks_dir = repo_dir / "tasks"
+
+        async with index_lock:
+            index_entries = load_index(tasks_dir)
+            entry = next((e for e in index_entries if e.get("id") == task_id), None)
+            if entry is None:
+                return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+            if entry.get("status") not in ("done", "aborted"):
+                return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（done/aborted のみ再実行可能）"})
+
+            old_generation = entry.get("generation", 1)
+            entry["status"] = "pending"
+            entry["generation"] = old_generation + 1
+            reopen_task_yaml(tasks_dir, entry)
+            save_index(tasks_dir, index_entries)
+
+        project_id = entry.get("project_id", "")
+        generation = entry.get("generation", 1)
+
+        task_data = _load_task_data(tasks_dir, task_id)
+        lifecycle_id = f"{task_id}-g{generation}"
+
+        try:
+            result = await dispatcher_send({
+                "command": "dispatch",
+                "project_id": project_id,
+                "prompt": task_data.get("description") or entry.get("title", ""),
+                "context": task_data or None,
+                "lifecycle_id": lifecycle_id,
+            })
+        except (ConnectionRefusedError, FileNotFoundError):
+            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
+
+        if result.get("ok"):
+            async with index_lock:
+                index_entries = load_index(tasks_dir)
+                for e in index_entries:
+                    if e.get("id") == task_id:
+                        e["status"] = "in_progress"
+                        break
+                save_index(tasks_dir, index_entries)
+
+        return JSONResponse(result)
+
+    @app.post("/api/lifecycles/{lifecycle_id}/approve")
+    async def api_approve(lifecycle_id: str) -> JSONResponse:
+        try:
+            result = await dispatcher_send({
+                "command": "resume",
+                "lifecycle_id": lifecycle_id,
+            })
+        except (ConnectionRefusedError, FileNotFoundError):
+            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
+        return JSONResponse(result)
+
+    @app.post("/api/sync")
+    async def api_sync() -> JSONResponse:
+        if sync_state["running"]:
+            return JSONResponse({"ok": False, "error": "Sync already running"})
+        sync_state["running"] = True
+        sync_state["error"] = None
+        asyncio.create_task(_run_sync())
+        return JSONResponse({"ok": True, "status": "started"})
+
+    async def _run_sync() -> None:
+        try:
+            fetch_script = repo_dir / "scripts" / "fetch-all.sh"
+            sync_script = Path(__file__).resolve().parent.parent / "sync-tasks.py"
+            proc = await asyncio.create_subprocess_exec(
+                "bash", "-c",
+                f'"{fetch_script}" | python3 "{sync_script}" --repo "{repo_dir}"',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                sync_state["error"] = stderr.decode(errors="replace")[:500]
+        except Exception as e:
+            sync_state["error"] = str(e)
+        finally:
+            sync_state["running"] = False
 
     @app.get("/api/events")
     async def api_events() -> StreamingResponse:
