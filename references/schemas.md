@@ -14,6 +14,7 @@
 | `script` | string | Yes | 収集スクリプトのパス（リポジトリルートからの相対パス） |
 | `sync_mode` | string | No | 同期モード（`"full"` or `"append"`、デフォルト: `"full"`） |
 | `project_mapping` | object | No | `project_key` → `project_id` のマッピング |
+| `site_mapping` | object | No | `project_key` → サイト名のマッピング（Jira 用。フィードバック収集時にサイトを特定するために使用） |
 | `operations` | object | No | データソース側でのタスク操作コマンド定義 |
 
 ### `sync_mode`
@@ -193,6 +194,9 @@ pending → in_progress → done
 | `completion_actions` | array | No | タスク完了後に実行するアクションリスト |
 | `execute_prompt` | string | No | 計画ジョブが生成する実行プロンプト |
 | `history` | array | No | 実行履歴（再オープン時に前世代サマリを追加） |
+| `feedback` | array | No | フィードバック項目リスト（Jira コメント、PR コメント、ユーザー入力） |
+| `feedback_cursor` | object | No | ソースごとの最終取得タイムスタンプ（重複取得を防ぐ） |
+| `pr_url` | string | No | 関連する Bitbucket PR の URL（PR フィードバック収集に使用） |
 
 ### `history` 要素
 
@@ -200,6 +204,23 @@ pending → in_progress → done
 |---|---|---|
 | `generation` | integer | 世代番号 |
 | `summary` | string | その世代の実行サマリ |
+
+### `feedback` 要素
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `source` | string | フィードバックソース: `jira_comment` \| `bitbucket_pr` \| `user` |
+| `author` | string | フィードバックの著者（`user` ソースの場合は省略） |
+| `timestamp` | string | フィードバックの日時（ISO 8601） |
+| `body` | string | フィードバックの内容 |
+| `generation` | integer | どの世代に対するフィードバックか |
+
+### `feedback_cursor`
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `jira_comment` | string | Jira コメントの最終取得タイムスタンプ |
+| `bitbucket_pr` | string | Bitbucket PR コメントの最終取得タイムスタンプ |
 
 ### 例
 
@@ -218,6 +239,8 @@ acceptance_criteria: []
 completion_actions: []
 execute_prompt: ""
 history: []
+feedback: []
+feedback_cursor: {}
 ```
 
 ### 再オープン後の例
@@ -240,6 +263,14 @@ execute_prompt: ""
 history:
   - generation: 1
     summary: "Phase 1-3 完了。API 実装済み"
+feedback:
+  - source: jira_comment
+    author: "レビュアー名"
+    timestamp: "2026-03-14T10:00:00+09:00"
+    body: "エラーハンドリングが不十分です。NullReferenceException の対策を追加してください"
+    generation: 1
+feedback_cursor:
+  jira_comment: "2026-03-14T10:00:00+09:00"
 ```
 
 ### 規約
@@ -611,6 +642,7 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 | `phases` | array | フェーズ定義の配列 |
 | `execute_prompt` | string | 実行ジョブに渡すプロンプト |
 | `previous_generations` | array | 過去世代の実行履歴 |
+| `feedback` | array | レビュアー・ユーザーからのフィードバックリスト（タスク YAML の `feedback` と同一構造） |
 
 ### `phases` 要素
 
@@ -643,4 +675,5 @@ phases:
     summary: null
 execute_prompt: ""
 previous_generations: []
+feedback: []
 ```

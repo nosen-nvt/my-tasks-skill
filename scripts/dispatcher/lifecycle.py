@@ -34,6 +34,14 @@ PLAN_TEMPLATE = """\
 - 説明: {project_description}
 - 作業ディレクトリ: {working_directory}
 
+# フィードバック
+
+`feedback` フィールドにレビュアーやユーザーからのフィードバックが含まれている場合:
+- 各フィードバック項目の内容を分析し、修正方針に反映してください
+- フィードバックの指摘事項をフェーズ計画の達成条件に組み込んでください
+- previous_generations のサマリーとフィードバックを照合し、前世代で何が不足していたかを特定してください
+- フィードバックがない場合はこのセクションを無視してください
+
 # 指示
 
 1. タスクの内容を分析してください。必要に応じて作業ディレクトリ配下のソースコードを調査してください。
@@ -101,6 +109,14 @@ PLAN_RECLARIFY_TEMPLATE = """\
 - プロジェクト名: {project_name}
 - 説明: {project_description}
 - 作業ディレクトリ: {working_directory}
+
+# フィードバック
+
+`feedback` フィールドにレビュアーやユーザーからのフィードバックが含まれている場合:
+- 各フィードバック項目の内容を分析し、修正方針に反映してください
+- フィードバックの指摘事項をフェーズ計画の達成条件に組み込んでください
+- previous_generations のサマリーとフィードバックを照合し、前世代で何が不足していたかを特定してください
+- フィードバックがない場合はこのセクションを無視してください
 
 # 指示
 
@@ -336,6 +352,7 @@ class LifecycleManager:
             "acceptance_criteria": context_data.get("acceptance_criteria", []),
             "open_questions": context_data.get("open_questions", []),
             "previous_generations": context_data.get("previous_generations", []),
+            "feedback": context_data.get("feedback", []),
         }
         context_yaml = yaml.dump(plan_context, allow_unicode=True, default_flow_style=False, sort_keys=False)
 

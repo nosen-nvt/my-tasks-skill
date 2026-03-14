@@ -54,6 +54,7 @@ def task_yaml_to_context_yaml(task_data: dict, prompt: str, project_id: str) -> 
         "phases": [],
         "execute_prompt": task_data.get("execute_prompt", ""),
         "previous_generations": previous_generations,
+        "feedback": task_data.get("feedback") or [],
     }
 
 
@@ -426,6 +427,7 @@ class DispatchServer(ExecutorMixin):
                 "phases": [],
                 "execute_prompt": "",
                 "previous_generations": [],
+                "feedback": [],
             }
         mgr._init_context_yaml(lc, context_data)
         mgr._save()

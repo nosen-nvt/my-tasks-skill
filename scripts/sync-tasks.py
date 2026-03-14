@@ -126,6 +126,8 @@ def _task_yaml_data(entry: dict) -> dict:
         "completion_actions": [],
         "execute_prompt": "",
         "history": [],
+        "feedback": [],
+        "feedback_cursor": {},
     }
 
 

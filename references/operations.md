@@ -365,7 +365,53 @@ python3 ~/.claude/skills/my-tasks/scripts/reopen-task.py \
 
 ---
 
-## 9. 対話セッション
+## 9. フィードバック収集
+
+タスクに対するフィードバック（Jira コメント、Bitbucket PR コメント）を収集し、タスク YAML に保存する。
+
+### 自動収集
+
+```bash
+# 全ソースから収集
+python3 ~/.claude/skills/my-tasks/scripts/collect-feedback.py \
+  --repo ~/.local/share/my-tasks --id 20260301-001
+
+# Jira コメントのみ
+python3 ~/.claude/skills/my-tasks/scripts/collect-feedback.py \
+  --repo ~/.local/share/my-tasks --id 20260301-001 --source jira
+
+# Bitbucket PR コメントのみ（タスク YAML に pr_url が設定されている場合）
+python3 ~/.claude/skills/my-tasks/scripts/collect-feedback.py \
+  --repo ~/.local/share/my-tasks --id 20260301-001 --source bitbucket
+```
+
+スクリプトは以下を実行する:
+1. タスク YAML から `remote_id`, `datasource_id`, `feedback_cursor` を取得
+2. Jira コメント収集: `atl jira issue view --key {remote_id} --json --site {site}` でコメントを取得し、`feedback_cursor.jira_comment` 以降のみ抽出
+3. Bitbucket PR コメント収集: `pr_url` から workspace/repo/pr_id をパースし、`atl bitbucket pr comment` でコメントを取得
+4. 収集結果をタスク YAML の `feedback` に追記し、`feedback_cursor` を更新
+5. JSON レポートを stdout に出力
+
+### 手動フィードバック追加
+
+```bash
+python3 ~/.claude/skills/my-tasks/scripts/add-feedback.py \
+  --repo ~/.local/share/my-tasks --id 20260301-001 \
+  --body "ログレベルも変更してください"
+```
+
+### 前提条件
+
+- Jira フィードバック: datasource JSON に `site_mapping`（プロジェクトキー → サイト名）が設定されていること
+- Bitbucket PR フィードバック: タスク YAML に `pr_url` が設定されていること
+
+### フィードバックの利用
+
+収集されたフィードバックは dispatch 時にコンテキスト YAML に含まれ、計画エージェントがフィードバックに基づいて修正フェーズを自律的に構築する。
+
+---
+
+## 10. 対話セッション
 
 ジョブ管理の対象外で対話セッションを起動する。
 
