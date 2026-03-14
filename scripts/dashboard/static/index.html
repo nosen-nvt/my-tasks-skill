@@ -10,32 +10,13 @@
   <header>
     <div class="header-left">
       <button id="nav-back" class="nav-btn hidden" aria-label="戻る">&#8592;</button>
-      <h1>my-tasks</h1>
+      <h1 id="header-title">my-tasks</h1>
     </div>
     <div class="header-right">
       <span id="connection-status" class="status-dot disconnected" title="SSE disconnected"></span>
     </div>
   </header>
-
-  <div class="columns">
-    <div class="column mobile-active" id="col-tasks">
-      <div class="column-header">Tasks</div>
-      <div class="column-body" id="tasks-list"></div>
-    </div>
-    <div class="column" id="col-lifecycles">
-      <div class="column-header">Lifecycles</div>
-      <div class="column-body" id="lifecycles-list"></div>
-    </div>
-    <div class="column" id="col-jobs">
-      <div class="column-header">Jobs</div>
-      <div class="column-body" id="jobs-list"></div>
-    </div>
-    <div class="column column-preview" id="col-preview">
-      <div class="column-header" id="preview-title">Preview</div>
-      <div class="column-body" id="preview-content"></div>
-    </div>
-  </div>
-
+  <main id="view-container"></main>
   <script src="/static/app.js"></script>
 </body>
 </html>

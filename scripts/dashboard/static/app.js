@@ -1,4 +1,4 @@
-/* my-tasks dashboard – Finder column view */
+/* my-tasks dashboard – Drill-down view */
 
 const BASE = window.__BASE_PATH__ || "";
 
@@ -6,12 +6,10 @@ const state = {
   tasks: [],
   lifecycles: [],
   jobs: [],
-  selectedTaskId: null,
-  selectedLifecycleId: null,
-  selectedJobId: null,
-  mobileColumn: 0,
-  mobileColumnHistory: [],
+  viewStack: [{ type: "tasks" }],
 };
+
+let logRefreshTimer = null;
 
 // --- Fetch helpers ---
 
@@ -29,7 +27,7 @@ async function loadAll() {
   state.tasks = tasks;
   state.lifecycles = lifecycles;
   state.jobs = jobs;
-  renderAll();
+  renderCurrentView();
 }
 
 // --- SSE ---
@@ -52,18 +50,41 @@ function connectSSE() {
 
   es.addEventListener("tasks_updated", async () => {
     state.tasks = await fetchJSON(`${BASE}/api/tasks`);
-    renderTasksColumn();
+    handleSSEUpdate("tasks");
   });
 
   es.addEventListener("jobs_updated", async () => {
     state.jobs = await fetchJSON(`${BASE}/api/jobs`);
-    renderJobsColumn();
+    handleSSEUpdate("jobs");
   });
 
   es.addEventListener("lifecycles_updated", async () => {
     state.lifecycles = await fetchJSON(`${BASE}/api/lifecycles`);
-    renderLifecyclesColumn();
+    handleSSEUpdate("lifecycles");
   });
+}
+
+function handleSSEUpdate(dataType) {
+  const view = currentView();
+  switch (view.type) {
+    case "tasks":
+      if (dataType === "tasks") renderTaskList();
+      break;
+    case "task":
+      if (dataType === "tasks") updateTaskSummary(view.taskId);
+      if (dataType === "lifecycles") updateLifecycleList(view.taskId);
+      break;
+    case "lifecycle":
+      if (dataType === "lifecycles") updateLifecycleSummary(view.lifecycleId);
+      if (dataType === "jobs") updateJobList(view.lifecycleId);
+      break;
+    case "job":
+      if (dataType === "jobs") {
+        const job = state.jobs.find((j) => j.dispatch_id === view.dispatchId);
+        if (job && job.status !== "running") renderJobView(view.dispatchId);
+      }
+      break;
+  }
 }
 
 // --- Helpers ---
@@ -88,10 +109,65 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-// --- Column rendering ---
+// --- Navigation ---
 
-function renderTasksColumn() {
-  const container = document.getElementById("tasks-list");
+function currentView() {
+  return state.viewStack[state.viewStack.length - 1];
+}
+
+function pushView(view) {
+  state.viewStack.push(view);
+  renderCurrentView();
+}
+
+function popView() {
+  if (state.viewStack.length > 1) {
+    state.viewStack.pop();
+    renderCurrentView();
+  }
+}
+
+// --- Main render ---
+
+function renderCurrentView() {
+  clearLogRefresh();
+  const view = currentView();
+  const container = document.getElementById("view-container");
+  const titleEl = document.getElementById("header-title");
+  const backBtn = document.getElementById("nav-back");
+
+  backBtn.classList.toggle("hidden", state.viewStack.length <= 1);
+
+  switch (view.type) {
+    case "tasks":
+      titleEl.textContent = "my-tasks";
+      renderTaskList();
+      break;
+    case "task": {
+      const task = state.tasks.find((t) => t.id === view.taskId);
+      titleEl.textContent = task?.title || view.taskId;
+      renderTaskView(view.taskId);
+      break;
+    }
+    case "lifecycle": {
+      const genMatch = view.lifecycleId.match(/-g(\d+)$/);
+      titleEl.textContent = `Generation ${genMatch ? genMatch[1] : "?"}`;
+      renderLifecycleView(view.lifecycleId);
+      break;
+    }
+    case "job":
+      titleEl.textContent = view.dispatchId;
+      renderJobView(view.dispatchId);
+      break;
+  }
+
+  container.scrollTop = 0;
+}
+
+// --- Task List (Screen 1) ---
+
+function renderTaskList() {
+  const container = document.getElementById("view-container");
   const tasks = state.tasks;
 
   if (!tasks.length) {
@@ -99,7 +175,6 @@ function renderTasksColumn() {
     return;
   }
 
-  // Group by project
   const groups = {};
   tasks.forEach((t) => {
     const pid = t.project_id || t.project || "(none)";
@@ -109,10 +184,9 @@ function renderTasksColumn() {
 
   let html = "";
   for (const pid of Object.keys(groups).sort()) {
-    html += `<div class="column-group-header">${escapeHtml(pid)}</div>`;
+    html += `<div class="section-header">${escapeHtml(pid)}</div>`;
     for (const t of groups[pid]) {
-      const selected = state.selectedTaskId === t.id ? "selected" : "";
-      html += `<div class="column-item ${selected}" data-task-id="${t.id}">
+      html += `<div class="list-item" data-task-id="${t.id}">
         <div class="item-main">
           ${statusBadge(t.status)}
           <span class="item-title">${escapeHtml(t.title || t.id)}</span>
@@ -124,78 +198,169 @@ function renderTasksColumn() {
 
   container.innerHTML = html;
   container.querySelectorAll("[data-task-id]").forEach((el) => {
-    el.addEventListener("click", () => selectTask(el.dataset.taskId));
+    el.addEventListener("click", () =>
+      pushView({ type: "task", taskId: el.dataset.taskId })
+    );
   });
 }
 
-function renderLifecyclesColumn() {
-  const container = document.getElementById("lifecycles-list");
+// --- Task View (Screen 2): task context + lifecycle list ---
 
-  if (!state.selectedTaskId) {
-    container.innerHTML = '<div class="empty-state">Select a task</div>';
-    return;
-  }
-
-  const prefix = state.selectedTaskId + "-g";
+function buildLifecycleListHTML(taskId) {
+  const prefix = taskId + "-g";
   const taskLifecycles = state.lifecycles.filter(
     (lc) => lc.lifecycle_id && lc.lifecycle_id.startsWith(prefix)
   );
 
-  if (!taskLifecycles.length) {
-    container.innerHTML = '<div class="empty-state">No lifecycles</div>';
-    return;
-  }
+  if (!taskLifecycles.length) return "";
 
-  let html = "";
+  let html = '<div class="section-header">Lifecycles</div>';
   for (const lc of taskLifecycles) {
-    const selected = state.selectedLifecycleId === lc.lifecycle_id ? "selected" : "";
     const genMatch = lc.lifecycle_id.match(/-g(\d+)$/);
     const gen = genMatch ? genMatch[1] : "?";
-    const jobCount = state.jobs.filter((j) => j.lifecycle_id === lc.lifecycle_id).length;
-
     const phases = lc.phases || [];
     const currentPhase = lc.current_phase || 0;
-    const phaseInfo = phases.length > 0
-      ? `Phase ${currentPhase + 1}/${phases.length}`
-      : "No phases";
+    const phaseInfo =
+      phases.length > 0 ? `Phase ${currentPhase + 1}/${phases.length}` : "";
     const currentGoal = phases[currentPhase]?.goal || "";
 
-    html += `<div class="column-item ${selected}" data-lifecycle-id="${lc.lifecycle_id}">
+    html += `<div class="list-item" data-lifecycle-id="${lc.lifecycle_id}">
       <div class="item-main">
         ${statusBadge(lc.status)}
         <span class="item-title">Generation ${gen}</span>
       </div>
       <div class="item-detail">
-        <span class="item-meta">${phaseInfo}</span>
+        ${phaseInfo ? `<span class="item-meta">${phaseInfo}</span>` : ""}
         ${currentGoal ? `<span class="item-sub">${escapeHtml(currentGoal)}</span>` : ""}
-        ${lc.suspend_reason ? `<span class="item-sub">${lc.suspend_reason}</span>` : ""}
+        ${lc.suspend_reason ? `<span class="item-sub suspend">${lc.suspend_reason}</span>` : ""}
       </div>
-      ${jobCount > 0 ? '<span class="chevron">\u203a</span>' : ""}
+      <span class="chevron">\u203a</span>
     </div>`;
   }
 
-  container.innerHTML = html;
-  container.querySelectorAll("[data-lifecycle-id]").forEach((el) => {
-    el.addEventListener("click", () => selectLifecycle(el.dataset.lifecycleId));
+  return html;
+}
+
+function bindLifecycleClicks(root) {
+  root.querySelectorAll("[data-lifecycle-id]").forEach((el) => {
+    el.addEventListener("click", () =>
+      pushView({ type: "lifecycle", lifecycleId: el.dataset.lifecycleId })
+    );
   });
 }
 
-function renderJobsColumn() {
-  const container = document.getElementById("jobs-list");
+async function renderTaskView(taskId) {
+  const container = document.getElementById("view-container");
+  const task = state.tasks.find((t) => t.id === taskId);
 
-  if (!state.selectedLifecycleId) {
-    container.innerHTML = '<div class="empty-state">Select a lifecycle</div>';
-    return;
+  let html = '<div class="context-card">';
+  if (task) {
+    html += '<div class="context-meta" id="task-meta">';
+    html += buildTaskMetaHTML(task);
+    html += "</div>";
+  }
+  html +=
+    '<div id="task-detail-content"><div class="empty-state">Loading...</div></div>';
+  html += "</div>";
+  html += `<div id="lifecycle-list-section">${buildLifecycleListHTML(taskId)}</div>`;
+
+  container.innerHTML = html;
+  bindLifecycleClicks(container);
+
+  try {
+    const data = await fetchJSON(`${BASE}/api/tasks/${taskId}`);
+    const detailEl = document.getElementById("task-detail-content");
+    if (
+      !detailEl ||
+      currentView().type !== "task" ||
+      currentView().taskId !== taskId
+    )
+      return;
+    if (data.content) {
+      detailEl.innerHTML = `<pre class="preview-text">${escapeHtml(data.content)}</pre>`;
+    } else {
+      detailEl.innerHTML = renderTaskDetailSections(data);
+    }
+  } catch {
+    const detailEl = document.getElementById("task-detail-content");
+    if (detailEl)
+      detailEl.innerHTML = '<div class="empty-state">Failed to load</div>';
+  }
+}
+
+function buildTaskMetaHTML(task) {
+  let html = `<span class="meta-item">${statusBadge(task.status)}</span>`;
+  if (task.project_id)
+    html += `<span class="meta-item">${escapeHtml(task.project_id)}</span>`;
+  if (task.generation && task.generation > 1)
+    html += `<span class="meta-item">Gen ${task.generation}</span>`;
+  return html;
+}
+
+function updateTaskSummary(taskId) {
+  const meta = document.getElementById("task-meta");
+  if (!meta) return;
+  const task = state.tasks.find((t) => t.id === taskId);
+  if (!task) return;
+  meta.innerHTML = buildTaskMetaHTML(task);
+  document.getElementById("header-title").textContent =
+    task.title || task.id;
+}
+
+function updateLifecycleList(taskId) {
+  const section = document.getElementById("lifecycle-list-section");
+  if (!section) return;
+  section.innerHTML = buildLifecycleListHTML(taskId);
+  bindLifecycleClicks(section);
+}
+
+function renderTaskDetailSections(data) {
+  let html = "";
+
+  if (data.description) {
+    html += `<div class="detail-section"><div class="detail-body">${escapeHtml(data.description)}</div></div>`;
   }
 
-  const jobs = state.jobs.filter((j) => j.lifecycle_id === state.selectedLifecycleId);
-
-  if (!jobs.length) {
-    container.innerHTML = '<div class="empty-state">No jobs</div>';
-    return;
+  const sections = [
+    { key: "acceptance_criteria", label: "達成条件" },
+    { key: "preconditions", label: "事前条件" },
+    { key: "open_questions", label: "未決事項" },
+    { key: "completion_actions", label: "完了時アクション" },
+  ];
+  for (const { key, label } of sections) {
+    if (data[key]?.length > 0) {
+      html += `<div class="detail-section"><div class="detail-heading">${label}</div><ul class="detail-list">`;
+      data[key].forEach((item) => {
+        html += `<li>${escapeHtml(item)}</li>`;
+      });
+      html += "</ul></div>";
+    }
   }
 
-  // Group by phase (run field = phase index)
+  if (data.execute_prompt) {
+    html += `<div class="detail-section"><div class="detail-heading">実行プロンプト</div><pre class="preview-text">${escapeHtml(data.execute_prompt)}</pre></div>`;
+  }
+
+  if (data.history?.length > 0) {
+    html += '<div class="detail-section"><div class="detail-heading">実行履歴</div>';
+    data.history.forEach((h) => {
+      html += `<div class="phase-item"><span class="phase-num">G${h.generation || "?"}</span><span class="phase-goal">${escapeHtml(h.summary || "")}</span></div>`;
+    });
+    html += "</div>";
+  }
+
+  return html;
+}
+
+// --- Lifecycle View (Screen 3): lifecycle context + job list ---
+
+function buildJobListHTML(lifecycleId) {
+  const jobs = state.jobs.filter((j) => j.lifecycle_id === lifecycleId);
+  if (!jobs.length) return "";
+
+  const lc = state.lifecycles.find((l) => l.lifecycle_id === lifecycleId);
+  const phases = lc?.phases || [];
+
   const byPhase = {};
   jobs.forEach((j) => {
     const phase = j.run != null ? j.run : 0;
@@ -203,130 +368,124 @@ function renderJobsColumn() {
     byPhase[phase].push(j);
   });
 
-  const selectedLifecycle = state.lifecycles.find(
-    (lc) => lc.lifecycle_id === state.selectedLifecycleId
-  );
-  const phases = selectedLifecycle?.phases || [];
-
-  let html = "";
   const phaseKeys = Object.keys(byPhase).sort((a, b) => Number(a) - Number(b));
+  let html = '<div class="section-header">Jobs</div>';
 
   for (const phaseIdx of phaseKeys) {
-    const phaseGoal = phases[phaseIdx]?.goal || `Phase ${Number(phaseIdx) + 1}`;
+    const phaseGoal =
+      phases[phaseIdx]?.goal || `Phase ${Number(phaseIdx) + 1}`;
     if (phaseKeys.length > 1) {
-      html += `<div class="column-group-header">${escapeHtml(phaseGoal)}</div>`;
+      html += `<div class="subsection-header">${escapeHtml(phaseGoal)}</div>`;
     }
     for (const j of byPhase[phaseIdx]) {
-      const selected = state.selectedJobId === j.dispatch_id ? "selected" : "";
-      const dur = j.started_at ? duration(j.started_at, j.finished_at) : "";
-      html += `<div class="column-item ${selected}" data-dispatch-id="${j.dispatch_id}">
+      const dur = j.started_at
+        ? duration(j.started_at, j.finished_at)
+        : "";
+      html += `<div class="list-item" data-dispatch-id="${j.dispatch_id}">
         <div class="item-main">
           ${statusBadge(j.status)}
           <span class="item-title">${j.job_type || "execute"}</span>
+          ${dur ? `<span class="elapsed" data-started-at="${j.started_at}" data-finished-at="${j.finished_at || ""}">${dur}</span>` : ""}
         </div>
         <div class="item-detail">
           <span class="item-meta">${j.dispatch_id}</span>
-          ${dur ? `<span class="elapsed">${dur}</span>` : ""}
         </div>
+        <span class="chevron">\u203a</span>
       </div>`;
     }
   }
 
-  container.innerHTML = html;
-  container.querySelectorAll("[data-dispatch-id]").forEach((el) => {
-    el.addEventListener("click", () => selectJob(el.dataset.dispatchId));
+  return html;
+}
+
+function bindJobClicks(root) {
+  root.querySelectorAll("[data-dispatch-id]").forEach((el) => {
+    el.addEventListener("click", () =>
+      pushView({ type: "job", dispatchId: el.dataset.dispatchId })
+    );
   });
 }
 
-function renderTaskDetail(data) {
-  let html = "";
+async function renderLifecycleView(lifecycleId) {
+  const container = document.getElementById("view-container");
+  const lc = state.lifecycles.find((l) => l.lifecycle_id === lifecycleId);
 
-  // メタ情報
-  const metaItems = [];
-  if (data.id) metaItems.push(`ID: ${data.id}`);
-  if (data.remote_id) metaItems.push(`Remote: ${data.remote_id}`);
-  if (data.datasource_id) metaItems.push(`Datasource: ${data.datasource_id}`);
-  if (data.project_id) metaItems.push(`Project: ${data.project_id}`);
-  if (data.status) metaItems.push(`Status: ${data.status}`);
-  if (data.generation && data.generation > 1) metaItems.push(`Generation: ${data.generation}`);
-  if (metaItems.length) {
-    html += `<div class="context-meta">${metaItems.map((i) => `<span class="meta-item">${escapeHtml(i)}</span>`).join("")}</div>`;
-  }
-
-  // 概要
-  if (data.description) {
-    html += `<div class="context-section"><div class="context-heading">概要</div><div class="context-body">${escapeHtml(data.description)}</div></div>`;
-  }
-
-  // 達成条件
-  if (data.acceptance_criteria && data.acceptance_criteria.length > 0) {
-    html += `<div class="context-section"><div class="context-heading">達成条件</div><ul class="context-list">`;
-    data.acceptance_criteria.forEach((c) => { html += `<li>${escapeHtml(c)}</li>`; });
-    html += "</ul></div>";
-  }
-
-  // 事前条件
-  if (data.preconditions && data.preconditions.length > 0) {
-    html += `<div class="context-section"><div class="context-heading">事前条件</div><ul class="context-list">`;
-    data.preconditions.forEach((c) => { html += `<li>${escapeHtml(c)}</li>`; });
-    html += "</ul></div>";
-  }
-
-  // 未決事項
-  if (data.open_questions && data.open_questions.length > 0) {
-    html += `<div class="context-section"><div class="context-heading">未決事項</div><ul class="context-list">`;
-    data.open_questions.forEach((q) => { html += `<li>${escapeHtml(q)}</li>`; });
-    html += "</ul></div>";
-  }
-
-  // 完了時アクション
-  if (data.completion_actions && data.completion_actions.length > 0) {
-    html += `<div class="context-section"><div class="context-heading">完了時アクション</div><ul class="context-list">`;
-    data.completion_actions.forEach((a) => { html += `<li>${escapeHtml(a)}</li>`; });
-    html += "</ul></div>";
-  }
-
-  // 実行プロンプト
-  if (data.execute_prompt) {
-    html += `<div class="context-section"><div class="context-heading">実行プロンプト</div><pre class="preview-text">${escapeHtml(data.execute_prompt)}</pre></div>`;
-  }
-
-  // 実行履歴
-  if (data.history && data.history.length > 0) {
-    html += `<div class="context-section"><div class="context-heading">実行履歴</div>`;
-    data.history.forEach((h) => {
-      html += `<div class="phase-item"><span class="phase-num">G${h.generation || "?"}</span><span class="phase-goal">${escapeHtml(h.summary || "")}</span></div>`;
-    });
+  let html = '<div class="context-card">';
+  if (lc) {
+    html += '<div class="context-meta" id="lifecycle-meta">';
+    html += buildLifecycleMetaHTML(lc);
     html += "</div>";
   }
+  html +=
+    '<div id="lifecycle-detail-content"><div class="empty-state">Loading...</div></div>';
+  html += "</div>";
+  html += `<div id="job-list-section">${buildJobListHTML(lifecycleId)}</div>`;
 
-  return html || '<div class="empty-state">No content</div>';
+  container.innerHTML = html;
+  bindJobClicks(container);
+
+  try {
+    const data = await fetchJSON(
+      `${BASE}/api/lifecycles/${lifecycleId}/context`
+    );
+    const detailEl = document.getElementById("lifecycle-detail-content");
+    if (
+      !detailEl ||
+      currentView().type !== "lifecycle" ||
+      currentView().lifecycleId !== lifecycleId
+    )
+      return;
+    if (data.context && typeof data.context === "object") {
+      detailEl.innerHTML = renderLifecycleDetailSections(data.context);
+    } else if (data.content) {
+      detailEl.innerHTML = `<pre class="preview-text">${escapeHtml(data.content)}</pre>`;
+    } else {
+      detailEl.innerHTML = "";
+    }
+  } catch {
+    const detailEl = document.getElementById("lifecycle-detail-content");
+    if (detailEl) detailEl.innerHTML = "";
+  }
 }
 
-function renderContextPreview(ctx) {
+function buildLifecycleMetaHTML(lc) {
+  let html = `<span class="meta-item">${statusBadge(lc.status)}</span>`;
+  const phases = lc.phases || [];
+  const currentPhase = lc.current_phase || 0;
+  if (phases.length > 0) {
+    html += `<span class="meta-item">Phase ${currentPhase + 1}/${phases.length}</span>`;
+  }
+  if (lc.suspend_reason) {
+    html += `<span class="meta-item suspend">${lc.suspend_reason}</span>`;
+  }
+  return html;
+}
+
+function updateLifecycleSummary(lifecycleId) {
+  const meta = document.getElementById("lifecycle-meta");
+  if (!meta) return;
+  const lc = state.lifecycles.find((l) => l.lifecycle_id === lifecycleId);
+  if (!lc) return;
+  meta.innerHTML = buildLifecycleMetaHTML(lc);
+}
+
+function updateJobList(lifecycleId) {
+  const section = document.getElementById("job-list-section");
+  if (!section) return;
+  section.innerHTML = buildJobListHTML(lifecycleId);
+  bindJobClicks(section);
+}
+
+function renderLifecycleDetailSections(ctx) {
   let html = "";
 
-  // メタ情報
-  if (ctx.meta) {
-    const meta = ctx.meta;
-    const items = [];
-    if (meta.task_id) items.push(`Task: ${meta.task_id}`);
-    if (meta.remote_id) items.push(`Remote: ${meta.remote_id}`);
-    if (meta.project_id) items.push(`Project: ${meta.project_id}`);
-    if (meta.generation) items.push(`Generation: ${meta.generation}`);
-    if (items.length) {
-      html += `<div class="context-meta">${items.map((i) => `<span class="meta-item">${escapeHtml(i)}</span>`).join("")}</div>`;
-    }
-  }
-
-  // 概要
   if (ctx.description) {
-    html += `<div class="context-section"><div class="context-heading">概要</div><div class="context-body">${escapeHtml(ctx.description)}</div></div>`;
+    html += `<div class="detail-section"><div class="detail-body">${escapeHtml(ctx.description)}</div></div>`;
   }
 
-  // フェーズ計画
-  if (ctx.phases && ctx.phases.length > 0) {
-    html += '<div class="context-section"><div class="context-heading">フェーズ計画</div><div class="phase-list">';
+  if (ctx.phases?.length > 0) {
+    html +=
+      '<div class="detail-section"><div class="detail-heading">フェーズ計画</div><div class="phase-list">';
     ctx.phases.forEach((p, i) => {
       const status = p.status || "pending";
       html += `<div class="phase-item phase-${status}">
@@ -339,202 +498,113 @@ function renderContextPreview(ctx) {
     html += "</div></div>";
   }
 
-  // 達成条件
-  if (ctx.acceptance_criteria && ctx.acceptance_criteria.length > 0) {
-    html += `<div class="context-section"><div class="context-heading">達成条件</div><ul class="context-list">`;
+  if (ctx.acceptance_criteria?.length > 0) {
+    html += `<div class="detail-section"><div class="detail-heading">達成条件</div><ul class="detail-list">`;
     ctx.acceptance_criteria.forEach((c) => {
       html += `<li>${escapeHtml(c)}</li>`;
     });
     html += "</ul></div>";
   }
 
-  // 未決事項
-  if (ctx.open_questions && ctx.open_questions.length > 0) {
-    html += `<div class="context-section"><div class="context-heading">未決事項</div><ul class="context-list">`;
+  if (ctx.open_questions?.length > 0) {
+    html += `<div class="detail-section"><div class="detail-heading">未決事項</div><ul class="detail-list">`;
     ctx.open_questions.forEach((q) => {
       html += `<li>${escapeHtml(q)}</li>`;
     });
     html += "</ul></div>";
   }
 
-  // 実行プロンプト
-  if (ctx.execute_prompt) {
-    html += `<div class="context-section"><div class="context-heading">実行プロンプト</div><pre class="preview-text">${escapeHtml(ctx.execute_prompt)}</pre></div>`;
-  }
-
-  return html || '<div class="empty-state">No context data</div>';
+  return html;
 }
 
-async function renderPreview() {
-  const titleEl = document.getElementById("preview-title");
-  const contentEl = document.getElementById("preview-content");
+// --- Job View (Screen 4): job log + result ---
 
-  if (state.selectedJobId) {
-    titleEl.textContent = `Job: ${state.selectedJobId}`;
-    contentEl.innerHTML = '<div class="empty-state">Loading...</div>';
+async function renderJobView(dispatchId) {
+  const container = document.getElementById("view-container");
+  container.innerHTML = '<div class="empty-state">Loading...</div>';
+
+  try {
+    const [logData, resultData] = await Promise.all([
+      fetchJSON(`${BASE}/api/jobs/${dispatchId}/log`),
+      fetchJSON(`${BASE}/api/jobs/${dispatchId}/result`).catch(() => null),
+    ]);
+
+    if (
+      currentView().type !== "job" ||
+      currentView().dispatchId !== dispatchId
+    )
+      return;
+
+    let html = "";
+    if (resultData && (resultData.verdict || resultData.next_status)) {
+      const label = resultData.verdict ? "Verdict" : "Status";
+      const value = resultData.verdict || resultData.next_status;
+      html += `<div class="result-card">
+        <span class="result-label">${label}:</span> ${statusBadge(value)}
+        ${resultData.summary ? `<div class="result-summary">${escapeHtml(resultData.summary)}</div>` : ""}
+        ${resultData.phase_summary ? `<div class="result-summary">${escapeHtml(resultData.phase_summary)}</div>` : ""}
+      </div>`;
+    }
+    html += `<pre class="preview-text">${escapeHtml((logData.lines || []).join("\n") || "No log")}</pre>`;
+    container.innerHTML = html;
+
+    const job = state.jobs.find((j) => j.dispatch_id === dispatchId);
+    if (job && job.status === "running") {
+      startLogRefresh(dispatchId);
+    }
+  } catch {
+    container.innerHTML = '<div class="empty-state">Failed to load</div>';
+  }
+}
+
+function startLogRefresh(dispatchId) {
+  clearLogRefresh();
+  logRefreshTimer = setInterval(async () => {
+    if (
+      currentView().type !== "job" ||
+      currentView().dispatchId !== dispatchId
+    ) {
+      clearLogRefresh();
+      return;
+    }
     try {
-      const [data, resultData] = await Promise.all([
-        fetchJSON(`${BASE}/api/jobs/${state.selectedJobId}/log`),
-        fetchJSON(`${BASE}/api/jobs/${state.selectedJobId}/result`).catch(() => null),
-      ]);
-      let html = "";
-      if (resultData && (resultData.verdict || resultData.next_status)) {
-        const label = resultData.verdict ? "Verdict" : "Status";
-        const value = resultData.verdict || resultData.next_status;
-        html += `<div class="preview-result">
-          <span class="result-label">${label}:</span> ${statusBadge(value)}
-          ${resultData.summary ? `<div class="result-summary">${escapeHtml(resultData.summary)}</div>` : ""}
-          ${resultData.phase_summary ? `<div class="result-summary">${escapeHtml(resultData.phase_summary)}</div>` : ""}
-        </div>`;
-      }
-      html += `<pre class="preview-text">${escapeHtml((data.lines || []).join("\n") || "No log")}</pre>`;
-      contentEl.innerHTML = html;
-    } catch {
-      contentEl.innerHTML = '<div class="empty-state">Failed to load</div>';
-    }
-  } else if (state.selectedLifecycleId) {
-    titleEl.textContent = `Lifecycle: ${state.selectedLifecycleId}`;
-    contentEl.innerHTML = '<div class="empty-state">Loading...</div>';
-    try {
-      const data = await fetchJSON(`${BASE}/api/lifecycles/${state.selectedLifecycleId}/context`);
-      if (data.context && typeof data.context === "object") {
-        contentEl.innerHTML = renderContextPreview(data.context);
-      } else {
-        contentEl.innerHTML = `<pre class="preview-text">${escapeHtml(data.content || "No context")}</pre>`;
+      const logData = await fetchJSON(
+        `${BASE}/api/jobs/${dispatchId}/log`
+      );
+      const preEl = document.querySelector(".preview-text");
+      if (preEl) {
+        preEl.textContent =
+          (logData.lines || []).join("\n") || "No log";
       }
     } catch {
-      contentEl.innerHTML = '<div class="empty-state">Failed to load</div>';
+      /* ignore */
     }
-  } else if (state.selectedTaskId) {
-    titleEl.textContent = `Task: ${state.selectedTaskId}`;
-    contentEl.innerHTML = '<div class="empty-state">Loading...</div>';
-    try {
-      const data = await fetchJSON(`${BASE}/api/tasks/${state.selectedTaskId}`);
-      if (data.content) {
-        // 後方互換: 生 Markdown テキスト
-        contentEl.innerHTML = `<pre class="preview-text">${escapeHtml(data.content)}</pre>`;
-      } else {
-        contentEl.innerHTML = renderTaskDetail(data);
-      }
-    } catch {
-      contentEl.innerHTML = '<div class="empty-state">Failed to load</div>';
-    }
-  } else {
-    titleEl.textContent = "Preview";
-    contentEl.innerHTML = '<div class="empty-state">Select an item</div>';
+  }, 5000);
+}
+
+function clearLogRefresh() {
+  if (logRefreshTimer) {
+    clearInterval(logRefreshTimer);
+    logRefreshTimer = null;
   }
 }
 
-// --- Selection ---
+// --- Elapsed time updater ---
 
-function selectTask(taskId) {
-  state.selectedTaskId = taskId;
-  state.selectedLifecycleId = null;
-  state.selectedJobId = null;
-
-  renderTasksColumn();
-  renderLifecyclesColumn();
-
-  // Auto-select if only one lifecycle
-  const prefix = taskId + "-g";
-  const taskLifecycles = state.lifecycles.filter(
-    (lc) => lc.lifecycle_id && lc.lifecycle_id.startsWith(prefix)
-  );
-  if (taskLifecycles.length === 1) {
-    state.selectedLifecycleId = taskLifecycles[0].lifecycle_id;
-    renderLifecyclesColumn();
-    renderJobsColumn();
-  } else {
-    renderJobsColumn();
-  }
-
-  renderPreview();
-
-  if (window.innerWidth < 768) {
-    if (taskLifecycles.length === 0) {
-      navigateToColumn(3);
-    } else {
-      navigateToColumn(1);
-    }
-  }
-}
-
-function selectLifecycle(lifecycleId) {
-  state.selectedLifecycleId = lifecycleId;
-  state.selectedJobId = null;
-
-  renderLifecyclesColumn();
-  renderJobsColumn();
-  renderPreview();
-
-  if (window.innerWidth < 768) {
-    const lcJobs = state.jobs.filter((j) => j.lifecycle_id === lifecycleId);
-    if (lcJobs.length === 0) {
-      navigateToColumn(3);
-    } else {
-      navigateToColumn(2);
-    }
-  }
-}
-
-function selectJob(dispatchId) {
-  state.selectedJobId = dispatchId;
-
-  renderJobsColumn();
-  renderPreview();
-
-  if (window.innerWidth < 768) {
-    navigateToColumn(3);
-  }
-}
-
-// --- Mobile navigation ---
-
-function navigateToColumn(index) {
-  if (state.mobileColumn !== index) {
-    state.mobileColumnHistory.push(state.mobileColumn);
-  }
-  state.mobileColumn = index;
-  document.querySelectorAll(".column").forEach((col, i) => {
-    col.classList.toggle("mobile-active", i === index);
+function updateElapsedTimes() {
+  document.querySelectorAll("[data-started-at]").forEach((el) => {
+    const startedAt = el.dataset.startedAt;
+    const finishedAt = el.dataset.finishedAt || null;
+    el.textContent = duration(startedAt, finishedAt);
   });
-  document.getElementById("nav-back").classList.toggle("hidden", index === 0);
-}
-
-function navigateBack() {
-  const prev = state.mobileColumnHistory.pop();
-  if (prev != null) {
-    state.mobileColumn = prev;
-    document.querySelectorAll(".column").forEach((col, i) => {
-      col.classList.toggle("mobile-active", i === prev);
-    });
-    document.getElementById("nav-back").classList.toggle("hidden", prev === 0);
-  }
-}
-
-// --- Render all ---
-
-function renderAll() {
-  renderTasksColumn();
-  renderLifecyclesColumn();
-  renderJobsColumn();
-  renderPreview();
 }
 
 // --- Init ---
 
 document.addEventListener("DOMContentLoaded", () => {
-  document.getElementById("nav-back").addEventListener("click", navigateBack);
+  document.getElementById("nav-back").addEventListener("click", popView);
 
-  // Elapsed time updater for running jobs
-  setInterval(() => {
-    if (state.selectedLifecycleId) {
-      const hasRunning = state.jobs.some(
-        (j) => j.lifecycle_id === state.selectedLifecycleId && j.status === "running"
-      );
-      if (hasRunning) renderJobsColumn();
-    }
-  }, 5000);
+  setInterval(updateElapsedTimes, 5000);
 
   loadAll();
   connectSSE();
