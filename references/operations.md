@@ -6,7 +6,7 @@
 
 ## 1. タスク収集
 
-全データソースからタスクを収集し、`tasks/index.jsonl` + `tasks/*.md` を更新する。
+全データソースからタスクを収集し、`tasks/index.jsonl` + `tasks/*.yaml` を更新する。
 
 ### 手順
 
@@ -15,7 +15,7 @@
    ~/.local/share/my-tasks/scripts/fetch-all.sh > /tmp/my-tasks-sync.jsonl
    ```
 
-2. `sync-tasks.py` を実行してタスクインデックスと Markdown を更新:
+2. `sync-tasks.py` を実行してタスクインデックスと YAML を更新:
    ```bash
    # 全データソース（fetch-all.sh の出力に含まれる全データソースを処理）
    python3 ~/.claude/skills/my-tasks/scripts/sync-tasks.py \
@@ -36,7 +36,7 @@
    - `reopened`: done から再オープンされたタスク
    - `project_assigned`: `project_mapping` でプロジェクトが特定できたタスク
    - `project_unassigned`: プロジェクトが特定できなかったタスク（dispatch 時に判定）
-   - `vanished`: 消失タスク（full モード: インデックスと Markdown から削除済み）
+   - `vanished`: 消失タスク（full モード: インデックスと YAML から削除済み）
    - `gc`: GC で除去された done タスク（全データソース横断で実行）
 
 4. 一時ファイルを削除:
@@ -102,17 +102,17 @@ Lifecycle はタスク管理の知識を持たない純粋なジョブオーケ�
 
 ### 手順
 
-1. タスク情報を読み込む（`tasks/index.jsonl` + `tasks/{id}.md`）
-2. タスクステータスを `in_progress` に更新（`tasks/index.jsonl` と `tasks/{id}.md`）
+1. タスク情報を読み込む（`tasks/index.jsonl` + `tasks/{id}.yaml`）
+2. タスクステータスを `in_progress` に更新（`tasks/index.jsonl` と `tasks/{id}.yaml`）
 3. ライフサイクルを開始:
    ```bash
    # タスクをディスパッチ（スキル側でタスク解決後に呼び出す）
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
-     --project bo --prompt "タスクタイトル" --context-file /path/to/task.md
+     --project bo --prompt "タスクタイトル" --context-file /path/to/task.yaml
 
    # lifecycle_id を外部指定（タスクとのトレーサビリティ確保）
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
-     --project bo --prompt "タスクタイトル" --context-file /path/to/task.md \
+     --project bo --prompt "タスクタイトル" --context-file /path/to/task.yaml \
      --lifecycle-id "20260312-001-g1"
 
    # タスクなしの直接投入（プロンプトから最小コンテキストを自動生成し計画を実行）
@@ -121,7 +121,7 @@ Lifecycle はタスク管理の知識を持たない純粋なジョブオーケ�
 
    # --project 省略時はプロンプトから自動判定を試みる
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
-     --prompt "バグを修正して" --context-file /path/to/task.md
+     --prompt "バグを修正して" --context-file /path/to/task.yaml
    ```
 
 4. ステータスを確認:
@@ -229,7 +229,7 @@ suspend 中のライフサイクルを再開する。
 
 1. `tasks/index.jsonl` を読み込み、ステータス別に集計・表示
 
-2. 必要に応じて特定タスクの `tasks/{id}.md` の詳細を表示
+2. 必要に応じて特定タスクの `tasks/{id}.yaml` の詳細を表示
 
 ### ジョブ状況
 
@@ -334,7 +334,38 @@ suspend 中のライフサイクルを再開する。
 
 ---
 
-## 8. 対話セッション
+## 8. タスク再オープン
+
+done/aborted タスクを手動で次のジェネレーションに再オープンする。
+
+### 手順
+
+```bash
+python3 ~/.claude/skills/my-tasks/scripts/reopen-task.py \
+  --repo ~/.local/share/my-tasks --id 20260301-001
+```
+
+スクリプトは以下を実行する:
+1. `tasks/index.jsonl` の該当エントリを `pending` + `generation++` に更新
+2. `tasks/{id}.yaml` の `status`/`generation` を更新し、`history` に前世代サマリを追加
+3. JSON レポートを stdout に出力
+
+### 出力例
+
+```json
+{
+  "id": "20260301-001",
+  "remote_id": "UBS-101",
+  "title": "API実装",
+  "old_generation": 1,
+  "new_generation": 2,
+  "status": "pending"
+}
+```
+
+---
+
+## 9. 対話セッション
 
 ジョブ管理の対象外で対話セッションを起動する。
 

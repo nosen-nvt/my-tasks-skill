@@ -171,57 +171,83 @@ pending → in_progress → done
 
 ---
 
-## 3. タスク実体 (`tasks/{id}.md`)
+## 3. タスク実体 (`tasks/{id}.yaml`)
 
-1タスク1ファイル。タスクの詳細情報を Markdown 形式で保持する。
+1タスク1ファイル。タスクの詳細情報を YAML 形式で保持する。
 
-### 構造
+### スキーマ
 
-```markdown
-# {title}
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `id` | string | Yes | タスク ID（`YYYYMMDD-NNN` 形式） |
+| `remote_id` | string | No | データソース内でのタスク一意識別子 |
+| `datasource_id` | string | Yes | データソースの識別子 |
+| `project_id` | string | No | 紐づくプロジェクトの ID |
+| `title` | string | Yes | タスクタイトル |
+| `status` | string | Yes | タスクステータス |
+| `generation` | integer | No | 再オープン世代（デフォルト: `1`） |
+| `description` | string | No | タスクの説明（sync-tasks.py による初期生成時は空） |
+| `open_questions` | array | No | 未決事項リスト（精査フェーズで生成） |
+| `preconditions` | array | No | タスク実行の事前条件リスト |
+| `acceptance_criteria` | array | No | タスクの達成条件リスト |
+| `completion_actions` | array | No | タスク完了後に実行するアクションリスト |
+| `execute_prompt` | string | No | 計画ジョブが生成する実行プロンプト |
+| `history` | array | No | 実行履歴（再オープン時に前世代サマリを追加） |
 
-- ID: {id}
-- Remote ID: {remote_id}
-- Datasource: {datasource_id}
-- Project: {project_id}
-- Status: {status}
+### `history` 要素
 
-## 概要
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `generation` | integer | 世代番号 |
+| `summary` | string | その世代の実行サマリ |
 
-（タスクの説明。sync-tasks.py による初期生成時は空）
+### 例
 
-## 未決事項
+```yaml
+id: "20260301-001"
+remote_id: "UBS-101"
+datasource_id: jira
+project_id: ubs-mgmt-tool
+title: API実装
+status: pending
+generation: 1
+description: ""
+open_questions: []
+preconditions: []
+acceptance_criteria: []
+completion_actions: []
+execute_prompt: ""
+history: []
+```
 
-- [ ] （精査フェーズで生成される質問リスト）
+### 再オープン後の例
 
-## 事前条件
-
-（タスク実行の前提条件）
-
-## 達成条件
-
-（タスクの完了判定基準）
-
-## 完了時アクション
-
-（タスク完了後に実行するアクション）
-
-## 実行プロンプト
-
-（計画ジョブが生成）
-
-## 実行履歴
-
-（フェーズ実行後に結果を追記する。初期状態では空）
+```yaml
+id: "20260301-001"
+remote_id: "UBS-101"
+datasource_id: jira
+project_id: ubs-mgmt-tool
+title: API実装
+status: pending
+generation: 2
+description: API エンドポイントの実装
+open_questions: []
+preconditions: []
+acceptance_criteria:
+  - API が正常にレスポンスを返すこと
+completion_actions: []
+execute_prompt: ""
+history:
+  - generation: 1
+    summary: "Phase 1-3 完了。API 実装済み"
 ```
 
 ### 規約
 
-- メタデータ部分（冒頭のリスト）はプログラムから読み書きする
-- `## 未決事項` はチェックボックス形式。計画ジョブが未決事項を洗い出し
-- `## 実行プロンプト` は計画ジョブが生成し、承認後にディスパッチャーに渡される
-- `## 実行履歴` はフェーズ実行後に結果を追記する
-- 各セクションは空でもヘッダを残す（パース容易性のため）
+- 全フィールドはプログラムから読み書きする（`yaml.safe_load` / `yaml.dump`）
+- `open_questions` は精査フェーズで計画ジョブが未決事項を洗い出す
+- `execute_prompt` は計画ジョブが生成し、承認後にディスパッチャーに渡される
+- `history` はフェーズ実行後に結果を追記する
 
 ---
 
@@ -462,7 +488,7 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 ### 規約
 
 - 収集スクリプトは完了済みタスクを出力しない（未完了タスクのみ出力）
-- `sync_mode=full` のデータソース: JSONL に含まれないが `tasks/index.jsonl` に存在するタスクは「消失タスク」として扱い、インデックスと Markdown ファイルから削除する
+- `sync_mode=full` のデータソース: JSONL に含まれないが `tasks/index.jsonl` に存在するタスクは「消失タスク」として扱い、インデックスと YAML ファイルから削除する
 - `sync_mode=append` のデータソース: 消失検出をスキップし、新規追加と既存更新のみ行う。sync 実行時に `done` タスクを GC する
 - フィールドが存在しない場合はデフォルト値を使用（`null`）
 

@@ -238,6 +238,71 @@ function renderJobsColumn() {
   });
 }
 
+function renderTaskDetail(data) {
+  let html = "";
+
+  // メタ情報
+  const metaItems = [];
+  if (data.id) metaItems.push(`ID: ${data.id}`);
+  if (data.remote_id) metaItems.push(`Remote: ${data.remote_id}`);
+  if (data.datasource_id) metaItems.push(`Datasource: ${data.datasource_id}`);
+  if (data.project_id) metaItems.push(`Project: ${data.project_id}`);
+  if (data.status) metaItems.push(`Status: ${data.status}`);
+  if (data.generation && data.generation > 1) metaItems.push(`Generation: ${data.generation}`);
+  if (metaItems.length) {
+    html += `<div class="context-meta">${metaItems.map((i) => `<span class="meta-item">${escapeHtml(i)}</span>`).join("")}</div>`;
+  }
+
+  // 概要
+  if (data.description) {
+    html += `<div class="context-section"><div class="context-heading">概要</div><div class="context-body">${escapeHtml(data.description)}</div></div>`;
+  }
+
+  // 達成条件
+  if (data.acceptance_criteria && data.acceptance_criteria.length > 0) {
+    html += `<div class="context-section"><div class="context-heading">達成条件</div><ul class="context-list">`;
+    data.acceptance_criteria.forEach((c) => { html += `<li>${escapeHtml(c)}</li>`; });
+    html += "</ul></div>";
+  }
+
+  // 事前条件
+  if (data.preconditions && data.preconditions.length > 0) {
+    html += `<div class="context-section"><div class="context-heading">事前条件</div><ul class="context-list">`;
+    data.preconditions.forEach((c) => { html += `<li>${escapeHtml(c)}</li>`; });
+    html += "</ul></div>";
+  }
+
+  // 未決事項
+  if (data.open_questions && data.open_questions.length > 0) {
+    html += `<div class="context-section"><div class="context-heading">未決事項</div><ul class="context-list">`;
+    data.open_questions.forEach((q) => { html += `<li>${escapeHtml(q)}</li>`; });
+    html += "</ul></div>";
+  }
+
+  // 完了時アクション
+  if (data.completion_actions && data.completion_actions.length > 0) {
+    html += `<div class="context-section"><div class="context-heading">完了時アクション</div><ul class="context-list">`;
+    data.completion_actions.forEach((a) => { html += `<li>${escapeHtml(a)}</li>`; });
+    html += "</ul></div>";
+  }
+
+  // 実行プロンプト
+  if (data.execute_prompt) {
+    html += `<div class="context-section"><div class="context-heading">実行プロンプト</div><pre class="preview-text">${escapeHtml(data.execute_prompt)}</pre></div>`;
+  }
+
+  // 実行履歴
+  if (data.history && data.history.length > 0) {
+    html += `<div class="context-section"><div class="context-heading">実行履歴</div>`;
+    data.history.forEach((h) => {
+      html += `<div class="phase-item"><span class="phase-num">G${h.generation || "?"}</span><span class="phase-goal">${escapeHtml(h.summary || "")}</span></div>`;
+    });
+    html += "</div>";
+  }
+
+  return html || '<div class="empty-state">No content</div>';
+}
+
 function renderContextPreview(ctx) {
   let html = "";
 
@@ -345,7 +410,12 @@ async function renderPreview() {
     contentEl.innerHTML = '<div class="empty-state">Loading...</div>';
     try {
       const data = await fetchJSON(`${BASE}/api/tasks/${state.selectedTaskId}`);
-      contentEl.innerHTML = `<pre class="preview-text">${escapeHtml(data.content || "No content")}</pre>`;
+      if (data.content) {
+        // 後方互換: 生 Markdown テキスト
+        contentEl.innerHTML = `<pre class="preview-text">${escapeHtml(data.content)}</pre>`;
+      } else {
+        contentEl.innerHTML = renderTaskDetail(data);
+      }
     } catch {
       contentEl.innerHTML = '<div class="empty-state">Failed to load</div>';
     }

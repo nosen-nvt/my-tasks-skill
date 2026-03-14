@@ -24,51 +24,35 @@ from .project_classifier import classify_project
 from .executor import ExecutorMixin
 
 
-def markdown_to_context_yaml(md_content: str, prompt: str, project_id: str) -> dict:
-    """タスク markdown を YAML コンテキスト dict に変換する。"""
-    import re
+def task_yaml_to_context_yaml(task_data: dict, prompt: str, project_id: str) -> dict:
+    """タスク YAML dict をコンテキスト dict に変換する。"""
+    meta = {
+        "task_id": task_data.get("id", ""),
+        "remote_id": task_data.get("remote_id", ""),
+        "datasource_id": task_data.get("datasource_id", ""),
+        "project_id": project_id,
+        "generation": task_data.get("generation", 1),
+    }
 
-    def extract_section(content: str, heading: str) -> str:
-        pattern = rf"^## {re.escape(heading)}\s*\n(.*?)(?=^## |\Z)"
-        m = re.search(pattern, content, re.MULTILINE | re.DOTALL)
-        return m.group(1).strip() if m else ""
+    description = task_data.get("description", "") or prompt
 
-    def extract_list(content: str, heading: str) -> list[str]:
-        text = extract_section(content, heading)
-        if not text:
-            return []
-        items = []
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("- "):
-                items.append(line[2:].strip())
-        return items
-
-    # メタデータ抽出 (YAML frontmatter 的なものがあれば)
-    meta = {"task_id": "", "remote_id": "", "datasource_id": "", "project_id": project_id, "generation": 1}
-
-    description = extract_section(md_content, "概要") or prompt
-    preconditions = extract_list(md_content, "事前条件")
-    acceptance_criteria = extract_list(md_content, "達成条件")
-    open_questions = extract_list(md_content, "未決事項")
-    completion_actions = extract_list(md_content, "完了時アクション")
-    execute_prompt = extract_section(md_content, "実行プロンプト")
-
-    # 実行履歴から previous_generations を構築
+    # history から previous_generations を構築
     previous_generations: list[dict] = []
-    history = extract_section(md_content, "実行履歴")
-    if history:
-        previous_generations.append({"summary": history})
+    for h in (task_data.get("history") or []):
+        previous_generations.append({
+            "generation": h.get("generation"),
+            "summary": h.get("summary", ""),
+        })
 
     return {
         "meta": meta,
         "description": description,
-        "preconditions": preconditions,
-        "acceptance_criteria": acceptance_criteria,
-        "open_questions": open_questions,
-        "completion_actions": completion_actions,
+        "preconditions": task_data.get("preconditions") or [],
+        "acceptance_criteria": task_data.get("acceptance_criteria") or [],
+        "open_questions": task_data.get("open_questions") or [],
+        "completion_actions": task_data.get("completion_actions") or [],
         "phases": [],
-        "execute_prompt": execute_prompt,
+        "execute_prompt": task_data.get("execute_prompt", ""),
         "previous_generations": previous_generations,
     }
 
@@ -411,8 +395,20 @@ class DispatchServer(ExecutorMixin):
 
         # YAML コンテキスト生成
         if context:
-            # markdown が渡された場合は YAML に変換
-            context_data = markdown_to_context_yaml(context, prompt, project_id)
+            # タスク YAML (dict) が渡された場合はコンテキストに変換
+            if isinstance(context, dict):
+                context_data = task_yaml_to_context_yaml(context, prompt, project_id)
+            else:
+                # YAML テキストとして渡された場合はパースしてから変換
+                import yaml
+                try:
+                    parsed = yaml.safe_load(context)
+                    if isinstance(parsed, dict):
+                        context_data = task_yaml_to_context_yaml(parsed, prompt, project_id)
+                    else:
+                        context_data = task_yaml_to_context_yaml({}, prompt, project_id)
+                except yaml.YAMLError:
+                    context_data = task_yaml_to_context_yaml({}, prompt, project_id)
         else:
             context_data = {
                 "meta": {

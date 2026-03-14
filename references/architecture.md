@@ -35,7 +35,7 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 │   └── {credential_profile_id}.json
 ├── tasks/                           # gitignored
 │   ├── index.jsonl                  # タスクインデックス
-│   └── {task_id}.md                 # タスク実体（Markdown）
+│   └── {task_id}.yaml               # タスク実体（YAML）
 └── scripts/                         # git 管理
     ├── fetch-all.sh
     ├── fetch-jira.sh
@@ -55,11 +55,11 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 タスクは `id`（`YYYYMMDD-NNN` 形式）で一意に識別する。
 
 **例**:
-- `20260301-001` → `tasks/index.jsonl` 内のエントリ + `tasks/20260301-001.md`
+- `20260301-001` → `tasks/index.jsonl` 内のエントリ + `tasks/20260301-001.yaml`
 
 タスク情報の取得:
 1. `tasks/index.jsonl` から `id` が一致する行を取得（サマリ情報）
-2. `tasks/{id}.md` を読み込み（詳細・プロンプト等）
+2. `tasks/{id}.yaml` を読み込み（詳細・プロンプト等）
 
 ## ステータスモデル
 

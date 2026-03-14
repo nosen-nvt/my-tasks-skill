@@ -20,7 +20,7 @@ JIRA・Microsoft To Do・メール等の外部データソースからタスク�
 
 ## 主要オペレーション
 
-- **タスク収集** - 全データソースからタスクを取得し、index.jsonl + Markdown を更新
+- **タスク収集** - 全データソースからタスクを取得し、index.jsonl + YAML を更新
 - **メールトリアージ** - メールデータソースからアクションアイテムを収集
 - **dispatch** - Lifecycle を開始（CLI がタスク解決、サーバーがジョブチェーンを自動制御）
 - **resume** - suspend 中の Lifecycle を再開（ユーザ入力の反映、承認）

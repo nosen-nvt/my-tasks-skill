@@ -193,7 +193,16 @@ def cmd_dispatch_cli(args: argparse.Namespace) -> None:
     elif not sys.stdin.isatty():
         request["prompt"] = sys.stdin.read().strip()
     if args.context_file:
-        request["context"] = Path(args.context_file).read_text(encoding="utf-8")
+        import yaml
+        context_text = Path(args.context_file).read_text(encoding="utf-8")
+        try:
+            context_data = yaml.safe_load(context_text)
+            if isinstance(context_data, dict):
+                request["context"] = context_data
+            else:
+                request["context"] = context_text
+        except yaml.YAMLError:
+            request["context"] = context_text
     if args.lifecycle_id:
         request["lifecycle_id"] = args.lifecycle_id
 

@@ -2,7 +2,7 @@
 """
 sync-tasks.py - タスク同期スクリプト
 
-fetch-all.sh が出力する JSONL を受け取り、tasks/index.jsonl + tasks/{id}.md を更新する。
+fetch-all.sh が出力する JSONL を受け取り、tasks/index.jsonl + tasks/{id}.yaml を更新する。
 
 使い方:
   fetch-all.sh | python3 sync-tasks.py --repo ~/.local/share/my-tasks
@@ -12,6 +12,7 @@ fetch-all.sh が出力する JSONL を受け取り、tasks/index.jsonl + tasks/{
 import argparse
 import json
 import sys
+import yaml
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -105,157 +106,102 @@ def generate_task_id(index_entries: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# タスク Markdown
+# タスク YAML
 # ---------------------------------------------------------------------------
 
-def create_task_markdown(tasks_dir: Path, entry: dict) -> None:
-    """タスク実体の Markdown ファイルを生成する。"""
+def _task_yaml_data(entry: dict) -> dict:
+    """タスク YAML の初期データを構築する。"""
+    return {
+        "id": entry["id"],
+        "remote_id": entry.get("remote_id", ""),
+        "datasource_id": entry["datasource_id"],
+        "project_id": entry.get("project_id", ""),
+        "title": entry["title"],
+        "status": entry["status"],
+        "generation": entry.get("generation", 1),
+        "description": "",
+        "open_questions": [],
+        "preconditions": [],
+        "acceptance_criteria": [],
+        "completion_actions": [],
+        "execute_prompt": "",
+        "history": [],
+    }
+
+
+def _dump_yaml(data: dict, path: Path) -> None:
+    """YAML を書き出す。"""
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+
+def create_task_yaml(tasks_dir: Path, entry: dict) -> None:
+    """タスク実体の YAML ファイルを生成する。"""
     task_id = entry["id"]
-    md_path = tasks_dir / f"{task_id}.md"
-
-    generation = entry.get("generation", 1)
-    generation_line = f"- Generation: {generation}\n" if generation > 1 else ""
-
-    content = f"""# {entry['title']}
-
-- ID: {entry['id']}
-- Remote ID: {entry.get('remote_id', '')}
-- Datasource: {entry['datasource_id']}
-- Project: {entry.get('project_id', '')}
-- Status: {entry['status']}
-{generation_line}
-## 概要
+    yaml_path = tasks_dir / f"{task_id}.yaml"
+    data = _task_yaml_data(entry)
+    _dump_yaml(data, yaml_path)
 
 
-
-## 未決事項
-
-
-
-## 事前条件
-
-
-
-## 達成条件
-
-
-
-## 完了時アクション
-
-
-
-## 実行プロンプト
-
-
-
-## 実行履歴
-
-"""
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(content)
-
-
-def update_task_markdown_metadata(tasks_dir: Path, entry: dict) -> None:
-    """タスク Markdown ファイルのメタデータ部分（タイトルとリスト）を更新する。"""
+def update_task_yaml(tasks_dir: Path, entry: dict) -> None:
+    """タスク YAML ファイルのメタデータ部分を更新する。"""
     task_id = entry["id"]
-    md_path = tasks_dir / f"{task_id}.md"
+    yaml_path = tasks_dir / f"{task_id}.yaml"
 
-    if not md_path.exists():
-        create_task_markdown(tasks_dir, entry)
+    if not yaml_path.exists():
+        create_task_yaml(tasks_dir, entry)
         return
 
-    with open(md_path, encoding="utf-8") as f:
-        content = f.read()
+    with open(yaml_path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
 
-    generation = entry.get("generation", 1)
-    lines = content.split("\n")
-    new_lines = []
-    has_generation_line = False
-    for line in lines:
-        if line.startswith("# ") and new_lines == []:
-            new_lines.append(f"# {entry['title']}")
-        elif line.startswith("- ID: "):
-            new_lines.append(f"- ID: {entry['id']}")
-        elif line.startswith("- Remote ID: "):
-            new_lines.append(f"- Remote ID: {entry.get('remote_id', '')}")
-        elif line.startswith("- Datasource: "):
-            new_lines.append(f"- Datasource: {entry['datasource_id']}")
-        elif line.startswith("- Project: "):
-            new_lines.append(f"- Project: {entry.get('project_id', '')}")
-        elif line.startswith("- Status: "):
-            new_lines.append(f"- Status: {entry['status']}")
-        elif line.startswith("- Generation: "):
-            new_lines.append(f"- Generation: {generation}")
-            has_generation_line = True
-        else:
-            new_lines.append(line)
+    data["title"] = entry["title"]
+    data["status"] = entry["status"]
+    data["generation"] = entry.get("generation", 1)
+    data["remote_id"] = entry.get("remote_id", data.get("remote_id", ""))
+    data["datasource_id"] = entry["datasource_id"]
+    data["project_id"] = entry.get("project_id", data.get("project_id", ""))
 
-    # Generation 行がなく generation > 1 なら Status の後に挿入
-    if not has_generation_line and generation > 1:
-        for i, line in enumerate(new_lines):
-            if line.startswith("- Status: "):
-                new_lines.insert(i + 1, f"- Generation: {generation}")
-                break
-
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(new_lines))
+    _dump_yaml(data, yaml_path)
 
 
-def reopen_task_markdown(tasks_dir: Path, entry: dict) -> None:
-    """done タスクを再オープンする。実行履歴を保持し、新世代の区切りを挿入する。"""
+def reopen_task_yaml(tasks_dir: Path, entry: dict, prev_summary: str = "") -> None:
+    """done タスクを再オープンする。history に前世代サマリを追加する。"""
     task_id = entry["id"]
-    md_path = tasks_dir / f"{task_id}.md"
+    yaml_path = tasks_dir / f"{task_id}.yaml"
 
-    if not md_path.exists():
-        create_task_markdown(tasks_dir, entry)
+    if not yaml_path.exists():
+        create_task_yaml(tasks_dir, entry)
         return
 
-    with open(md_path, encoding="utf-8") as f:
-        content = f.read()
+    with open(yaml_path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
 
-    generation = entry.get("generation", 1)
-    lines = content.split("\n")
-    new_lines = []
-    has_generation_line = False
+    prev_gen = entry.get("generation", 2) - 1
+    data["status"] = entry["status"]
+    data["generation"] = entry.get("generation", 2)
 
-    for line in lines:
-        if line.startswith("# ") and new_lines == []:
-            new_lines.append(f"# {entry['title']}")
-        elif line.startswith("- Status: "):
-            new_lines.append(f"- Status: {entry['status']}")
-        elif line.startswith("- Generation: "):
-            new_lines.append(f"- Generation: {generation}")
-            has_generation_line = True
-        else:
-            new_lines.append(line)
+    if entry.get("title"):
+        data["title"] = entry["title"]
 
-    # Generation 行がなければ追加
-    if not has_generation_line:
-        for i, line in enumerate(new_lines):
-            if line.startswith("- Status: "):
-                new_lines.insert(i + 1, f"- Generation: {generation}")
-                break
+    # history に前世代サマリを追加
+    history = data.get("history", [])
+    if not isinstance(history, list):
+        history = []
+    history.append({
+        "generation": prev_gen,
+        "summary": prev_summary or "",
+    })
+    data["history"] = history
 
-    # 実行履歴セクションに世代区切りを挿入
-    history_marker = "## 実行履歴"
-    joined = "\n".join(new_lines)
-    idx = joined.find(history_marker)
-    if idx != -1:
-        after_marker = joined[idx + len(history_marker):]
-        # 既存の履歴がある場合、世代区切りを追加
-        existing_history = after_marker.strip()
-        if existing_history:
-            prev_gen = generation - 1
-            generation_separator = f"\n### Generation {prev_gen} (完了済み)\n"
-            new_history = f"\n{generation_separator}\n{existing_history}\n\n---\n\n### Generation {generation}\n"
-            joined = joined[:idx + len(history_marker)] + new_history
-
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(joined)
+    _dump_yaml(data, yaml_path)
 
 
 def delete_task(tasks_dir: Path, task_id: str) -> None:
-    """index エントリの削除は呼び出し側で行う。ここでは .md ファイルの削除のみ。"""
+    """index エントリの削除は呼び出し側で行う。ここでは .yaml ファイルの削除のみ。"""
+    yaml_path = tasks_dir / f"{task_id}.yaml"
+    yaml_path.unlink(missing_ok=True)
+    # 後方互換: .md が残っていれば削除
     md_path = tasks_dir / f"{task_id}.md"
     md_path.unlink(missing_ok=True)
 
@@ -363,7 +309,7 @@ def process_datasource(
                 entry["generation"] = entry.get("generation", 1) + 1
                 if entry.get("title") != t["title"]:
                     entry["title"] = t["title"]
-                reopen_task_markdown(tasks_dir, entry)
+                reopen_task_yaml(tasks_dir, entry)
                 reopened.append({
                     "datasource_id": datasource_id,
                     "remote_id": remote_id,
@@ -374,7 +320,7 @@ def process_datasource(
             elif entry.get("title") != t["title"]:
                 # 既存タスク: title 変更があれば更新
                 entry["title"] = t["title"]
-                update_task_markdown_metadata(tasks_dir, entry)
+                update_task_yaml(tasks_dir, entry)
                 updated.append({
                     "datasource_id": datasource_id,
                     "remote_id": remote_id,
@@ -397,7 +343,7 @@ def process_datasource(
                 "generation": 1,
             }
             index_entries.append(new_entry)
-            create_task_markdown(tasks_dir, new_entry)
+            create_task_yaml(tasks_dir, new_entry)
 
             added.append({
                 "datasource_id": datasource_id,
@@ -457,7 +403,7 @@ def process_datasource(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="fetch-all.sh の JSONL 出力を受け取り、tasks/index.jsonl + tasks/*.md を更新する"
+        description="fetch-all.sh の JSONL 出力を受け取り、tasks/index.jsonl + tasks/*.yaml を更新する"
     )
     parser.add_argument(
         "--repo",

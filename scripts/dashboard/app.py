@@ -96,11 +96,24 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
 
     @app.get("/api/tasks/{task_id}")
     async def api_task_detail(task_id: str) -> JSONResponse:
+        yaml_path = repo_dir / "tasks" / f"{task_id}.yaml"
+        if yaml_path.exists():
+            import yaml
+            content = yaml_path.read_text(encoding="utf-8")
+            try:
+                data = yaml.safe_load(content)
+                if isinstance(data, dict):
+                    data["id"] = task_id
+                    return JSONResponse(data)
+            except Exception:
+                pass
+            return JSONResponse({"id": task_id, "content": content})
+        # 後方互換: .md ファイルが残っている場合
         md_path = repo_dir / "tasks" / f"{task_id}.md"
-        if not md_path.exists():
-            return JSONResponse({"error": "not found"}, status_code=404)
-        content = md_path.read_text(encoding="utf-8")
-        return JSONResponse({"id": task_id, "content": content})
+        if md_path.exists():
+            content = md_path.read_text(encoding="utf-8")
+            return JSONResponse({"id": task_id, "content": content})
+        return JSONResponse({"error": "not found"}, status_code=404)
 
     @app.get("/api/lifecycles")
     async def api_lifecycles() -> list[dict]:
