@@ -119,6 +119,15 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         if not context_path.exists() or context_path.stat().st_size == 0:
             return JSONResponse({"error": "not found"}, status_code=404)
         content = context_path.read_text(encoding="utf-8")
+        # YAML ファイルなら構造化データとして返却
+        if context_path.suffix == ".yaml":
+            try:
+                import yaml
+                data = yaml.safe_load(content)
+                return JSONResponse({"lifecycle_id": lifecycle_id, "context": data})
+            except Exception:
+                pass
+        # fallback: テキストとして返却
         return JSONResponse({"lifecycle_id": lifecycle_id, "content": content})
 
     @app.get("/api/jobs")

@@ -78,38 +78,39 @@ pending → in_progress → done
 
 - `pending`: データソースから取り込まれた初期状態
 - `in_progress`: Lifecycle にディスパッチ済み（Lifecycle 側の suspend 中も含む）
-- `done`: 完了（評価ジョブの PASS 判定、またはユーザが明示的に完了とした状態）
-- `aborted`: 実行不可能と判断された状態（ABORT 判定、または max_runs 到達）
+- `done`: 完了（評価ジョブの DONE 判定、またはユーザが明示的に完了とした状態）
+- `aborted`: 実行不可能と判断された状態（ABORT 判定）
 
 ### Lifecycle のステータス
 
 ディスパッチャーが管理するジョブチェーンの内部状態。タスク管理の知識を持たない。
 
 ```
-dispatch → reshaping → 精査ジョブ
-                          ├── scoped + auto_approve → running → 実行ジョブ → evaluating → 評価ジョブ
-                          │                                                                ├── PASS → done
-                          │                                                                ├── RETRY → reshaping（ループ）
-                          │                                                                ├── BLOCKED → suspend (needs_input)
-                          │                                                                └── ABORT → done
-                          ├── scoped + 手動承認 → suspend (approval_required)
-                          ├── needs_input → suspend (needs_input)
-                          └── reshaping (問題なし) → done
+dispatch → planning → 計画ジョブ
+                        ├── planned + auto_approve → phase_executing → 実行ジョブ → phase_evaluating → 評価ジョブ
+                        │                                                              ├── DONE → done
+                        │                                                              ├── NEXT_PHASE → phase_executing（次フェーズ）
+                        │                                                              ├── SUSPEND → suspend (agent_review)
+                        │                                                              └── ABORT → aborted
+                        ├── planned + 手動承認 → suspend (approval_required)
+                        └── needs_input → suspend (needs_input)
 ```
 
-- `reshaping`: 精査・見直しプロセス中
-- `running`: 実行ジョブ実行中
-- `evaluating`: 評価ジョブ実行中
-- `suspend`: ユーザーアクション待ち（`suspend_reason`: `approval_required` / `needs_input` / `project_confirmation`）
+- `planning`: 計画・分析中
+- `planned`: フェーズ計画完了、承認待ち
+- `phase_executing`: フェーズ実行ジョブ実行中
+- `phase_evaluating`: フェーズ評価ジョブ実行中
+- `suspend`: ユーザーアクション待ち（`suspend_reason`: `approval_required` / `needs_input` / `agent_review`）
 - `done`: Lifecycle 完了
+- `aborted`: 中止
 
 ### 2層の連携
 
 | Lifecycle イベント | タスクインデックス遷移 |
 |---|---|
 | dispatch 時（スキル側） | `pending` → `in_progress` |
-| done (PASS) | `in_progress` → `done` |
-| done (ABORT / max_runs) | `in_progress` → `aborted` |
+| done (DONE) | `in_progress` → `done` |
+| aborted (ABORT) | `in_progress` → `aborted` |
 
 ## git 操作ポリシー
 
@@ -163,7 +164,7 @@ Unix ドメインソケット C/S アーキテクチャのジョブランナー�
 
 | コマンド | 説明 |
 |---------|------|
-| `dispatch` | ライフサイクルを開始（精査→実行→評価を自動制御） |
+| `dispatch` | ライフサイクルを開始（計画→実行→評価を自動制御） |
 | `resume` | suspend 中のライフサイクルを再開 |
 | `run` | ジョブを直接投入（プロジェクト ID + プロンプト指定） |
 | `open` | 対話的セッションを tmux で開く |
@@ -179,12 +180,12 @@ Unix ドメインソケット C/S アーキテクチャのジョブランナー�
 |--------|------|
 | `execute` | タスク実行ジョブ（デフォルト） |
 | `evaluate` | 実行結果の評価ジョブ（達成条件の判定） |
-| `refine` | タスク精査ジョブ |
+| `plan` | タスク計画・フェーズ分割ジョブ |
 
 ### オーケストレーション
 
 プロジェクト定義に `orchestration` フィールドが設定されている場合、
-実行→評価→（再精査→再実行）のチェーンが自動で動作する。
+計画→実行→評価のフェーズベースチェーンが自動で動作する。
 詳細は `dispatcher-design.md` のオーケストレーションセクションを参照。
 
 詳細は `dispatcher-design.md` を参照。

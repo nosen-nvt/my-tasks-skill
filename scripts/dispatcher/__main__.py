@@ -154,7 +154,10 @@ def cmd_status(args: argparse.Namespace) -> None:
         print("Lifecycles:", file=sys.stderr)
         for lc in active_lcs:
             reason = f" ({lc['suspend_reason']})" if lc.get("suspend_reason") else ""
-            print(f"  {lc['lifecycle_id']:<10} {lc['status']:<12}{reason}  project={lc['project_id']:<12} runs={lc.get('run_count', 0)}/{lc.get('max_runs', 5)}")
+            phases = lc.get("phases", [])
+            current_phase = lc.get("current_phase", 0)
+            phase_info = f"phase={current_phase + 1}/{len(phases)}" if phases else "no phases"
+            print(f"  {lc['lifecycle_id']:<10} {lc['status']:<18}{reason}  project={lc['project_id']:<12} {phase_info}")
         print(file=sys.stderr)
 
     if not jobs and not active_lcs:
@@ -292,7 +295,7 @@ def main() -> None:
     # run
     p_run = subparsers.add_parser("run", help="ジョブを投入する")
     p_run.add_argument("--project", required=True, help="プロジェクト ID（プロンプトは stdin から）")
-    p_run.add_argument("--job-type", default=None, help="ジョブタイプ: execute, evaluate, refine")
+    p_run.add_argument("--job-type", default=None, help="ジョブタイプ: execute, evaluate, plan")
     p_run.add_argument("--sandbox-profile", help="サンドボックスプロファイルを上書き指定")
     p_run.set_defaults(func=cmd_run)
 

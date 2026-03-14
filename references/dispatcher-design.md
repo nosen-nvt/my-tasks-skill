@@ -40,7 +40,7 @@ JSON over Unix ドメインソケット。改行区切り（1行1メッセージ
 
 | コマンド | フィールド | 説明 |
 |---------|-----------|------|
-| `dispatch` | `project_id?`, `prompt?`, `context?`, `max_runs?`, `lifecycle_id?` | ライフサイクルを開始（精査→実行→評価を自動制御） |
+| `dispatch` | `project_id?`, `prompt?`, `context?`, `max_runs?`, `lifecycle_id?` | ライフサイクルを開始（計画→実行→評価を自動制御） |
 | `resume` | `lifecycle_id`, `project_id?`, `context_update?` | suspend 中のライフサイクルを再開 |
 | `run` | `project_id`, `prompt`, `job_type?`, `sandbox_profile?` | ジョブを実行（sandbox_profile はプロジェクト設定から自動解決、上書き可） |
 | `open` | `project_id`, `session?`, `sandbox_profile?` | 対話的セッションを tmux で開く |
@@ -54,7 +54,7 @@ JSON over Unix ドメインソケット。改行区切り（1行1メッセージ
 ```json
 {"command": "run", "project_id": "ubs-mgmt-tool", "prompt": "...", "job_type": "execute"}
 {"command": "run", "project_id": "bo", "prompt": "バグを修正してください"}
-{"command": "run", "project_id": "bo", "prompt": "...", "job_type": "refine", "sandbox_profile": "unrestricted"}
+{"command": "run", "project_id": "bo", "prompt": "...", "job_type": "plan", "sandbox_profile": "unrestricted"}
 {"command": "open", "project_id": "ubs-mgmt-tool", "session": "main"}
 {"command": "dispatch", "project_id": "bo", "prompt": "タスクタイトル", "max_runs": 3}
 {"command": "resume", "lifecycle_id": "lc-1", "context_update": "更新されたコンテキスト..."}
@@ -146,7 +146,7 @@ queued ──→ running ──→ done
 
 #### データモデル
 
-- `Lifecycle` dataclass: lifecycle_id, project_id, prompt, context_path, status, suspend_reason, run_count, max_runs, current_dispatch_id, timestamps
+- `Lifecycle` dataclass: lifecycle_id, project_id, prompt, context_path, status, suspend_reason, phases (list[dict]), current_phase (int), run_count, max_runs, current_dispatch_id, timestamps
 - 永続化: `$XDG_RUNTIME_DIR/my-tasks-dispatch/lifecycles.jsonl` (状態変更のたびに全件書き出し)
 - Job に `lifecycle_id` フィールドを追加（Lifecycle 経由のジョブを識別）
 
@@ -154,30 +154,34 @@ queued ──→ running ──→ done
 
 | コマンド | フィールド | 説明 |
 |---------|-----------|------|
-| `dispatch` | `project_id?`, `prompt?`, `context?`, `max_runs?`, `lifecycle_id?` | ライフサイクル開始。精査→承認→実行→評価を自動制御 |
+| `dispatch` | `project_id?`, `prompt?`, `context?`, `max_runs?`, `lifecycle_id?` | ライフサイクル開始。計画→承認→実行→評価を自動制御 |
 | `resume` | `lifecycle_id`, `project_id?`, `context_update?` | suspend 中のライフサイクルを再開 |
+
+#### ステータス値
+
+`planning`, `planned`, `phase_executing`, `phase_evaluating`, `suspend`, `done`, `aborted`
 
 #### ステートマシンフロー
 
 ```
-dispatch → reshaping → 精査ジョブ
-                          ├── scoped + auto_approve → running → 実行ジョブ → evaluating → 評価ジョブ
-                          │                                                                ├── PASS → done
-                          │                                                                ├── RETRY → reshaping (ループ)
-                          │                                                                ├── BLOCKED → suspend (needs_input)
-                          │                                                                └── ABORT → done
-                          ├── scoped + 手動承認 → suspend (approval_required)
-                          ├── needs_input → suspend (needs_input)
-                          └── reshaping (問題なし) → done
+dispatch → planning → 計画ジョブ
+                        ├── planned + auto_approve → phase_executing → 実行ジョブ → phase_evaluating → 評価ジョブ
+                        │                                                              ├── DONE → done
+                        │                                                              ├── NEXT_PHASE → phase_executing（次フェーズ）
+                        │                                                              ├── SUSPEND → suspend (agent_review)
+                        │                                                              └── ABORT → aborted
+                        ├── planned + 手動承認 → suspend (approval_required)
+                        └── needs_input → suspend (needs_input)
 ```
 
 #### `resume` のルーティング
 
 | `suspend_reason` | 動作 |
 |---|---|
-| `needs_input` | status → `reshaping`、`dispatch_refine()` で精査を再実行 |
-| `approval_required` | status → `running`、`dispatch_execute()` で実行を開始 |
-| `project_confirmation` | `project_id` を更新（指定時）、status → `reshaping`、`dispatch_refine()` で精査を再実行 |
+| `needs_input` | status → `planning`、`dispatch_plan()` で計画を再実行 |
+| `approval_required` | status → `phase_executing`、`dispatch_execute()` で実行を開始 |
+| `agent_review` | status → `planning`、`dispatch_plan()` で計画を再実行 |
+| `project_confirmation` | `project_id` を更新（指定時）、status → `planning`、`dispatch_plan()` で計画を再実行 |
 
 #### ランタイムファイル
 
@@ -185,7 +189,7 @@ dispatch → reshaping → 精査ジョブ
 |---|---|---|
 | ジョブログ | `$XDG_RUNTIME_DIR/my-tasks-dispatch/{dispatch_id}.log` | stdout/stderr 出力 |
 | 結果 JSON | `$XDG_RUNTIME_DIR/my-tasks-dispatch/{dispatch_id}.result.json` | ジョブ出力の構造化結果 |
-| コンテキスト | `$XDG_RUNTIME_DIR/my-tasks-dispatch/{lifecycle_id}.context.md` | タスク markdown（dispatch 時に作成、精査ジョブが更新） |
+| コンテキスト | `$XDG_RUNTIME_DIR/my-tasks-dispatch/{lifecycle_id}.context.yaml` | タスク YAML（dispatch 時に作成、計画ジョブが更新） |
 | Lifecycle 状態 | `$XDG_RUNTIME_DIR/my-tasks-dispatch/lifecycles.jsonl` | 全 Lifecycle の永続化（状態変更のたびに全件書き出し） |
 
 Lifecycle ステートマシンが結果 JSON を読んで次の状態を決定する。
@@ -205,9 +209,9 @@ Lifecycle ステートマシンが結果 JSON を読んで次の状態を決定�
 
 ### 定期クリーンアップ
 
-バックグラウンドタスクとして 30 分間隔で実行。完了済み Lifecycle に関連する古いファイル（ログ、結果 JSON、コンテキスト MD）を削除する。
+バックグラウンドタスクとして 30 分間隔で実行。完了済み Lifecycle に関連する古いファイル（ログ、結果 JSON、コンテキスト YAML）を削除する。
 
-- 対象: `$XDG_RUNTIME_DIR/my-tasks-dispatch/` 配下の `.log`, `.result.json`, `.context.md`
+- 対象: `$XDG_RUNTIME_DIR/my-tasks-dispatch/` 配下の `.log`, `.result.json`, `.context.yaml`
 - 条件: 最終更新から 6 時間以上経過 かつ 対応する Lifecycle が `done` 状態
 - コンテキストファイルはアクティブな Lifecycle のものはスキップ
 
@@ -318,23 +322,22 @@ dispatcher server [--max-slots 8] [--repo ~/.local/share/my-tasks]
 ジョブ完了時、以下のパスに結果 JSON を書き出してください:
   {result_path}
 
-精査ジョブの結果フォーマット:
-  {"next_status": "scoped"} — 精査完了、実行可能
+計画ジョブの結果フォーマット:
+  {"next_status": "planned"} — 計画完了、実行可能
   {"next_status": "needs_input"} — ユーザへの質問あり
-  {"next_status": "reshaping"} — 再精査後、問題なし（完了確認待ち）
 
 評価ジョブの結果フォーマット:
-  {"verdict": "PASS", "summary": "..."} — 達成条件すべて満たされている
-  {"verdict": "RETRY", "summary": "..."} — 再実行で修正可能
-  {"verdict": "BLOCKED", "summary": "..."} — ユーザ入力が必要
-  {"verdict": "ABORT", "summary": "..."} — 実行不可能
+  {"verdict": "DONE", "phase_summary": "..."} — 全フェーズ完了
+  {"verdict": "NEXT_PHASE", "phase_summary": "..."} — 次フェーズへ進行
+  {"verdict": "SUSPEND", "phase_summary": "..."} — エージェントレビューが必要
+  {"verdict": "ABORT", "phase_summary": "..."} — 実行不可能
 
 作業が完了したら、変更をコミットしてください。
 プロセスの終了がジョブ完了の通知になります（シグナルファイルは不要です）。
 ```
 
 - 認証情報セクションは `allowed_credentials` が設定されている場合のみ追加される
-- 結果ファイルセクションは `job_type` が `refine` または `evaluate` の場合のみ追加される
+- 結果ファイルセクションは `job_type` が `plan` または `evaluate` の場合のみ追加される
 - `execute` ジョブには結果ファイルセクションは付与されない
 
 ## Credential Broker

@@ -115,7 +115,7 @@ Lifecycle はタスク管理の知識を持たない純粋なジョブオーケ�
      --project bo --prompt "タスクタイトル" --context-file /path/to/task.md \
      --lifecycle-id "20260312-001-g1"
 
-   # タスクなしの直接投入（プロンプトから最小コンテキストを自動生成し精査を実行）
+   # タスクなしの直接投入（プロンプトから最小コンテキストを自動生成し計画を実行）
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
      --project bo --prompt "バグを修正して"
 
@@ -131,23 +131,22 @@ Lifecycle はタスク管理の知識を持たない純粋なジョブオーケ�
 
 ### Lifecycle ステートマシン
 
-ステータス値: `reshaping`, `running`, `evaluating`, `suspend`, `done`
+ステータス値: `planning`, `planned`, `phase_executing`, `phase_evaluating`, `suspend`, `done`, `aborted`
 
 ```
-dispatch → reshaping → 精査ジョブ完了
-                         ├── [scoped + auto_approve] → running → 実行ジョブ → evaluating → 評価ジョブ
-                         │                                                        ├── PASS → done
-                         │                                                        ├── RETRY → reshaping（ループ）
-                         │                                                        ├── BLOCKED → suspend (needs_input)
-                         │                                                        └── ABORT → done
-                         ├── [scoped + 手動承認が必要] → suspend (approval_required)
-                         ├── [needs_input] → suspend (needs_input)
-                         └── [reshaping（問題なし）] → done
+dispatch → planning → 計画ジョブ完了
+                        ├── [planned + auto_approve] → phase_executing → 実行ジョブ → phase_evaluating → 評価ジョブ
+                        │                                                                ├── DONE → done
+                        │                                                                ├── NEXT_PHASE → phase_executing（次フェーズ）
+                        │                                                                ├── SUSPEND → suspend (agent_review)
+                        │                                                                └── ABORT → aborted
+                        ├── [planned + 手動承認が必要] → suspend (approval_required)
+                        └── [needs_input] → suspend (needs_input)
 ```
 
 auto_approve の判定ロジック:
 - `orchestration.auto_approve = false` → 常に手動承認
-- `orchestration.require_first_approval = true`（デフォルト）かつ `run_count = 0` → 初回は手動承認
+- `orchestration.require_first_approval = true`（デフォルト）→ 初回は手動承認
 - それ以外 → 自動承認
 
 ### タスクステータス遷移（スキル側で管理）
@@ -156,8 +155,8 @@ dispatch 時の `pending → in_progress` はスキル側で実行する（dispa
 
 ```
 dispatch 時（スキル側）: pending → in_progress
-Lifecycle done(PASS):    in_progress → done
-Lifecycle done(ABORT/max_runs): in_progress → aborted
+Lifecycle done(DONE):    in_progress → done
+Lifecycle aborted(ABORT): in_progress → aborted
 ```
 
 ### suspend 理由
@@ -165,18 +164,19 @@ Lifecycle done(ABORT/max_runs): in_progress → aborted
 | 理由 | 説明 | resume 時の動作 |
 |------|------|----------------|
 | `approval_required` | 手動承認が必要 | 実行ジョブをディスパッチ |
-| `needs_input` | ユーザ入力が必要 | 再精査ジョブをディスパッチ |
-| `project_confirmation` | プロジェクト判定の確認 | 指定プロジェクトで精査開始 |
+| `needs_input` | ユーザ入力が必要 | 計画ジョブをディスパッチ |
+| `agent_review` | エージェントレビューが必要 | 次フェーズの実行を再開 |
+| `project_confirmation` | プロジェクト判定の確認 | 指定プロジェクトで計画開始 |
 
-### 精査ジョブの動作
+### 計画ジョブの動作
 
-精査ジョブは以下を実行する:
+計画ジョブは以下を実行する:
 
-1. コンテキストファイル（`.context.md`）とプロジェクト定義を読み込み
+1. コンテキストファイル（`.context.yaml`）とプロジェクト定義を読み込み
 2. 必要に応じて作業ディレクトリ配下のソースコードを調査
 3. 未決事項を分析:
-   - **未決事項がある場合**: `## 未決事項` にチェックボックス形式で質問を記載し、`needs_input` に遷移
-   - **未決事項がない場合**: `## 概要`、`## 事前条件`、`## 達成条件`、`## 完了時アクション` を記載し、`scoped` に遷移。`## 実行プロンプト` も同時に生成
+   - **未決事項がある場合**: 未決事項をチェックボックス形式で記載し、`needs_input` に遷移
+   - **未決事項がない場合**: フェーズ分割された実行計画を作成し、`planned` に遷移
 4. コンテキストファイルを更新
 
 ### 達成条件の記述ルール
@@ -186,16 +186,9 @@ Lifecycle done(ABORT/max_runs): in_progress → aborted
 - OK: ファイル内容の確認、YAML/JSON のパース検証、テスト実行（`dotnet test`, `npm test` 等）、ビルド成功、`az pipelines run` + 結果確認
 - NG: ブラウザでの手動確認、外部サービスの目視確認など、エージェントが実行できない操作
 
-### 再精査（`run_count > 0`）
-
-ジョブ実行後に `reshaping` に戻ったタスク（`run_count > 0`）は、実行履歴を踏まえた再精査が行われる:
-- `## 実行履歴` セクションの内容（成功/失敗、結果要約）を参照
-- レビュー指摘や不具合があれば、達成条件・実行プロンプトを修正して `scoped` に遷移
-- 問題がなければ、ユーザーに完了確認を促す
-
 ### manual プロジェクト
 
-`working_directory` が未設定のプロジェクトは manual 扱い。精査ジョブはスキップされ、メインセッションで直接処理する:
+`working_directory` が未設定のプロジェクトは manual 扱い。計画ジョブはスキップされ、メインセッションで直接処理する:
 - `done` に直接遷移
 - 完了時アクション（データソース側のステータス更新等）は通常通り実行する
 
@@ -220,7 +213,7 @@ suspend 中のライフサイクルを再開する。
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher resume --id lc-1
 
    # コンテキスト更新付きの再開（更新済みファイルを渡す）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher resume --id lc-1 --context-file /path/to/updated.md
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher resume --id lc-1 --context-file /path/to/updated.yaml
 
    # プロジェクト確認の場合（project_confirmation）
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher resume --id lc-1 --project correct-project-id

@@ -47,8 +47,10 @@ class Lifecycle:
     project_id: str
     prompt: str
     context_path: str = ""
-    status: str = "reshaping"
-    suspend_reason: str | None = None
+    status: str = "planning"  # planning|planned|phase_executing|phase_evaluating|suspend|done|aborted
+    suspend_reason: str | None = None  # needs_input|approval_required|agent_review
+    phases: list[dict] = field(default_factory=list)
+    current_phase: int = 0
     run_count: int = 0
     max_runs: int = 5
     current_dispatch_id: str | None = None
@@ -63,6 +65,8 @@ class Lifecycle:
             "context_path": self.context_path,
             "status": self.status,
             "suspend_reason": self.suspend_reason,
+            "phases": self.phases,
+            "current_phase": self.current_phase,
             "run_count": self.run_count,
             "max_runs": self.max_runs,
             "current_dispatch_id": self.current_dispatch_id,
@@ -77,7 +81,7 @@ class Job:
     project_id: str
     prompt: str
     working_dir: str
-    job_type: str = "execute"  # "execute" | "evaluate" | "refine"
+    job_type: str = "execute"  # "execute" | "evaluate" | "plan"
     sandbox_profile_id: str = "default"
     env_files: list[str] = field(default_factory=list)
     host_commands: list[dict] = field(default_factory=list)

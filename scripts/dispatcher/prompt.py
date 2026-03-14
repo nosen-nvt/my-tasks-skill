@@ -53,17 +53,16 @@ def build_system_prompt(job: Job, result_path: Path) -> str:
         host_cmd_desc = "\n\nホストコマンド:\n- 以下のコマンドがホスト側で実行されます:\n" + "\n".join(cmd_lines)
 
     result_desc = ""
-    if job.job_type == "refine":
+    if job.job_type == "plan":
         result_desc = f"""
 
 結果ファイル:
 ジョブ完了時、以下のパスに結果 JSON を書き出してください:
   {result_path}
 
-精査ジョブの結果フォーマット:
-  {{"next_status": "scoped"}} — 精査完了、実行可能
-  {{"next_status": "needs_input"}} — ユーザへの質問あり
-  {{"next_status": "reshaping"}} — 再精査後、問題なし（完了確認待ち）"""
+計画ジョブの結果フォーマット:
+  {{"next_status": "planned"}} — 計画完了、実行可能
+  {{"next_status": "needs_input"}} — ユーザへの質問あり"""
     elif job.job_type == "evaluate":
         result_desc = f"""
 
@@ -72,10 +71,10 @@ def build_system_prompt(job: Job, result_path: Path) -> str:
   {result_path}
 
 評価ジョブの結果フォーマット:
-  {{"verdict": "PASS", "summary": "..."}} — 達成条件すべて満たされている
-  {{"verdict": "RETRY", "summary": "..."}} — 再実行で修正可能
-  {{"verdict": "BLOCKED", "summary": "..."}} — ユーザ入力が必要
-  {{"verdict": "ABORT", "summary": "..."}} — 実行不可能"""
+  {{"verdict": "DONE", "phase_summary": "..."}} — タスク完了
+  {{"verdict": "NEXT_PHASE", "phase_summary": "...", "remaining_phases": [...], "next_execute_prompt": "..."}} — 次フェーズへ
+  {{"verdict": "SUSPEND", "phase_summary": "...", "reason": "..."}} — ユーザ入力が必要
+  {{"verdict": "ABORT", "phase_summary": "...", "reason": "..."}} — 実行不可能"""
 
     network_mode = "保護あり (netns + proxy)" if network_protected else "ホストネットワーク直接"
     return f"""あなたはサンドボックス環境で実行されています。

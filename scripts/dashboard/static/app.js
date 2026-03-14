@@ -153,13 +153,21 @@ function renderLifecyclesColumn() {
     const gen = genMatch ? genMatch[1] : "?";
     const jobCount = state.jobs.filter((j) => j.lifecycle_id === lc.lifecycle_id).length;
 
+    const phases = lc.phases || [];
+    const currentPhase = lc.current_phase || 0;
+    const phaseInfo = phases.length > 0
+      ? `Phase ${currentPhase + 1}/${phases.length}`
+      : "No phases";
+    const currentGoal = phases[currentPhase]?.goal || "";
+
     html += `<div class="column-item ${selected}" data-lifecycle-id="${lc.lifecycle_id}">
       <div class="item-main">
         ${statusBadge(lc.status)}
         <span class="item-title">Generation ${gen}</span>
       </div>
       <div class="item-detail">
-        <span class="item-meta">${lc.run_count || 0}/${lc.max_runs || 5} runs</span>
+        <span class="item-meta">${phaseInfo}</span>
+        ${currentGoal ? `<span class="item-sub">${escapeHtml(currentGoal)}</span>` : ""}
         ${lc.suspend_reason ? `<span class="item-sub">${lc.suspend_reason}</span>` : ""}
       </div>
       ${jobCount > 0 ? '<span class="chevron">\u203a</span>' : ""}
@@ -187,22 +195,28 @@ function renderJobsColumn() {
     return;
   }
 
-  // Group by run
-  const byRun = {};
+  // Group by phase (run field = phase index)
+  const byPhase = {};
   jobs.forEach((j) => {
-    const run = j.run != null ? j.run : 0;
-    if (!byRun[run]) byRun[run] = [];
-    byRun[run].push(j);
+    const phase = j.run != null ? j.run : 0;
+    if (!byPhase[phase]) byPhase[phase] = [];
+    byPhase[phase].push(j);
   });
 
-  let html = "";
-  const runKeys = Object.keys(byRun).sort((a, b) => Number(a) - Number(b));
+  const selectedLifecycle = state.lifecycles.find(
+    (lc) => lc.lifecycle_id === state.selectedLifecycleId
+  );
+  const phases = selectedLifecycle?.phases || [];
 
-  for (const run of runKeys) {
-    if (runKeys.length > 1) {
-      html += `<div class="column-group-header">Run ${run}</div>`;
+  let html = "";
+  const phaseKeys = Object.keys(byPhase).sort((a, b) => Number(a) - Number(b));
+
+  for (const phaseIdx of phaseKeys) {
+    const phaseGoal = phases[phaseIdx]?.goal || `Phase ${Number(phaseIdx) + 1}`;
+    if (phaseKeys.length > 1) {
+      html += `<div class="column-group-header">${escapeHtml(phaseGoal)}</div>`;
     }
-    for (const j of byRun[run]) {
+    for (const j of byPhase[phaseIdx]) {
       const selected = state.selectedJobId === j.dispatch_id ? "selected" : "";
       const dur = j.started_at ? duration(j.started_at, j.finished_at) : "";
       html += `<div class="column-item ${selected}" data-dispatch-id="${j.dispatch_id}">
@@ -224,6 +238,68 @@ function renderJobsColumn() {
   });
 }
 
+function renderContextPreview(ctx) {
+  let html = "";
+
+  // メタ情報
+  if (ctx.meta) {
+    const meta = ctx.meta;
+    const items = [];
+    if (meta.task_id) items.push(`Task: ${meta.task_id}`);
+    if (meta.remote_id) items.push(`Remote: ${meta.remote_id}`);
+    if (meta.project_id) items.push(`Project: ${meta.project_id}`);
+    if (meta.generation) items.push(`Generation: ${meta.generation}`);
+    if (items.length) {
+      html += `<div class="context-meta">${items.map((i) => `<span class="meta-item">${escapeHtml(i)}</span>`).join("")}</div>`;
+    }
+  }
+
+  // 概要
+  if (ctx.description) {
+    html += `<div class="context-section"><div class="context-heading">概要</div><div class="context-body">${escapeHtml(ctx.description)}</div></div>`;
+  }
+
+  // フェーズ計画
+  if (ctx.phases && ctx.phases.length > 0) {
+    html += '<div class="context-section"><div class="context-heading">フェーズ計画</div><div class="phase-list">';
+    ctx.phases.forEach((p, i) => {
+      const status = p.status || "pending";
+      html += `<div class="phase-item phase-${status}">
+        <span class="phase-num">${i + 1}</span>
+        <span class="phase-goal">${escapeHtml(p.goal || "")}</span>
+        ${statusBadge(status)}
+        ${p.summary ? `<div class="phase-summary">${escapeHtml(p.summary)}</div>` : ""}
+      </div>`;
+    });
+    html += "</div></div>";
+  }
+
+  // 達成条件
+  if (ctx.acceptance_criteria && ctx.acceptance_criteria.length > 0) {
+    html += `<div class="context-section"><div class="context-heading">達成条件</div><ul class="context-list">`;
+    ctx.acceptance_criteria.forEach((c) => {
+      html += `<li>${escapeHtml(c)}</li>`;
+    });
+    html += "</ul></div>";
+  }
+
+  // 未決事項
+  if (ctx.open_questions && ctx.open_questions.length > 0) {
+    html += `<div class="context-section"><div class="context-heading">未決事項</div><ul class="context-list">`;
+    ctx.open_questions.forEach((q) => {
+      html += `<li>${escapeHtml(q)}</li>`;
+    });
+    html += "</ul></div>";
+  }
+
+  // 実行プロンプト
+  if (ctx.execute_prompt) {
+    html += `<div class="context-section"><div class="context-heading">実行プロンプト</div><pre class="preview-text">${escapeHtml(ctx.execute_prompt)}</pre></div>`;
+  }
+
+  return html || '<div class="empty-state">No context data</div>';
+}
+
 async function renderPreview() {
   const titleEl = document.getElementById("preview-title");
   const contentEl = document.getElementById("preview-content");
@@ -237,10 +313,13 @@ async function renderPreview() {
         fetchJSON(`${BASE}/api/jobs/${state.selectedJobId}/result`).catch(() => null),
       ]);
       let html = "";
-      if (resultData && resultData.verdict) {
+      if (resultData && (resultData.verdict || resultData.next_status)) {
+        const label = resultData.verdict ? "Verdict" : "Status";
+        const value = resultData.verdict || resultData.next_status;
         html += `<div class="preview-result">
-          <span class="result-label">Verdict:</span> ${statusBadge(resultData.verdict)}
+          <span class="result-label">${label}:</span> ${statusBadge(value)}
           ${resultData.summary ? `<div class="result-summary">${escapeHtml(resultData.summary)}</div>` : ""}
+          ${resultData.phase_summary ? `<div class="result-summary">${escapeHtml(resultData.phase_summary)}</div>` : ""}
         </div>`;
       }
       html += `<pre class="preview-text">${escapeHtml((data.lines || []).join("\n") || "No log")}</pre>`;
@@ -253,7 +332,11 @@ async function renderPreview() {
     contentEl.innerHTML = '<div class="empty-state">Loading...</div>';
     try {
       const data = await fetchJSON(`${BASE}/api/lifecycles/${state.selectedLifecycleId}/context`);
-      contentEl.innerHTML = `<pre class="preview-text">${escapeHtml(data.content || "No context")}</pre>`;
+      if (data.context && typeof data.context === "object") {
+        contentEl.innerHTML = renderContextPreview(data.context);
+      } else {
+        contentEl.innerHTML = `<pre class="preview-text">${escapeHtml(data.content || "No context")}</pre>`;
+      }
     } catch {
       contentEl.innerHTML = '<div class="empty-state">Failed to load</div>';
     }

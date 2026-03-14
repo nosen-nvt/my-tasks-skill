@@ -24,6 +24,55 @@ from .project_classifier import classify_project
 from .executor import ExecutorMixin
 
 
+def markdown_to_context_yaml(md_content: str, prompt: str, project_id: str) -> dict:
+    """タスク markdown を YAML コンテキスト dict に変換する。"""
+    import re
+
+    def extract_section(content: str, heading: str) -> str:
+        pattern = rf"^## {re.escape(heading)}\s*\n(.*?)(?=^## |\Z)"
+        m = re.search(pattern, content, re.MULTILINE | re.DOTALL)
+        return m.group(1).strip() if m else ""
+
+    def extract_list(content: str, heading: str) -> list[str]:
+        text = extract_section(content, heading)
+        if not text:
+            return []
+        items = []
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("- "):
+                items.append(line[2:].strip())
+        return items
+
+    # メタデータ抽出 (YAML frontmatter 的なものがあれば)
+    meta = {"task_id": "", "remote_id": "", "datasource_id": "", "project_id": project_id, "generation": 1}
+
+    description = extract_section(md_content, "概要") or prompt
+    preconditions = extract_list(md_content, "事前条件")
+    acceptance_criteria = extract_list(md_content, "達成条件")
+    open_questions = extract_list(md_content, "未決事項")
+    completion_actions = extract_list(md_content, "完了時アクション")
+    execute_prompt = extract_section(md_content, "実行プロンプト")
+
+    # 実行履歴から previous_generations を構築
+    previous_generations: list[dict] = []
+    history = extract_section(md_content, "実行履歴")
+    if history:
+        previous_generations.append({"summary": history})
+
+    return {
+        "meta": meta,
+        "description": description,
+        "preconditions": preconditions,
+        "acceptance_criteria": acceptance_criteria,
+        "open_questions": open_questions,
+        "completion_actions": completion_actions,
+        "phases": [],
+        "execute_prompt": execute_prompt,
+        "previous_generations": previous_generations,
+    }
+
+
 class DispatchServer(ExecutorMixin):
     def __init__(self, max_slots: int, repo_dir: Path):
         self.max_slots = max_slots
@@ -359,12 +408,33 @@ class DispatchServer(ExecutorMixin):
             updated_at=now_iso(),
         )
         mgr.lifecycles[lc.lifecycle_id] = lc
-        if not context:
-            context = f"# {prompt}\n\n- Project: {project_id}\n\n## 概要\n\n## 未決事項\n\n## 事前条件\n\n## 達成条件\n\n## 完了時アクション\n\n## 実行プロンプト\n\n## 実行履歴\n"
-        mgr._init_context(lc, context)
+
+        # YAML コンテキスト生成
+        if context:
+            # markdown が渡された場合は YAML に変換
+            context_data = markdown_to_context_yaml(context, prompt, project_id)
+        else:
+            context_data = {
+                "meta": {
+                    "task_id": "",
+                    "remote_id": "",
+                    "datasource_id": "",
+                    "project_id": project_id,
+                    "generation": 1,
+                },
+                "description": prompt,
+                "preconditions": [],
+                "acceptance_criteria": [],
+                "open_questions": [],
+                "completion_actions": [],
+                "phases": [],
+                "execute_prompt": "",
+                "previous_generations": [],
+            }
+        mgr._init_context_yaml(lc, context_data)
         mgr._save()
 
-        await mgr.dispatch_refine(lc)
+        await mgr.dispatch_plan(lc)
 
         return {
             "ok": True,
@@ -384,22 +454,34 @@ class DispatchServer(ExecutorMixin):
             return {"ok": False, "error": f"Lifecycle is not suspended (current: {lc.status})"}
 
         if context_update and lc.context_path:
-            Path(lc.context_path).write_text(context_update, encoding="utf-8")
+            # YAML として書き込み
+            import yaml
+            try:
+                data = yaml.safe_load(context_update)
+                if isinstance(data, dict):
+                    mgr._update_context_yaml(lc, data)
+                else:
+                    Path(lc.context_path).write_text(context_update, encoding="utf-8")
+            except yaml.YAMLError:
+                Path(lc.context_path).write_text(context_update, encoding="utf-8")
 
         prev_reason = lc.suspend_reason
 
         if lc.suspend_reason == "needs_input":
-            mgr._update_status(lc, "reshaping")
-            await mgr.dispatch_refine(lc, prev_suspend_reason=prev_reason)
+            mgr._update_status(lc, "planning")
+            await mgr.dispatch_plan(lc, prev_suspend_reason=prev_reason)
         elif lc.suspend_reason == "approval_required":
-            mgr._update_status(lc, "running")
+            mgr._update_status(lc, "phase_executing")
             await mgr.dispatch_execute(lc)
+        elif lc.suspend_reason == "agent_review":
+            mgr._update_status(lc, "planning")
+            await mgr.dispatch_plan(lc)
         elif lc.suspend_reason == "project_confirmation":
             new_project_id = request.get("project_id")
             if new_project_id:
                 lc.project_id = new_project_id
-            mgr._update_status(lc, "reshaping")
-            await mgr.dispatch_refine(lc)
+            mgr._update_status(lc, "planning")
+            await mgr.dispatch_plan(lc)
         else:
             return {"ok": False, "error": f"Unknown suspend reason: {lc.suspend_reason}"}
 
@@ -421,8 +503,8 @@ class DispatchServer(ExecutorMixin):
                 log_dir = self._log_path("_").parent
                 now = datetime.now().timestamp()
                 done_lc_ids = {lc.lifecycle_id for lc in self.lifecycle_mgr.lifecycles.values() if lc.status == "done"}
-                for p in list(log_dir.glob("*.log")) + list(log_dir.glob("*.result.json")) + list(log_dir.glob("*.context.md")) + list(log_dir.glob("*.pid")) + list(log_dir.glob("*.exit")):
-                    if p.suffix == ".md" and p.stem.replace(".context", "") not in done_lc_ids:
+                for p in list(log_dir.glob("*.log")) + list(log_dir.glob("*.result.json")) + list(log_dir.glob("*.context.yaml")) + list(log_dir.glob("*.context.md")) + list(log_dir.glob("*.pid")) + list(log_dir.glob("*.exit")):
+                    if (p.suffix in (".yaml", ".md")) and p.stem.replace(".context", "") not in done_lc_ids:
                         continue
                     if now - p.stat().st_mtime > max_age:
                         p.unlink()
