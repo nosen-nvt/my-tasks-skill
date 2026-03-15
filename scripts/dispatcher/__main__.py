@@ -125,6 +125,10 @@ def cmd_open(args: argparse.Namespace) -> None:
         request["session"] = args.session
     if args.sandbox_profile:
         request["sandbox_profile"] = args.sandbox_profile
+    if args.prompt:
+        request["prompt"] = args.prompt
+    if args.activate:
+        request["activate"] = True
 
     response = asyncio.run(client_send(request))
     if response.get("ok"):
@@ -313,6 +317,8 @@ def main() -> None:
     p_open.add_argument("--project", required=True, help="プロジェクト ID")
     p_open.add_argument("--session", default=None, help="tmux セッション名を明示指定")
     p_open.add_argument("--sandbox-profile", help="サンドボックスプロファイルを上書き指定")
+    p_open.add_argument("--prompt", default=None, help="初期プロンプトを指定")
+    p_open.add_argument("--activate", action="store_true", help="作成したウィンドウをアクティブにする")
     p_open.set_defaults(func=cmd_open)
 
     # dispatch

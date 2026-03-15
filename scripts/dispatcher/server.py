@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -296,7 +297,9 @@ class DispatchServer(ExecutorMixin):
 
         window_name = project_id
         env_file_args = "".join(f" --env-file '{ef}'" for ef in env_files)
-        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_id}'{env_file_args} -- claude --permission-mode bypassPermissions"
+        prompt = request.get("prompt")
+        prompt_arg = f" {shlex.quote(prompt)}" if prompt else ""
+        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_id}'{env_file_args} -- claude --permission-mode bypassPermissions{prompt_arg}"
 
         result = subprocess.run(
             ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, "bash", "-c", cmd],
@@ -304,6 +307,13 @@ class DispatchServer(ExecutorMixin):
         )
         if result.returncode != 0:
             return {"ok": False, "error": f"tmux window creation failed: {result.stderr.decode().strip()}"}
+
+        activate = request.get("activate", False)
+        if activate:
+            subprocess.run(
+                ["tmux", "select-window", "-t", f"{session_name}:{window_name}"],
+                capture_output=True,
+            )
 
         log.info(f"Opened interactive session: {session_name}:{window_name}")
         return {"ok": True, "message": f"Opened {session_name}:{window_name}", "window": window_name}
