@@ -531,6 +531,12 @@ function buildLifecycleMetaHTML(lc) {
   if (lc.status === "suspend" && lc.suspend_reason === "approval_required") {
     html += `<button class="action-btn primary" data-action="approve" data-lifecycle-id="${lc.lifecycle_id}">Approve</button>`;
   }
+  if (lc.status === "suspend") {
+    html += `<button class="action-btn primary" data-action="open-session" data-lifecycle-id="${lc.lifecycle_id}">Open</button>`;
+  }
+  if (lc.status === "suspend" && lc.suspend_reason !== "approval_required") {
+    html += `<button class="action-btn" data-action="resume" data-lifecycle-id="${lc.lifecycle_id}">Resume</button>`;
+  }
   return html;
 }
 
@@ -539,6 +545,18 @@ function bindLifecycleActions(root) {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       handleAction(btn, `${BASE}/api/lifecycles/${btn.dataset.lifecycleId}/approve`, "Approving...");
+    });
+  });
+  root.querySelectorAll("[data-action=open-session]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      handleAction(btn, `${BASE}/api/lifecycles/${btn.dataset.lifecycleId}/open-session`, "Opening...");
+    });
+  });
+  root.querySelectorAll("[data-action=resume]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      handleAction(btn, `${BASE}/api/lifecycles/${btn.dataset.lifecycleId}/approve`, "Resuming...");
     });
   });
 }

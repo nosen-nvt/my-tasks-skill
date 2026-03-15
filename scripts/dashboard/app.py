@@ -290,6 +290,115 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
 
         return JSONResponse(result)
 
+    @app.post("/api/lifecycles/{lifecycle_id}/open-session")
+    async def api_open_session(lifecycle_id: str) -> JSONResponse:
+        lifecycles = read_jsonl(dispatch_dir / "lifecycles.jsonl")
+        entry = next((lc for lc in lifecycles if lc.get("lifecycle_id") == lifecycle_id), None)
+        if entry is None:
+            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        if entry.get("status") != "suspend":
+            return JSONResponse({"ok": False, "error": f"ライフサイクルは {entry.get('status')} 状態です（suspend のみ対話可能）"})
+
+        suspend_reason = entry.get("suspend_reason", "")
+        project_id = entry.get("project_id", "")
+        context_path_str = entry.get("context_path", "")
+        context_path = Path(context_path_str) if context_path_str else None
+
+        # コンテキスト YAML を読み込み
+        ctx = {}
+        if context_path and context_path.exists():
+            try:
+                ctx = yaml.safe_load(context_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                pass
+
+        description = ctx.get("description", "")
+        phases = ctx.get("phases", [])
+        current_phase = entry.get("current_phase", 0)
+        acceptance_criteria = ctx.get("acceptance_criteria", [])
+
+        if suspend_reason == "needs_input":
+            open_questions = ctx.get("open_questions", [])
+            oq_text = "\n".join(f"- {q}" for q in open_questions) if open_questions else "- (未決事項なし)"
+            prompt = (
+                "このタスクは計画段階で未決事項が発生し、ユーザーの入力を待っています。\n\n"
+                f"# タスク概要\n{description}\n\n"
+                f"# 未決事項\n{oq_text}\n\n"
+                "# 指示\n"
+                "ユーザーと対話して上記の未決事項を解決してください。\n"
+                "回答が得られたら、コンテキスト YAML を更新してください:\n"
+                f"  {context_path_str}\n\n"
+                "更新内容:\n"
+                "- open_questions: 回答済みの質問を更新・削除\n"
+                "- 必要に応じて description, acceptance_criteria, preconditions も補完"
+            )
+        elif suspend_reason == "agent_review":
+            # 最後の評価結果を取得
+            reason_text = ""
+            current_dispatch_id = entry.get("current_dispatch_id", "")
+            if current_dispatch_id:
+                result_path = dispatch_dir / f"{current_dispatch_id}.result.json"
+                if result_path.exists():
+                    try:
+                        with open(result_path, encoding="utf-8") as f:
+                            result_data = json.load(f)
+                        reason_text = result_data.get("reason", "")
+                    except (json.JSONDecodeError, OSError):
+                        pass
+
+            phase_info = ""
+            if phases:
+                total = len(phases)
+                goal = phases[current_phase].get("goal", "") if current_phase < total else ""
+                phase_info = f"Phase {current_phase + 1}/{total}: {goal}"
+
+            prompt = (
+                "このタスクは評価段階でレビューが必要と判定されました。\n\n"
+                f"# タスク概要\n{description}\n\n"
+                f"# 評価結果\n{reason_text}\n\n"
+                + (f"# 現在のフェーズ\n{phase_info}\n\n" if phase_info else "")
+                + "# 指示\n"
+                "ユーザーと対話して評価結果の問題を確認し、対応方針を決定してください。\n"
+                "必要に応じてコンテキスト YAML を更新してください:\n"
+                f"  {context_path_str}"
+            )
+        elif suspend_reason == "approval_required":
+            phases_text = "\n".join(
+                f"{i + 1}. {p.get('goal', '')}" for i, p in enumerate(phases)
+            ) if phases else "(フェーズ計画なし)"
+            ac_text = "\n".join(
+                f"- {c}" for c in acceptance_criteria
+            ) if acceptance_criteria else "(達成条件なし)"
+
+            prompt = (
+                "このタスクの実行計画が作成されました。ユーザーと計画をレビューしてください。\n\n"
+                f"# タスク概要\n{description}\n\n"
+                f"# フェーズ計画\n{phases_text}\n\n"
+                f"# 達成条件\n{ac_text}\n\n"
+                "# 指示\n"
+                "ユーザーと対話して計画をレビューしてください。\n"
+                "修正が必要な場合はコンテキスト YAML を更新してください:\n"
+                f"  {context_path_str}"
+            )
+        else:
+            prompt = (
+                f"このタスクは suspend 状態です（理由: {suspend_reason}）。\n\n"
+                f"# タスク概要\n{description}\n\n"
+                "# 指示\n"
+                "ユーザーと対話して状況を確認してください。"
+            )
+
+        try:
+            result = await dispatcher_send({
+                "command": "open",
+                "project_id": project_id,
+                "prompt": prompt,
+                "activate": True,
+            })
+        except (ConnectionRefusedError, FileNotFoundError):
+            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
+        return JSONResponse(result)
+
     @app.post("/api/lifecycles/{lifecycle_id}/approve")
     async def api_approve(lifecycle_id: str) -> JSONResponse:
         try:
