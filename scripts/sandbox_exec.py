@@ -463,17 +463,29 @@ class EmbeddedHostCommandBroker:
         if not token or token != self._token:
             return {"ok": False, "error": "invalid token"}
 
-        cmd_def = next((c for c in self._host_commands if c["name"] == command), None)
-        if cmd_def is None:
+        matching_defs = [c for c in self._host_commands if c["name"] == command]
+        if not matching_defs:
             return {"ok": False, "error": f"command not allowed: {command}"}
 
-        allowed_patterns = cmd_def.get("allowed_patterns", [])
-        if allowed_patterns != "*":
+        # 同名コマンドの allowed_patterns をマージ
+        cmd_def = matching_defs[0]
+        all_patterns: list | str = []
+        allow_stdin = False
+        for d in matching_defs:
+            p = d.get("allowed_patterns", [])
+            if p == "*":
+                all_patterns = "*"
+                break
+            if isinstance(all_patterns, list):
+                all_patterns.extend(p)
+            allow_stdin = allow_stdin or d.get("allow_stdin", False)
+
+        if all_patterns != "*":
             args_str = " ".join(args)
-            if not any(fnmatch.fnmatch(args_str, pat) for pat in allowed_patterns):
+            if not any(fnmatch.fnmatch(args_str, pat) for pat in all_patterns):
                 return {"ok": False, "error": f"args not allowed: {command} {args_str}"}
 
-        if stdin is not None and not cmd_def.get("allow_stdin", False):
+        if stdin is not None and not allow_stdin:
             return {"ok": False, "error": f"stdin not allowed for {command}"}
 
         try:
