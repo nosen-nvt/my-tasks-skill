@@ -111,6 +111,8 @@ async function handleAction(btn, url, loadingText) {
     const result = await postAction(url);
     if (result.ok) {
       showNotification(result.message || "OK");
+      btn.disabled = false;
+      btn.textContent = origText;
     } else {
       showNotification(result.error || "エラー", true);
       btn.disabled = false;
