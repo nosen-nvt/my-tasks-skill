@@ -478,6 +478,7 @@ class DispatchServer(ExecutorMixin):
         prev_reason = lc.suspend_reason
 
         if lc.suspend_reason == "needs_input":
+            mgr._normalize_context_phases(lc)
             mgr._update_status(lc, "planning")
             await mgr.dispatch_plan(lc, prev_suspend_reason=prev_reason)
         elif lc.suspend_reason == "approval_required":

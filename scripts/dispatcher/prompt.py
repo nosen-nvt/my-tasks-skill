@@ -61,7 +61,7 @@ def build_system_prompt(job: Job, result_path: Path) -> str:
   {result_path}
 
 計画ジョブの結果フォーマット:
-  {{"next_status": "planned"}} — 計画完了、実行可能
+  {{"next_status": "planned", "phases": [{{"goal": "...", "criteria": "..."}}]}} — 計画完了、実行可能
   {{"next_status": "needs_input"}} — ユーザへの質問あり"""
     elif job.job_type == "evaluate":
         result_desc = f"""

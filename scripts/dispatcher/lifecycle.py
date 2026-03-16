@@ -81,7 +81,15 @@ PLAN_TEMPLATE = """\
 - `acceptance_criteria`: 達成条件リスト
 - `completion_actions`: 完了時アクションリスト
 - `open_questions`: 未決事項（planned なら空リスト）
-- `phases`: フェーズ計画リスト（各要素: goal, criteria）
+- `phases`: フェーズ計画リスト（以下の形式で記述）:
+  ```yaml
+  phases:
+    - goal: "フェーズの目標"
+      criteria: "完了判定基準"
+    - goal: "次のフェーズの目標"
+      criteria: "完了判定基準"
+  ```
+  **重要**: フィールド名は必ず `goal` と `criteria` を使用してください（`name` や `notes` は不可）
 - `execute_prompt`: 最初のフェーズの実行プロンプト
 
 # 結果ファイル出力
@@ -142,6 +150,12 @@ PLAN_RECLARIFY_TEMPLATE = """\
 # コンテキスト YAML 更新
 
 `{context_path}` を更新してください（精査結果を反映）。
+phases のフィールド名は必ず `goal` と `criteria` を使用してください:
+```yaml
+phases:
+  - goal: "フェーズの目標"
+    criteria: "完了判定基準"
+```
 
 # 結果ファイル出力
 
@@ -336,6 +350,53 @@ class LifecycleManager:
         path = Path(lc.context_path)
         return path.read_text(encoding="utf-8") if path.exists() else None
 
+    def _normalize_context_phases(self, lc: Lifecycle):
+        """context YAML のフェーズフィールド名を正規化し、YAML を上書きする。
+
+        plan エージェントが name/notes 等を使った場合に goal/criteria へ変換する。
+        resume 前に呼ぶことで、リプランや実行時のフィールド参照エラーを防ぐ。
+        """
+        context_data = self._read_context_yaml(lc)
+        if not context_data:
+            return
+        phases = context_data.get("phases", [])
+        if not phases:
+            return
+        changed = False
+        for p in phases:
+            if "name" in p and "goal" not in p:
+                p["goal"] = p.pop("name")
+                changed = True
+            if "notes" in p and "criteria" not in p:
+                p["criteria"] = p.pop("notes")
+                changed = True
+        if changed:
+            self._update_context_yaml(lc, context_data)
+
+    def _sync_phases_from_context(self, lc: Lifecycle):
+        """context YAML のフェーズを lc.phases に同期する。
+
+        plan エージェントが goal/name 等の異なるフィールド名を使う場合を正規化する。
+        """
+        context_data = self._read_context_yaml(lc)
+        if not context_data:
+            return
+        phases_raw = context_data.get("phases", [])
+        if not phases_raw:
+            return
+        lc.phases = [
+            {
+                "goal": p.get("goal") or p.get("name", ""),
+                "criteria": p.get("criteria", ""),
+                "status": p.get("status", "pending"),
+                "summary": p.get("summary") or p.get("notes"),
+                "commits": [],
+                "dispatch_id": None,
+            }
+            for p in phases_raw
+        ]
+        lc.current_phase = 0
+
     # --- プロンプト構築 ---
 
     def _build_plan_prompt(
@@ -493,6 +554,8 @@ class LifecycleManager:
                 self._update_status(lc, "suspend")
 
         elif next_status == "needs_input":
+            # context YAML からフェーズ等を同期（plan エージェントが書き込み済みの場合）
+            self._sync_phases_from_context(lc)
             lc.suspend_reason = "needs_input"
             self._update_status(lc, "suspend")
 
