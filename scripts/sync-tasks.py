@@ -469,6 +469,17 @@ def main() -> None:
     # 既存 index を読み込み
     index_entries = load_index(tasks_dir)
 
+    # --datasource 未指定時: index に存在する full sync mode のデータソースを
+    # by_datasource に追加する（fetch 結果が0件でも消失検出を実行するため）
+    if not args.datasource:
+        ds_ids_in_index = {e["datasource_id"] for e in index_entries
+                           if e.get("datasource_id")}
+        for ds_id in ds_ids_in_index:
+            if ds_id not in by_datasource:
+                ds = load_datasource(datasources_dir, ds_id)
+                if ds and ds.get("sync_mode", "full") == "full":
+                    by_datasource[ds_id] = []
+
     # 集計結果
     total_added = []
     total_updated = []
