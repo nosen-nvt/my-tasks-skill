@@ -479,8 +479,24 @@ class DispatchServer(ExecutorMixin):
 
         if lc.suspend_reason == "needs_input":
             mgr._normalize_context_phases(lc)
-            mgr._update_status(lc, "planning")
-            await mgr.dispatch_plan(lc, prev_suspend_reason=prev_reason)
+            # 対話セッション中にフェーズが進行したか確認
+            ctx = mgr._read_context_yaml(lc)
+            phases = (ctx or {}).get("phases", [])
+            done_count = sum(1 for p in phases if p.get("status") == "done")
+
+            if phases and done_count > 0:
+                if done_count >= len(phases):
+                    # 全フェーズ完了 → タスク完了
+                    mgr._sync_phases_from_context(lc)
+                    mgr._update_status(lc, "done")
+                else:
+                    # 一部完了 → 残フェーズの計画を生成
+                    mgr._update_status(lc, "planning")
+                    await mgr.dispatch_plan(lc, prev_suspend_reason="needs_input_with_progress")
+            else:
+                # 進捗なし → 通常の reclarify フロー
+                mgr._update_status(lc, "planning")
+                await mgr.dispatch_plan(lc, prev_suspend_reason=prev_reason)
         elif lc.suspend_reason == "approval_required":
             mgr._update_status(lc, "phase_executing")
             await mgr.dispatch_execute(lc)

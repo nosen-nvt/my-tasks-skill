@@ -330,7 +330,13 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
                 f"  {context_path_str}\n\n"
                 "更新内容:\n"
                 "- open_questions: 回答済みの質問を更新・削除\n"
-                "- 必要に応じて description, acceptance_criteria, preconditions も補完"
+                "- 必要に応じて description, acceptance_criteria, preconditions も補完\n\n"
+                "# 作業進行時の対応\n"
+                "対話中に未決事項の解決だけでなく、作業自体が自然に進行した場合は、\n"
+                "コンテキスト YAML の phases も更新してください:\n"
+                "- 完了したフェーズは `status: done` にし、`notes` に成果を記録\n"
+                "- 未完了のフェーズは `status: pending` のまま残す\n"
+                "これにより、Resume 時に既に完了した作業がスキップされます。"
             )
         elif suspend_reason == "agent_review":
             # 最後の評価結果を取得

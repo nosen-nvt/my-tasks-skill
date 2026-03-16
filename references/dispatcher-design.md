@@ -103,7 +103,7 @@ queued ──→ running ──→ done
 4. スロット満杯、または同一プロジェクトが実行中なら queue に追加し `queued` で応答（理由: `slot full` or `project busy`）
 5. `execute_job()`:
    - プロジェクト設定から `sandbox_profile`（デフォルト: `"default"`）と `working_directory` を取得
-   - `allowed_credentials` が設定されている場合、`uuid4().hex` でトークン生成 → `CredentialBroker.register(token, entries)`
+   - `host_commands` が設定されている場合、`uuid4().hex` でトークン生成 → `HostCommandBroker.register(token, host_commands)`
    - `build_system_prompt()` でシステムプロンプトを構築
    - `$XDG_RUNTIME_DIR/my-tasks-dispatch/{dispatch_id}.log` にログファイルを作成
    - `sandbox_exec.build_exec_args()` で bwrap/netns コマンド引数を構築し、`asyncio.create_subprocess_exec()` でジョブ実行（stdout/stderr をログファイルに出力）
@@ -178,10 +178,20 @@ dispatch → planning → 計画ジョブ
 
 | `suspend_reason` | 動作 |
 |---|---|
-| `needs_input` | status → `planning`、`dispatch_plan()` で計画を再実行 |
+| `needs_input` | コンテキスト YAML のフェーズ進捗を確認し分岐（下記参照） |
 | `approval_required` | status → `phase_executing`、`dispatch_execute()` で実行を開始 |
 | `agent_review` | status → `planning`、`dispatch_plan()` で計画を再実行 |
 | `project_confirmation` | `project_id` を更新（指定時）、status → `planning`、`dispatch_plan()` で計画を再実行 |
+
+#### `needs_input` からの resume（フェーズ進捗対応）
+
+対話セッション中に質問応答だけでなく作業自体が進行するケース（特に事務作業）に対応する。
+
+| コンテキスト状態 | 動作 |
+|---|---|
+| フェーズなし or 進捗なし | 通常の reclarify フロー（`PLAN_RECLARIFY_TEMPLATE`） |
+| 全フェーズ完了 | `done` に遷移（タスク完了） |
+| 一部フェーズ完了 | `PLAN_RESUME_PROGRESS_TEMPLATE` で残フェーズの計画を生成。完了済みフェーズは保持し、`current_phase` を最初の pending に設定 |
 
 #### ランタイムファイル
 
@@ -314,9 +324,13 @@ dispatcher server [--max-slots 8] [--repo ~/.local/share/my-tasks]
 - ファイル: 作業ディレクトリ内のファイルのみ変更可能
 
 認証情報:
-- `cred-get <entry>` または `pass show <entry>` で以下の認証情報を取得できます:
-  - {allowed_credentials のエントリ一覧}
-（allowed_credentials が "*" の場合: 「全ての認証情報を取得できます」と表示）
+- `pass show <entry>` で以下の認証情報を取得できます:
+  - {host_commands の pass コマンドの allowed_patterns から抽出}
+（allowed_patterns が "*" の場合: 「全ての認証情報を取得できます」と表示）
+
+ホストコマンド:
+- 以下のコマンドがホスト側で実行されます:
+  - {host_commands の pass 以外のコマンド一覧}
 
 結果ファイル:
 ジョブ完了時、以下のパスに結果 JSON を書き出してください:
@@ -336,36 +350,42 @@ dispatcher server [--max-slots 8] [--repo ~/.local/share/my-tasks]
 プロセスの終了がジョブ完了の通知になります（シグナルファイルは不要です）。
 ```
 
-- 認証情報セクションは `allowed_credentials` が設定されている場合のみ追加される
+- 認証情報セクションは `host_commands` に `pass` コマンドが含まれる場合のみ追加される
+- ホストコマンドセクションは `host_commands` に `pass` 以外のコマンドが含まれる場合のみ追加される
 - 結果ファイルセクションは `job_type` が `plan` または `evaluate` の場合のみ追加される
 - `execute` ジョブには結果ファイルセクションは付与されない
 
-## Credential Broker
+## Host Command Broker
 
 ### 概要
 
-サンドボックス内のジョブが `~/.password-store` や `~/.gnupg` に直接アクセスすることを防ぎ、
-プロジェクト単位でスコープされた認証情報アクセスを提供する仕組み。
+サンドボックス内のジョブがホスト側の特定コマンドを安全に実行するための汎用ブローカー。
+`pass show` による認証情報取得もこの仕組みで実現する（旧 Credential Broker を統合済み）。
 
 ### アーキテクチャ
 
 ```
 ┌─ ホスト ──────────────────────────────────────────────┐
 │                                                        │
-│  dispatcher server                                  │
-│    ├─ DispatchServer (dispatcher.sock)                 │
-│    └─ CredentialBroker (cred-broker.sock)              │
-│         ├─ token registry: {token → [entries]}         │
-│         └─ /usr/bin/pass show <entry> で取得           │
+│  dispatcher server                                     │
+│    ├─ DispatchServer       (dispatcher.sock)           │
+│    └─ HostCommandBroker    (host-cmd-broker.sock)      │
+│         ├─ token registry: {token → [host_commands]}   │
+│         └─ ホワイトリスト + パターンマッチで実行       │
 │                                                        │
 │  ┌─ サンドボックス ──────────────────────────────────┐ │
 │  │                                                    │ │
 │  │  pass show <entry>                                 │ │
-│  │    → /usr/bin/pass (pass-shim)                     │ │
-│  │      → cred-get <entry>                            │ │
-│  │        → connect(cred-broker.sock)                 │ │
-│  │          → CredentialBroker (ホスト側)              │ │
-│  │            → /usr/bin/pass show <entry> (実体)     │ │
+│  │    → /usr/bin/pass (host-cmd シム)                 │ │
+│  │      → connect(host-cmd-broker.sock)               │ │
+│  │        → HostCommandBroker (ホスト側)              │ │
+│  │          → /usr/bin/pass show <entry> (実体)       │ │
+│  │                                                    │ │
+│  │  az pipelines run ...                              │ │
+│  │    → /usr/bin/az (host-cmd シム)                   │ │
+│  │      → connect(host-cmd-broker.sock)               │ │
+│  │        → HostCommandBroker (ホスト側)              │ │
+│  │          → /usr/bin/az pipelines run ... (実体)    │ │
 │  │                                                    │ │
 │  └────────────────────────────────────────────────────┘ │
 └────────────────────────────────────────────────────────┘
@@ -373,84 +393,89 @@ dispatcher server [--max-slots 8] [--repo ~/.local/share/my-tasks]
 
 ### ソケットパス
 
-`$XDG_RUNTIME_DIR/my-tasks-dispatch/cred-broker.sock`
+`$XDG_RUNTIME_DIR/my-tasks-dispatch/host-cmd-broker.sock`
 
 dispatcher.sock と同じディレクトリに配置。sandbox で既に bind-mount 済みのため追加設定不要。
+
+### host-cmd シム（busybox パターン）
+
+サンドボックス内の `/usr/bin/{name}` に `scripts/host-cmd` を `--ro-bind` する。
+`host-cmd` は `argv[0]` のベースネームでコマンド名を判別し、ブローカーに転送する。
+
+```
+/usr/bin/pass  →  host-cmd (argv[0]="pass")  →  broker に {"command": "pass", "args": [...]}
+/usr/bin/az    →  host-cmd (argv[0]="az")    →  broker に {"command": "az", "args": [...]}
+```
 
 ### JSON プロトコル
 
 改行区切りの JSON line。
 
-**リクエスト（取得）:**
+**リクエスト:**
 
 ```json
-{"token": "<job-token>", "entry": "jira/api-token"}
-{"token": "<job-token>", "entry": "jira/api-token", "operation": "show"}
+{"token": "<job-token>", "command": "pass", "args": ["show", "jira/api-token"]}
+{"token": "<job-token>", "command": "az", "args": ["pipelines", "run", "--name", "build"]}
+{"token": "<job-token>", "command": "pass", "args": ["insert", "-m", "entry"], "stdin": "secret-value"}
 ```
 
-**リクエスト（書き込み）:**
+**レスポンス（成功）:**
 
 ```json
-{"token": "<job-token>", "entry": "jira/api-token", "operation": "insert", "value": "<new-value>"}
-```
-
-**レスポンス（取得成功）:**
-
-```json
-{"ok": true, "value": "<credential-value>"}
-```
-
-**レスポンス（書き込み成功）:**
-
-```json
-{"ok": true}
+{"ok": true, "exit_code": 0, "stdout": "<output>", "stderr": ""}
 ```
 
 **レスポンス（エラー）:**
 
 ```json
-{"ok": false, "error": "entry not allowed: secret/other"}
+{"ok": false, "error": "command not allowed: foo"}
+{"ok": false, "error": "args not allowed: az pipelines delete build"}
 {"ok": false, "error": "invalid token"}
-{"ok": false, "error": "credential retrieval failed"}
-{"ok": false, "error": "credential insert failed"}
+{"ok": false, "error": "stdin not allowed for az"}
+{"ok": false, "error": "execution failed"}
 ```
 
 ### ライフサイクル
 
-1. **ジョブ開始**: `allowed_credentials` が設定されている場合、`uuid4().hex` でトークン生成 → `CredentialBroker.register(token, entries)`
-2. **ジョブ実行中**: 環境変数 `CRED_TOKEN` と `CRED_BROKER_SOCK` がサンドボックスに渡される
-3. **認証情報取得**: サンドボックス内で `pass show <entry>` → pass-shim → cred-get → broker socket → `/usr/bin/pass show <entry>` (ホスト側)
-4. **ジョブ終了**: `CredentialBroker.revoke(token)` でトークン無効化
+1. **ジョブ開始**: `host_commands` が設定されている場合、`uuid4().hex` でトークン生成 → `HostCommandBroker.register(token, host_commands)`
+2. **ジョブ実行中**: 環境変数 `HOST_CMD_TOKEN` と `HOST_CMD_BROKER_SOCK` がサンドボックスに渡される
+3. **コマンド実行**: サンドボックス内で `pass show <entry>` → host-cmd シム → broker socket → `/usr/bin/pass show <entry>` (ホスト側)
+4. **ジョブ終了**: `HostCommandBroker.revoke(token)` でトークン無効化
 
-### cred-get CLI
+### ホストコマンド定義
 
-サンドボックス内で使用する軽量クライアント。
-
-```bash
-# 直接呼び出し
-cred-get jira/api-token
-
-# pass 互換（pass-shim 経由で自動委譲）
-pass show jira/api-token
-pass jira/api-token
-```
-
-### プロジェクト設定
-
-サンドボックスプロファイルの `allowed_credentials` フィールドで、そのプロジェクトのジョブがアクセス可能な `pass` エントリを指定する。
+サンドボックスプロファイルとプロジェクト定義の `host_commands` フィールドで、ジョブが使用可能なコマンドを定義する。両者はマージされる（プロファイル + プロジェクト）。
 
 ```json
 {
   "profile_id": "restricted-default",
   "proxy_profile": "dev",
-  "credential_profile": "full-access"
+  "host_commands": [
+    {"name": "pass", "path": "/usr/bin/pass", "allowed_patterns": "*", "allow_stdin": true}
+  ]
 }
 ```
 
+```json
+{
+  "project_id": "ubs-mgmt-tool",
+  "host_commands": [
+    {"name": "az", "path": "/usr/bin/az", "allowed_patterns": ["pipelines run *", "pipelines runs show *"]}
+  ]
+}
+```
+
+### 組み込み Host Command Broker
+
+`sandbox` CLI から直接実行する場合（dispatcher 経由でない場合）、`HOST_CMD_TOKEN` 環境変数が未設定なら
+`EmbeddedHostCommandBroker` が自動起動し、同一プロセス内でブローカーを提供する。
+
 ### セキュリティ特性
 
-- **スコープ制限**: 各ジョブは自プロジェクトの `allowed_credentials` に列挙されたエントリのみ取得可能
+- **コマンドホワイトリスト**: 各ジョブは `host_commands` に列挙されたコマンドのみ実行可能
+- **引数パターンマッチ**: `allowed_patterns` で許可する引数パターンを fnmatch で制御（`"*"` で全許可）
+- **stdin 制御**: `allow_stdin: true` が明示されたコマンドのみ stdin を受け付ける
 - **トークン有効期限**: ジョブ終了時に自動 revoke
 - **並行安全**: 各ジョブが固有トークンを持つため、複数ジョブ並行でも問題なし
-- **ホスト側影響なし**: pass-shim は bwrap の `--ro-bind` でサンドボックス内のみに適用。ホスト側の `/usr/bin/pass` は変更されない
+- **ホスト側影響なし**: host-cmd シムは bwrap の `--ro-bind` でサンドボックス内のみに適用
 - **ログ**: トークンは先頭 8 文字のみ記録（`token[:8]...`）

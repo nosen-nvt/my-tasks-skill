@@ -168,6 +168,85 @@ phases:
 
 
 # ---------------------------------------------------------------------------
+# 対話セッション進捗反映テンプレート
+# ---------------------------------------------------------------------------
+
+PLAN_RESUME_PROGRESS_TEMPLATE = """\
+あなたはタスク計画エージェントです。対話セッション中に作業が一部進行したタスクの残作業を計画してください。
+
+# タスク情報
+
+```yaml
+{context_yaml}
+```
+
+# 完了済みフェーズ
+
+対話セッション中に以下のフェーズが完了しています:
+{completed_phases}
+
+# 残フェーズ
+
+以下のフェーズが未完了です:
+{remaining_phases}
+
+# プロジェクト情報
+
+- プロジェクトID: {project_id}
+- プロジェクト名: {project_name}
+- 説明: {project_description}
+- 作業ディレクトリ: {working_directory}
+
+# 指示
+
+1. 完了済みフェーズの成果を確認してください。必要に応じて作業ディレクトリ配下の成果物を調査してください。
+
+2. 残フェーズを見直し、必要に応じて調整してください:
+   - 完了済みフェーズの成果を踏まえ、不要になったフェーズは削除
+   - 必要な追加フェーズがあれば追加
+   - 各フェーズに goal と criteria を設定
+
+3. 次に実行すべきフェーズの execute_prompt を生成してください:
+   - 完了済みフェーズの成果を前提情報として含める
+   - 背景・目的、具体的な作業手順、達成条件を含める
+   - 実行エージェントはコンテキスト YAML を読まない前提で、自己完結した内容にする
+
+4. 達成条件のルール（重要）:
+   - このタスクは AI エージェントが実装・実行する前提です
+   - 達成条件は AI エージェント自身がローカルで検証可能な内容にしてください
+   - OK: ファイル内容の確認、YAML/JSON のパース検証、テスト実行結果、ビルド成功
+   - NG: ブラウザでの手動確認、外部サービスの目視確認など
+
+# コンテキスト YAML 更新
+
+`{context_path}` を更新してください。
+- 完了済みフェーズはそのまま保持してください（status: done を変更しない）
+- 残フェーズの goal/criteria を必要に応じて更新してください
+- execute_prompt を次フェーズ用に設定してください
+
+phases のフィールド名は必ず `goal` と `criteria` を使用してください:
+```yaml
+phases:
+  - goal: "完了済みフェーズの目標"
+    status: done
+    criteria: "完了判定基準"
+    summary: "成果サマリー"
+  - goal: "残フェーズの目標"
+    status: pending
+    criteria: "完了判定基準"
+```
+
+# 結果ファイル出力
+
+以下のパスに結果 JSON を書き出してください:
+  {result_file_path}
+
+フォーマット:
+  {{"next_status": "planned", "phases": [{{"goal": "...", "criteria": "...", "status": "done|pending"}}]}} — 計画完了、実行可能
+"""
+
+
+# ---------------------------------------------------------------------------
 # 評価テンプレート
 # ---------------------------------------------------------------------------
 
@@ -417,6 +496,34 @@ class LifecycleManager:
         }
         context_yaml = yaml.dump(plan_context, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
+        if prev_suspend_reason == "needs_input_with_progress":
+            # 対話セッション中に作業が進行した場合
+            phases = context_data.get("phases", [])
+            completed = []
+            remaining = []
+            for i, p in enumerate(phases):
+                goal = p.get("goal") or p.get("name", "")
+                summary = p.get("summary") or p.get("notes", "")
+                criteria = p.get("criteria", "")
+                if p.get("status") == "done":
+                    completed.append(f"- Phase {i+1}: {goal} — {summary}")
+                else:
+                    remaining.append(f"- Phase {i+1}: {goal} (criteria: {criteria})")
+            completed_text = "\n".join(completed) if completed else "(なし)"
+            remaining_text = "\n".join(remaining) if remaining else "(なし)"
+
+            return PLAN_RESUME_PROGRESS_TEMPLATE.format(
+                context_yaml=context_yaml,
+                completed_phases=completed_text,
+                remaining_phases=remaining_text,
+                context_path=lc.context_path,
+                project_id=lc.project_id,
+                project_name=project.get("name", ""),
+                project_description=project.get("description", ""),
+                working_directory=project.get("working_directory", ""),
+                result_file_path=result_file_path,
+            ), dispatch_id
+
         template = PLAN_RECLARIFY_TEMPLATE if prev_suspend_reason == "needs_input" else PLAN_TEMPLATE
 
         return template.format(
@@ -533,14 +640,19 @@ class LifecycleManager:
                 {
                     "goal": p.get("goal", ""),
                     "criteria": p.get("criteria", ""),
-                    "status": "pending",
-                    "summary": None,
+                    "status": p.get("status", "pending"),
+                    "summary": p.get("summary") or None,
                     "commits": [],
                     "dispatch_id": None,
                 }
                 for p in phases_raw
             ]
-            lc.current_phase = 0
+            # 完了済みフェーズをスキップして最初の pending フェーズから開始
+            first_pending = next(
+                (i for i, p in enumerate(lc.phases) if p["status"] != "done"),
+                len(lc.phases),
+            )
+            lc.current_phase = first_pending
             self._update_status(lc, "planned")
 
             # auto_approve チェック
