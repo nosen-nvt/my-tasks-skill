@@ -1,0 +1,23 @@
+/* Result card */
+.result-card {
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.result-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.result-summary {
+  width: 100%;
+  font-size: 12px;
+  color: var(--text);
+  margin-top: 4px;
+}
