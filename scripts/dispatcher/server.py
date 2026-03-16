@@ -266,40 +266,106 @@ class DispatchServer(ExecutorMixin):
             log.info(f"Job queued ({reason}): {dispatch_id}")
             return {"ok": True, "dispatch_id": dispatch_id, "message": f"Job queued ({reason})"}
 
+    def _load_task_context(self, task_id: str) -> tuple[dict, dict | None, dict | None]:
+        """タスク ID からタスク・データソース・プロジェクトを読み込む。"""
+        import yaml
+
+        task_path = self.repo_dir / "tasks" / f"{task_id}.yaml"
+        if not task_path.exists():
+            raise FileNotFoundError(f"Task not found: {task_id}")
+        task = yaml.safe_load(task_path.read_text(encoding="utf-8")) or {}
+        task.setdefault("id", task_id)
+
+        datasource_id = task.get("datasource_id", "")
+        datasource = None
+        if datasource_id:
+            ds_path = self.repo_dir / "datasources" / f"{datasource_id}.json"
+            if ds_path.exists():
+                with open(ds_path, encoding="utf-8") as f:
+                    datasource = json.load(f)
+
+        project_id = task.get("project_id", "")
+        project = sandbox_exec.load_project(project_id, self.repo_dir) if project_id else None
+
+        return task, datasource, project
+
     async def cmd_open(self, request: dict) -> dict:
-        project_id = request.get("project_id", "")
+        task_id = request.get("task_id")
+        system_prompt = request.get("system_prompt")
         session = request.get("session")
 
-        if not project_id:
-            return {"ok": False, "error": "project_id is required"}
+        if task_id:
+            # タスクベース: タスクからプロジェクト情報を解決
+            try:
+                task, datasource, project = self._load_task_context(task_id)
+            except FileNotFoundError as e:
+                return {"ok": False, "error": str(e)}
 
-        project = sandbox_exec.load_project(project_id, self.repo_dir)
-        if not project:
-            return {"ok": False, "error": f"Project not found: {project_id}"}
+            project_id = task.get("project_id", "")
+            working_dir = (project or {}).get("working_directory", "") or str(self.repo_dir)
+            window_name = task_id
 
-        working_dir = project.get("working_directory", "")
-        if not working_dir:
-            return {"ok": False, "error": f"working_directory not set for project: {project_id}"}
+            # system_prompt / prompt が未指定ならタスク用プロンプトを構築
+            if not system_prompt:
+                from .interactive_prompt import build_task_session_prompts
+                system_prompt, prompt = build_task_session_prompts(
+                    task, datasource, str(self.repo_dir),
+                )
+                if not request.get("prompt"):
+                    request["prompt"] = prompt
+
+            # プロジェクトが見つかればサンドボックスパラメータを解決
+            if project:
+                try:
+                    sandbox_profile_id, env_files, _host_cmds, _extra_binds = \
+                        sandbox_exec.resolve_project_sandbox_params(
+                            project, sandbox_profile_override=request.get("sandbox_profile"),
+                        )
+                except (FileNotFoundError, ValueError) as e:
+                    return {"ok": False, "error": str(e)}
+            else:
+                # プロジェクトなし → デフォルトプロファイルを使用
+                sandbox_profile_id = "default"
+                env_files = []
+        else:
+            # 既存: project_id ベース
+            project_id = request.get("project_id", "")
+
+            if not project_id:
+                return {"ok": False, "error": "project_id or task_id is required"}
+
+            project = sandbox_exec.load_project(project_id, self.repo_dir)
+            if not project:
+                return {"ok": False, "error": f"Project not found: {project_id}"}
+
+            working_dir = project.get("working_directory", "")
+            if not working_dir:
+                return {"ok": False, "error": f"working_directory not set for project: {project_id}"}
+            if not Path(working_dir).is_dir():
+                return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
+
+            try:
+                sandbox_profile_id, env_files, _host_cmds, _extra_binds = \
+                    sandbox_exec.resolve_project_sandbox_params(
+                        project, sandbox_profile_override=request.get("sandbox_profile"),
+                    )
+            except (FileNotFoundError, ValueError) as e:
+                return {"ok": False, "error": str(e)}
+
+            window_name = project_id
+
         if not Path(working_dir).is_dir():
             return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
-
-        try:
-            sandbox_profile_id, env_files, _host_cmds, _extra_binds = \
-                sandbox_exec.resolve_project_sandbox_params(
-                    project, sandbox_profile_override=request.get("sandbox_profile"),
-                )
-        except (FileNotFoundError, ValueError) as e:
-            return {"ok": False, "error": str(e)}
 
         session_name, is_caller = detect_tmux_session(session)
         if not ensure_tmux_session(session_name, is_caller):
             return {"ok": False, "error": f"tmux session '{session_name}' not available"}
 
-        window_name = project_id
         env_file_args = "".join(f" --env-file '{ef}'" for ef in env_files)
         prompt = request.get("prompt")
         prompt_arg = f" {shlex.quote(prompt)}" if prompt else ""
-        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_id}'{env_file_args} -- claude --permission-mode bypassPermissions{prompt_arg}"
+        system_prompt_arg = f" --append-system-prompt {shlex.quote(system_prompt)}" if system_prompt else ""
+        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_id}'{env_file_args} -- claude --permission-mode bypassPermissions{system_prompt_arg}{prompt_arg}"
 
         result = subprocess.run(
             ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, cmd],

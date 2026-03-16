@@ -63,15 +63,6 @@ function connectSSE() {
     handleSSEUpdate("lifecycles");
   });
 
-  es.addEventListener("sync_completed", () => {
-    resetSyncButton();
-    showNotification("Sync completed");
-  });
-
-  es.addEventListener("sync_error", () => {
-    resetSyncButton();
-    showNotification("Sync failed", true);
-  });
 }
 
 function handleSSEUpdate(dataType) {
@@ -316,6 +307,12 @@ function bindTaskActions(root) {
       handleAction(btn, `${BASE}/api/tasks/${btn.dataset.taskId}/dispatch`, "Dispatching...");
     });
   });
+  root.querySelectorAll("[data-action=open-session][data-task-id]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      handleAction(btn, `${BASE}/api/tasks/${btn.dataset.taskId}/open-session`, "Opening...");
+    });
+  });
   root.querySelectorAll("[data-action=redispatch]").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -372,6 +369,8 @@ function buildTaskMetaHTML(task) {
     html += `<span class="meta-item">Gen ${task.generation}</span>`;
   if (task.status === "pending" && task.project_id)
     html += `<button class="action-btn primary" data-action="dispatch" data-task-id="${task.id}">Dispatch</button>`;
+  if (task.status === "pending")
+    html += `<button class="action-btn" data-action="open-session" data-task-id="${task.id}">Open</button>`;
   if (task.status === "done" || task.status === "aborted")
     html += `<button class="action-btn" data-action="redispatch" data-task-id="${task.id}">Re-dispatch</button>`;
   return html;
@@ -720,6 +719,26 @@ function resetSyncButton() {
   btn.classList.remove("spinning");
 }
 
+function pollSyncStatus() {
+  const timer = setInterval(async () => {
+    try {
+      const status = await fetchJSON(`${BASE}/api/sync/status`);
+      if (!status.running) {
+        clearInterval(timer);
+        resetSyncButton();
+        if (status.error) {
+          showNotification("Sync failed", true);
+        } else {
+          showNotification("Sync completed");
+        }
+      }
+    } catch {
+      clearInterval(timer);
+      resetSyncButton();
+    }
+  }, 1000);
+}
+
 // --- Init ---
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -733,6 +752,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const result = await postAction(`${BASE}/api/sync`);
       if (result.ok) {
         showNotification("Sync started");
+        pollSyncStatus();
       } else {
         showNotification(result.error || "Sync failed", true);
         resetSyncButton();
