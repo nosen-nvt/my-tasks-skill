@@ -64,10 +64,6 @@ class FileWatcher:
     def remove_client(self, client_id: int) -> None:
         self._clients.pop(client_id, None)
 
-    def push(self, event_name: str) -> None:
-        """Send an event to all connected SSE clients (thread-safe)."""
+    def _push(self, event_name: str) -> None:
         for queue in self._clients.values():
             self._loop.call_soon_threadsafe(queue.put_nowait, event_name)
-
-    def _push(self, event_name: str) -> None:
-        self.push(event_name)

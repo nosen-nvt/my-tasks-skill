@@ -87,8 +87,12 @@ def save_index(tasks_dir: Path, entries: list[dict]) -> None:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def generate_task_id(index_entries: list[dict]) -> str:
-    """YYYYMMDD-NNN 形式のタスク ID を生成する。"""
+def generate_task_id(index_entries: list[dict], tasks_dir: Path | None = None) -> str:
+    """YYYYMMDD-NNN 形式のタスク ID を生成する。
+
+    GC でインデックスから削除されたタスクの ID を再利用しないよう、
+    発行済みの最大シーケンス番号を .seq ファイルに永続化する。
+    """
     date_prefix = today_str()
 
     max_seq = 0
@@ -102,7 +106,31 @@ def generate_task_id(index_entries: list[dict]) -> str:
             except ValueError:
                 pass
 
-    return f"{date_prefix}-{max_seq + 1:03d}"
+    # .seq ファイルから過去の最大値を取得
+    seq_data = {}
+    if tasks_dir:
+        seq_file = tasks_dir / ".seq"
+        if seq_file.exists():
+            try:
+                seq_data = json.loads(seq_file.read_text(encoding="utf-8"))
+                stored = seq_data.get(date_prefix, 0)
+                if stored > max_seq:
+                    max_seq = stored
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    new_seq = max_seq + 1
+
+    # .seq ファイルに保存
+    if tasks_dir:
+        seq_data[date_prefix] = new_seq
+        seq_file = tasks_dir / ".seq"
+        try:
+            seq_file.write_text(json.dumps(seq_data, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+
+    return f"{date_prefix}-{new_seq:03d}"
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +359,7 @@ def process_datasource(
                 })
         else:
             # 新規タスク
-            task_id = generate_task_id(index_entries)
+            task_id = generate_task_id(index_entries, tasks_dir)
             project_id = resolve_project(t.get("project_key"), project_mapping) or ""
 
             new_entry = {
