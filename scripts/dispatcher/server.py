@@ -302,7 +302,7 @@ class DispatchServer(ExecutorMixin):
         cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_id}'{env_file_args} -- claude --permission-mode bypassPermissions{prompt_arg}"
 
         result = subprocess.run(
-            ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, "bash", "-c", cmd],
+            ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, cmd],
             capture_output=True,
         )
         if result.returncode != 0:
@@ -310,10 +310,12 @@ class DispatchServer(ExecutorMixin):
 
         activate = request.get("activate", False)
         if activate:
-            subprocess.run(
+            sel = subprocess.run(
                 ["tmux", "select-window", "-t", f"{session_name}:{window_name}"],
                 capture_output=True,
             )
+            if sel.returncode != 0:
+                log.warning(f"select-window failed: {sel.stderr.decode().strip()}")
 
         log.info(f"Opened interactive session: {session_name}:{window_name}")
         return {"ok": True, "message": f"Opened {session_name}:{window_name}", "window": window_name}
