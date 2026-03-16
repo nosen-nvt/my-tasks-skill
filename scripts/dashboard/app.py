@@ -438,8 +438,15 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             _, stderr = await proc.communicate()
             if proc.returncode != 0:
                 sync_state["error"] = stderr.decode(errors="replace")[:500]
+                if watcher:
+                    watcher.push("sync_error")
+            else:
+                if watcher:
+                    watcher.push("sync_completed")
         except Exception as e:
             sync_state["error"] = str(e)
+            if watcher:
+                watcher.push("sync_error")
         finally:
             sync_state["running"] = False
 

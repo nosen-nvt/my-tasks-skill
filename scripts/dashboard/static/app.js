@@ -62,6 +62,16 @@ function connectSSE() {
     state.lifecycles = await fetchJSON(`${BASE}/api/lifecycles`);
     handleSSEUpdate("lifecycles");
   });
+
+  es.addEventListener("sync_completed", () => {
+    resetSyncButton();
+    showNotification("Sync completed");
+  });
+
+  es.addEventListener("sync_error", () => {
+    resetSyncButton();
+    showNotification("Sync failed", true);
+  });
 }
 
 function handleSSEUpdate(dataType) {
@@ -702,6 +712,14 @@ function updateElapsedTimes() {
   });
 }
 
+// --- Sync button ---
+
+function resetSyncButton() {
+  const btn = document.getElementById("sync-btn");
+  btn.disabled = false;
+  btn.classList.remove("spinning");
+}
+
 // --- Init ---
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -717,15 +735,12 @@ document.addEventListener("DOMContentLoaded", () => {
         showNotification("Sync started");
       } else {
         showNotification(result.error || "Sync failed", true);
+        resetSyncButton();
       }
     } catch {
       showNotification("通信エラー", true);
+      resetSyncButton();
     }
-    // sync 完了は SSE tasks_updated で通知されるため、少し待ってからボタンを復帰
-    setTimeout(() => {
-      syncBtn.disabled = false;
-      syncBtn.classList.remove("spinning");
-    }, 5000);
   });
 
   setInterval(updateElapsedTimes, 5000);
