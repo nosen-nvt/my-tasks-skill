@@ -302,7 +302,9 @@ class DispatchServer(ExecutorMixin):
                 return {"ok": False, "error": str(e)}
 
             project_id = task.get("project_id", "")
-            working_dir = (project or {}).get("working_directory", "") or str(self.repo_dir)
+            home_dir = str(Path.home())
+            candidate = (project or {}).get("working_directory", "")
+            working_dir = candidate if candidate and Path(candidate).is_dir() else home_dir
             window_name = task_id
 
             # system_prompt / prompt が未指定ならタスク用プロンプトを構築
@@ -338,11 +340,9 @@ class DispatchServer(ExecutorMixin):
             if not project:
                 return {"ok": False, "error": f"Project not found: {project_id}"}
 
-            working_dir = project.get("working_directory", "")
-            if not working_dir:
-                return {"ok": False, "error": f"working_directory not set for project: {project_id}"}
-            if not Path(working_dir).is_dir():
-                return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
+            home_dir = str(Path.home())
+            candidate = project.get("working_directory", "")
+            working_dir = candidate if candidate and Path(candidate).is_dir() else home_dir
 
             try:
                 sandbox_profile_id, env_files, _host_cmds, _extra_binds = \
@@ -353,9 +353,6 @@ class DispatchServer(ExecutorMixin):
                 return {"ok": False, "error": str(e)}
 
             window_name = project_id
-
-        if not Path(working_dir).is_dir():
-            return {"ok": False, "error": f"working_directory does not exist: {working_dir}"}
 
         session_name, is_caller = detect_tmux_session(session)
         if not ensure_tmux_session(session_name, is_caller):
