@@ -31,8 +31,6 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 ├── sandbox-profiles/                # git 管理
 │   ├── restricted-default.json
 │   └── unrestricted-browser.json
-├── credential-profiles/             # git 管理
-│   └── {credential_profile_id}.json
 ├── tasks/                           # gitignored
 │   ├── index.jsonl                  # タスクインデックス
 │   └── {task_id}.yaml               # タスク実体（YAML）
@@ -158,7 +156,8 @@ Unix ドメインソケット C/S アーキテクチャのジョブランナー�
 
 ### ソケットパス
 
-`$XDG_RUNTIME_DIR/my-tasks-dispatch/dispatcher.sock`
+- `$XDG_RUNTIME_DIR/my-tasks-dispatch/dispatcher.sock` — ジョブ管理
+- `$XDG_RUNTIME_DIR/my-tasks-dispatch/host-cmd-broker.sock` — ホストコマンドブローカー（認証情報取得含む）
 
 ### コマンド
 
