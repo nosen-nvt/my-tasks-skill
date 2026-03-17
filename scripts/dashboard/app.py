@@ -327,6 +327,15 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
         return JSONResponse(result)
 
+    def _load_datasource(datasource_id: str) -> dict | None:
+        if not datasource_id:
+            return None
+        ds_path = repo_dir / "datasources" / f"{datasource_id}.json"
+        if not ds_path.exists():
+            return None
+        with open(ds_path, encoding="utf-8") as f:
+            return json.load(f)
+
     @app.post("/api/tasks/{task_id}/open-session")
     async def api_task_open_session(task_id: str) -> JSONResponse:
         tasks_dir = repo_dir / "tasks"
@@ -337,12 +346,31 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         if entry.get("status") not in ("pending", "in_progress"):
             return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（pending/in_progress のみ対話可能）"})
 
+        # タスクデータとデータソースを読み込み
+        task_data = _load_task_data(tasks_dir, task_id)
+        task_data.setdefault("id", task_id)
+        task_data.setdefault("datasource_id", entry.get("datasource_id", ""))
+        task_data.setdefault("project_id", entry.get("project_id", ""))
+        task_data.setdefault("remote_id", entry.get("remote_id", ""))
+        datasource = _load_datasource(task_data.get("datasource_id", ""))
+
+        # プロンプト構築（ディスパッチャーから移動）
+        from dispatcher.interactive_prompt import build_task_session_prompts
+        system_prompt, prompt = build_task_session_prompts(task_data, datasource, str(repo_dir))
+
+        request_data = {
+            "command": "open",
+            "system_prompt": system_prompt,
+            "prompt": prompt,
+            "window_name": task_id,
+            "activate": True,
+        }
+        project_id = entry.get("project_id", "")
+        if project_id:
+            request_data["project_id"] = project_id
+
         try:
-            result = await dispatcher_send({
-                "command": "open",
-                "task_id": task_id,
-                "activate": True,
-            })
+            result = await dispatcher_send(request_data)
         except (ConnectionRefusedError, FileNotFoundError):
             return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
         return JSONResponse(result)
@@ -423,6 +451,59 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             f'<script>window.__BASE_PATH__ = "{base_path}";</script>\n</head>',
         )
         return HTMLResponse(html)
+
+    @app.get("/api/routines")
+    async def api_routines() -> JSONResponse:
+        routines_path = repo_dir / "routines.json"
+        if not routines_path.exists():
+            return JSONResponse([])
+        try:
+            with open(routines_path, encoding="utf-8") as f:
+                return JSONResponse(json.load(f))
+        except (json.JSONDecodeError, OSError):
+            return JSONResponse([])
+
+    @app.post("/api/routines/{routine_id}/open-session")
+    async def api_routine_open_session(routine_id: str) -> JSONResponse:
+        routines_path = repo_dir / "routines.json"
+        if not routines_path.exists():
+            return JSONResponse({"ok": False, "error": "routines.json not found"}, status_code=404)
+        try:
+            with open(routines_path, encoding="utf-8") as f:
+                routines = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return JSONResponse({"ok": False, "error": "routines.json parse error"}, status_code=500)
+
+        routine = next((r for r in routines if r.get("routine_id") == routine_id), None)
+        if routine is None:
+            return JSONResponse({"ok": False, "error": f"Routine not found: {routine_id}"}, status_code=404)
+
+        system_prompt = ""
+        sp_file = routine.get("system_prompt_file", "")
+        if sp_file:
+            sp_path = repo_dir / sp_file
+            if sp_path.exists():
+                system_prompt = sp_path.read_text(encoding="utf-8")
+
+        request_data = {
+            "command": "open",
+            "system_prompt": system_prompt,
+            "prompt": routine.get("prompt", ""),
+            "window_name": routine_id,
+            "activate": True,
+        }
+        project_id = routine.get("project_id")
+        if project_id:
+            request_data["project_id"] = project_id
+        sandbox_profile = routine.get("sandbox_profile")
+        if sandbox_profile:
+            request_data["sandbox_profile"] = sandbox_profile
+
+        try:
+            result = await dispatcher_send(request_data)
+        except (ConnectionRefusedError, FileNotFoundError):
+            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
+        return JSONResponse(result)
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

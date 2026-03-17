@@ -107,14 +107,16 @@ function connectSSE() {
 // --- Data loading ---
 
 async function loadAll() {
-  const [tasks, lifecycles, jobs] = await Promise.all([
+  const [tasks, lifecycles, jobs, routines] = await Promise.all([
     fetchJSON(`${BASE}/api/tasks`),
     fetchJSON(`${BASE}/api/lifecycles`),
     fetchJSON(`${BASE}/api/jobs`),
+    fetchJSON(`${BASE}/api/routines`),
   ]);
   state.tasks = tasks;
   state.lifecycles = lifecycles;
   state.jobs = jobs;
+  state.routines = routines;
   renderCurrentView();
 }
 

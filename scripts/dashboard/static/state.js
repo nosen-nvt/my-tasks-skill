@@ -4,5 +4,6 @@ export const state = {
   tasks: [],
   lifecycles: [],
   jobs: [],
+  routines: [],
   viewStack: [{ type: "tasks" }],
 };

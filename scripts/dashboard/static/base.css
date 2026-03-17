@@ -378,3 +378,17 @@ main {
 .notification.fade-out {
   opacity: 0;
 }
+
+/* Routine actions */
+.routine-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.routine-btn {
+  padding: 8px 16px;
+  font-size: 13px;
+}
