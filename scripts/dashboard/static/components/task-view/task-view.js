@@ -66,6 +66,12 @@ function bindTaskActions(root) {
       handleAction(btn, `${BASE}/api/tasks/${btn.dataset.taskId}/redispatch`, "Re-dispatching...");
     });
   });
+  root.querySelectorAll("[data-action=reopen]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      handleAction(btn, `${BASE}/api/tasks/${btn.dataset.taskId}/reopen`, "Re-opening...");
+    });
+  });
 }
 
 function buildTaskMetaHTML(task) {
@@ -78,6 +84,11 @@ function buildTaskMetaHTML(task) {
     html += `<button class="action-btn primary" data-action="dispatch" data-task-id="${task.id}">Dispatch</button>`;
   if (task.status === "pending")
     html += `<button class="action-btn" data-action="open-session" data-task-id="${task.id}">Open</button>`;
+  const displayStatus = taskDisplayStatus(task);
+  if (displayStatus === "in_review" && task.project_id)
+    html += `<button class="action-btn primary" data-action="redispatch" data-task-id="${task.id}">Re-dispatch</button>`;
+  if (displayStatus === "in_review")
+    html += `<button class="action-btn" data-action="reopen" data-task-id="${task.id}">Re-open</button>`;
   if (task.status === "done" || task.status === "aborted")
     html += `<button class="action-btn" data-action="redispatch" data-task-id="${task.id}">Re-dispatch</button>`;
   return html;
@@ -111,11 +122,13 @@ function renderTaskDetailSections(data) {
   }
 
   if (data.history?.length > 0) {
-    html += '<div class="detail-section"><div class="detail-heading">\u5b9f\u884c\u5c65\u6b74</div>';
+    html += '<div class="detail-section"><div class="detail-heading">\u5b9f\u884c\u5c65\u6b74</div><div class="phase-list">';
     data.history.forEach((h) => {
-      html += `<div class="phase-item"><span class="phase-num">G${h.generation || "?"}</span><span class="phase-goal">${escapeHtml(h.summary || "")}</span></div>`;
+      const label = h.generation != null ? `G${h.generation}` : (h.date || "?");
+      const text = h.summary || h.note || "";
+      html += `<div class="phase-item"><span class="phase-num">${escapeHtml(label)}</span><span class="phase-goal">${escapeHtml(text)}</span></div>`;
     });
-    html += "</div>";
+    html += "</div></div>";
   }
 
   return html;
