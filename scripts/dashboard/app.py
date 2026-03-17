@@ -356,8 +356,8 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             entry = next((e for e in index_entries if e.get("id") == task_id), None)
             if entry is None:
                 return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-            if entry.get("status") not in ("done", "aborted", "in_progress"):
-                return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（done/aborted/in_progress のみ再実行可能）"})
+            if entry.get("status") not in ("done", "aborted", "in_progress", "in_review"):
+                return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（done/aborted/in_progress/in_review のみ再実行可能）"})
 
         # フィードバック収集（再オープン前 = 正しい generation でタグ付け）
         await asyncio.to_thread(
