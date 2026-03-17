@@ -684,7 +684,4 @@ async def run_server(max_slots: int, repo: str):
 async def _shutdown(server: DispatchServer, srv, broker_srv):
     await server.shutdown()
     srv.close()
-    await srv.wait_closed()
     broker_srv.close()
-    await broker_srv.wait_closed()
-    asyncio.get_event_loop().stop()
