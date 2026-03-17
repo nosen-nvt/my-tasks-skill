@@ -22,6 +22,35 @@ UID = os.getuid()
 CACHE_DIR = Path("~/.local/share/my-tasks/.cache").expanduser()
 DEFAULT_REPO = Path("~/.local/share/my-tasks").expanduser()
 PROXY_PROFILES_DIR = Path("~/.local/share/my-tasks/proxy-profiles").expanduser()
+CLAUDE_JSON = HOME / ".claude" / "claude.json"
+
+
+# --- trust dialog 事前承認 ---------------------------------------------------
+
+def ensure_trust_accepted(working_dir: str) -> None:
+    """claude.json のワークスペース trust dialog を事前に受け入れ済みにする。
+
+    Claude Code はインタラクティブモードで起動時、ワークスペースごとに
+    trust dialog を表示する。-p モードではスキップされるが、対話セッションでは
+    表示される。この関数で事前に hasTrustDialogAccepted を True にしておくことで
+    sandbox 内の対話セッションでもダイアログをスキップできる。
+    """
+    if not CLAUDE_JSON.is_file():
+        return
+    try:
+        with open(CLAUDE_JSON, encoding="utf-8") as f:
+            data = json.load(f)
+        projects = data.setdefault("projects", {})
+        entry = projects.setdefault(working_dir, {})
+        if entry.get("hasTrustDialogAccepted"):
+            return
+        entry["hasTrustDialogAccepted"] = True
+        tmp = CLAUDE_JSON.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        tmp.replace(CLAUDE_JSON)
+    except (json.JSONDecodeError, OSError):
+        pass
 
 
 # --- プロジェクト読み込み -----------------------------------------------------
@@ -715,6 +744,7 @@ def run(
     working_dir: str | None = None,
 ) -> None:
     """サンドボックスを構築し、exec で置き換える."""
+    ensure_trust_accepted(working_dir or os.getcwd())
     profile = resolve_profile(sandbox_profile)
     if host_commands is None:
         host_commands = resolve_host_commands(profile)

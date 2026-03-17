@@ -290,6 +290,8 @@ class DispatchServer(ExecutorMixin):
             sandbox_profile_id = request.get("sandbox_profile") or "default"
             env_files = []
 
+        sandbox_exec.ensure_trust_accepted(working_dir)
+
         window_name = request.get("window_name", project_id or "session")
 
         session_name, is_caller = detect_tmux_session(session)
