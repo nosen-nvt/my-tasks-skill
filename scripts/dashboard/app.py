@@ -24,6 +24,7 @@ _spec.loader.exec_module(_sync_tasks)
 load_index = _sync_tasks.load_index
 save_index = _sync_tasks.save_index
 reopen_task_yaml = _sync_tasks.reopen_task_yaml
+update_task_yaml = _sync_tasks.update_task_yaml
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -244,6 +245,44 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
 
         return JSONResponse(result)
 
+    @app.post("/api/tasks/{task_id}/complete")
+    async def api_complete(task_id: str) -> JSONResponse:
+        tasks_dir = repo_dir / "tasks"
+
+        async with index_lock:
+            index_entries = load_index(tasks_dir)
+            entry = next((e for e in index_entries if e.get("id") == task_id), None)
+            if entry is None:
+                return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+            if entry.get("status") not in ("in_progress", "pending"):
+                return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（in_progress/pending のみ完了可能）"})
+
+            entry["status"] = "done"
+            update_task_yaml(tasks_dir, entry)
+            save_index(tasks_dir, index_entries)
+
+        return JSONResponse({"ok": True})
+
+    @app.post("/api/tasks/{task_id}/reopen")
+    async def api_reopen(task_id: str) -> JSONResponse:
+        tasks_dir = repo_dir / "tasks"
+
+        async with index_lock:
+            index_entries = load_index(tasks_dir)
+            entry = next((e for e in index_entries if e.get("id") == task_id), None)
+            if entry is None:
+                return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+            if entry.get("status") not in ("in_progress", "done", "aborted"):
+                return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（in_progress/done/aborted のみ再オープン可能）"})
+
+            old_generation = entry.get("generation", 1)
+            entry["status"] = "pending"
+            entry["generation"] = old_generation + 1
+            reopen_task_yaml(tasks_dir, entry)
+            save_index(tasks_dir, index_entries)
+
+        return JSONResponse({"ok": True})
+
     @app.post("/api/tasks/{task_id}/redispatch")
     async def api_redispatch(task_id: str) -> JSONResponse:
         tasks_dir = repo_dir / "tasks"
@@ -253,8 +292,8 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             entry = next((e for e in index_entries if e.get("id") == task_id), None)
             if entry is None:
                 return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-            if entry.get("status") not in ("done", "aborted"):
-                return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（done/aborted のみ再実行可能）"})
+            if entry.get("status") not in ("done", "aborted", "in_progress"):
+                return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（done/aborted/in_progress のみ再実行可能）"})
 
             old_generation = entry.get("generation", 1)
             entry["status"] = "pending"

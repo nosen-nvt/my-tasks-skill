@@ -72,6 +72,12 @@ function bindTaskActions(root) {
       handleAction(btn, `${BASE}/api/tasks/${btn.dataset.taskId}/reopen`, "Re-opening...");
     });
   });
+  root.querySelectorAll("[data-action=complete]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      handleAction(btn, `${BASE}/api/tasks/${btn.dataset.taskId}/complete`, "Completing...");
+    });
+  });
 }
 
 function buildTaskMetaHTML(task) {
@@ -89,6 +95,8 @@ function buildTaskMetaHTML(task) {
     html += `<button class="action-btn primary" data-action="redispatch" data-task-id="${task.id}">Re-dispatch</button>`;
   if (displayStatus === "in_review")
     html += `<button class="action-btn" data-action="reopen" data-task-id="${task.id}">Re-open</button>`;
+  if (displayStatus === "in_review")
+    html += `<button class="action-btn success" data-action="complete" data-task-id="${task.id}">Complete</button>`;
   if (task.status === "done" || task.status === "aborted")
     html += `<button class="action-btn" data-action="redispatch" data-task-id="${task.id}">Re-dispatch</button>`;
   return html;
