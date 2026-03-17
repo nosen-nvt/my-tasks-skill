@@ -362,7 +362,7 @@ class DispatchServer(ExecutorMixin):
         prompt = request.get("prompt")
         prompt_arg = f" {shlex.quote(prompt)}" if prompt else ""
         system_prompt_arg = f" --append-system-prompt {shlex.quote(system_prompt)}" if system_prompt else ""
-        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_id}'{env_file_args} -- claude --permission-mode bypassPermissions{system_prompt_arg}{prompt_arg}"
+        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_id}'{env_file_args} -- claude --dangerously-skip-permissions{system_prompt_arg}{prompt_arg}"
 
         result = subprocess.run(
             ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, cmd],

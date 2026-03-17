@@ -574,7 +574,7 @@ def build_netns_args(
         "--ro-bind-try", f"{HOME}/.config/go", f"{HOME}/.config/go",
         "--ro-bind-try", f"{HOME}/.config/uv", f"{HOME}/.config/uv",
         *profile_binds,
-        "--bind", work, work,
+        *(["--bind", work, work] if work != str(HOME) else []),
         *_my_tasks_binds(),
         "--chdir", work,
         *_env_args(env_file_args, broker_args),
@@ -609,7 +609,7 @@ def build_host_network_args(
         "--ro-bind", f"{HOME}/src/github.com/nosen-nvt/my-tasks-skill",
                      f"{HOME}/src/github.com/nosen-nvt/my-tasks-skill",
         *profile_binds,
-        "--bind", work, work,
+        *(["--bind", work, work] if work != str(HOME) else []),
         "--chdir", work,
         *_env_args(env_file_args, broker_args),
         "--setenv", "PATH", f"/usr/bin:{HOME}/.local/bin:{HOME}/.volta/bin:{HOME}/go/bin",
@@ -675,7 +675,7 @@ def build_exec_args(
     )
 
     if command is None:
-        command = [f"{HOME}/.local/bin/claude", "--permission-mode", "bypassPermissions"]
+        command = [f"{HOME}/.local/bin/claude", "--dangerously-skip-permissions"]
 
     env_file_args = load_env_files(env_files or [])
 

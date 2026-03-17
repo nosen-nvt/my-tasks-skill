@@ -79,7 +79,7 @@ class ExecutorMixin:
                 broker_env = {"HOST_CMD_TOKEN": broker_token, "HOST_CMD_BROKER_SOCK": get_host_cmd_broker_socket_path()}
 
             command = [
-                "claude", "--permission-mode", "bypassPermissions",
+                "claude", "--dangerously-skip-permissions",
                 "-p", job.prompt,
                 "--append-system-prompt", system_prompt,
             ]
