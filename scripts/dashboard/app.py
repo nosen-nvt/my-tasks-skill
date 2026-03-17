@@ -364,6 +364,31 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             _collect_feedback_for_task, tasks_dir, repo_dir / "datasources", task_id,
         )
 
+        # 前世代のライフサイクル context からサマリーを取得
+        prev_summary = ""
+        async with index_lock:
+            index_entries = load_index(tasks_dir)
+            entry = next((e for e in index_entries if e.get("id") == task_id), None)
+            if entry is None:
+                return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+            old_generation = entry.get("generation", 1)
+
+        prev_lc_id = f"{task_id}-g{old_generation}"
+        lifecycles = read_jsonl(dispatch_dir / "lifecycles.jsonl")
+        prev_lc = next((lc for lc in lifecycles if lc.get("lifecycle_id") == prev_lc_id), None)
+        if prev_lc and prev_lc.get("context_path"):
+            try:
+                ctx = yaml.safe_load(Path(prev_lc["context_path"]).read_text(encoding="utf-8")) or {}
+                phase_summaries = [
+                    f"Phase {i+1} ({p.get('goal', '')}): {p.get('summary', '')}"
+                    for i, p in enumerate(ctx.get("phases", []))
+                    if p.get("status") == "done" and p.get("summary")
+                ]
+                if phase_summaries:
+                    prev_summary = "; ".join(phase_summaries)
+            except (OSError, yaml.YAMLError):
+                pass
+
         # 再オープン
         async with index_lock:
             index_entries = load_index(tasks_dir)
@@ -374,7 +399,7 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             old_generation = entry.get("generation", 1)
             entry["status"] = "pending"
             entry["generation"] = old_generation + 1
-            reopen_task_yaml(tasks_dir, entry)
+            reopen_task_yaml(tasks_dir, entry, prev_summary=prev_summary)
             save_index(tasks_dir, index_entries)
 
         project_id = entry.get("project_id", "")

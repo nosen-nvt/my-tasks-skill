@@ -294,6 +294,9 @@ EVALUATE_TEMPLATE = """\
 
 必要に応じて作業ディレクトリ配下のソースコードや変更差分を調査してください。
 
+DONE の場合:
+- 実行ログに Pull Request の作成が含まれる場合、PR の URL を `pr_url` フィールドに含めてください
+
 NEXT_PHASE の場合:
 - 残フェーズを見直し、必要に応じて修正・追加・削除してください
 - 次フェーズの実行プロンプトを生成してください（前フェーズの成果を踏まえた自己完結した内容）
@@ -305,7 +308,7 @@ NEXT_PHASE の場合:
   {result_file_path}
 
 フォーマット:
-  {{"verdict": "DONE", "phase_summary": "..."}} — タスク完了
+  {{"verdict": "DONE", "phase_summary": "...", "pr_url": "https://..."}} — タスク完了（pr_url は PR 作成時のみ）
   {{"verdict": "NEXT_PHASE", "phase_summary": "...", "remaining_phases": [{{"goal": "...", "criteria": "..."}}], "next_execute_prompt": "..."}} — 次フェーズへ
   {{"verdict": "SUSPEND", "phase_summary": "...", "reason": "..."}} — ユーザ入力が必要
   {{"verdict": "ABORT", "phase_summary": "...", "reason": "..."}} — 実行不可能
@@ -411,6 +414,27 @@ class LifecycleManager:
             return yaml.safe_load(path.read_text(encoding="utf-8"))
         except (yaml.YAMLError, OSError):
             return None
+
+    def _save_task_yaml_field(self, lc: Lifecycle, field: str, value):
+        """タスク YAML の指定フィールドを更新する。"""
+        context_data = self._read_context_yaml(lc)
+        if not context_data:
+            return
+        task_id = context_data.get("meta", {}).get("task_id", "")
+        if not task_id:
+            return
+        yaml_path = self.repo_dir / "tasks" / f"{task_id}.yaml"
+        if not yaml_path.exists():
+            return
+        try:
+            data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+            data[field] = value
+            yaml_path.write_text(
+                yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False),
+                encoding="utf-8",
+            )
+        except (yaml.YAMLError, OSError) as e:
+            log.error(f"Lifecycle: failed to update task YAML field {field}: {e}")
 
     def _update_context_yaml(self, lc: Lifecycle, data: dict):
         """YAML コンテキストファイルを更新。"""
@@ -699,6 +723,10 @@ class LifecycleManager:
             # 残フェーズを全てスキップ
             for i in range(lc.current_phase + 1, len(lc.phases)):
                 lc.phases[i]["status"] = "skipped"
+            # pr_url をタスク YAML に書き戻す
+            pr_url = (result or {}).get("pr_url", "")
+            if pr_url:
+                self._save_task_yaml_field(lc, "pr_url", pr_url)
             self._update_status(lc, "done")
 
         elif verdict == "NEXT_PHASE":
