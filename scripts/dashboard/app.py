@@ -26,6 +26,11 @@ save_index = _sync_tasks.save_index
 reopen_task_yaml = _sync_tasks.reopen_task_yaml
 update_task_yaml = _sync_tasks.update_task_yaml
 
+# collect-feedback.py をモジュールとしてインポート
+_cf_spec = importlib.util.spec_from_file_location("collect_feedback", _script_dir / "collect-feedback.py")
+_collect_feedback_mod = importlib.util.module_from_spec(_cf_spec)
+_cf_spec.loader.exec_module(_collect_feedback_mod)
+
 
 def read_jsonl(path: Path) -> list[dict]:
     if not path.exists():
@@ -205,6 +210,64 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             return yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
         return {}
 
+    def _collect_feedback_for_task(tasks_dir: Path, datasources_dir: Path, task_id: str) -> int:
+        """タスクに対するフィードバックを Jira/Bitbucket から収集する。収集件数を返す。"""
+        task_data = _collect_feedback_mod.load_task_yaml(tasks_dir, task_id)
+        if not task_data:
+            return 0
+
+        remote_id = task_data.get("remote_id", "")
+        datasource_id = task_data.get("datasource_id", "")
+        generation = task_data.get("generation", 1)
+
+        feedback = task_data.get("feedback", [])
+        if not isinstance(feedback, list):
+            feedback = []
+        cursor = task_data.get("feedback_cursor", {})
+        if not isinstance(cursor, dict):
+            cursor = {}
+
+        collected_count = 0
+
+        # Jira コメント収集
+        if datasource_id:
+            datasource = _collect_feedback_mod.load_datasource(datasources_dir, datasource_id)
+            if datasource and datasource.get("type") == "jira" and remote_id:
+                site_mapping = datasource.get("site_mapping", {})
+                site = _collect_feedback_mod.resolve_jira_site(remote_id, site_mapping)
+                if site:
+                    jira_cursor = cursor.get("jira_comment")
+                    new_comments, new_cursor = _collect_feedback_mod.collect_jira_comments(
+                        remote_id, site, jira_cursor,
+                    )
+                    for item in new_comments:
+                        item["generation"] = generation
+                    feedback.extend(new_comments)
+                    collected_count += len(new_comments)
+                    if new_cursor:
+                        cursor["jira_comment"] = new_cursor
+
+        # Bitbucket PR コメント収集
+        pr_url = task_data.get("pr_url", "")
+        if pr_url:
+            bb_cursor = cursor.get("bitbucket_pr")
+            new_comments, new_cursor = _collect_feedback_mod.collect_bitbucket_pr_comments(
+                pr_url, bb_cursor,
+            )
+            for item in new_comments:
+                item["generation"] = generation
+            feedback.extend(new_comments)
+            collected_count += len(new_comments)
+            if new_cursor:
+                cursor["bitbucket_pr"] = new_cursor
+
+        if collected_count > 0:
+            task_data["feedback"] = feedback
+            task_data["feedback_cursor"] = cursor
+            _collect_feedback_mod.save_task_yaml(tasks_dir, task_id, task_data)
+
+        return collected_count
+
     @app.post("/api/tasks/{task_id}/dispatch")
     async def api_dispatch(task_id: str) -> JSONResponse:
         tasks_dir = repo_dir / "tasks"
@@ -287,6 +350,7 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
     async def api_redispatch(task_id: str) -> JSONResponse:
         tasks_dir = repo_dir / "tasks"
 
+        # ステータスチェック
         async with index_lock:
             index_entries = load_index(tasks_dir)
             entry = next((e for e in index_entries if e.get("id") == task_id), None)
@@ -294,6 +358,18 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
                 return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
             if entry.get("status") not in ("done", "aborted", "in_progress"):
                 return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（done/aborted/in_progress のみ再実行可能）"})
+
+        # フィードバック収集（再オープン前 = 正しい generation でタグ付け）
+        await asyncio.to_thread(
+            _collect_feedback_for_task, tasks_dir, repo_dir / "datasources", task_id,
+        )
+
+        # 再オープン
+        async with index_lock:
+            index_entries = load_index(tasks_dir)
+            entry = next((e for e in index_entries if e.get("id") == task_id), None)
+            if entry is None:
+                return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
 
             old_generation = entry.get("generation", 1)
             entry["status"] = "pending"
