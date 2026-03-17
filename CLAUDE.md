@@ -11,3 +11,5 @@ systemctl --user restart my-tasks-dispatcher.service
 ```
 systemctl --user status my-tasks-dispatcher.service --no-pager
 ```
+
+注意: sandbox 内では `&&` チェインで systemctl を実行するとハングする。必ず個別に実行すること。
