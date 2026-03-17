@@ -472,13 +472,13 @@ class EmbeddedHostCommandBroker:
         all_patterns: list | str = []
         allow_stdin = False
         for d in matching_defs:
+            allow_stdin = allow_stdin or d.get("allow_stdin", False)
             p = d.get("allowed_patterns", [])
             if p == "*":
                 all_patterns = "*"
                 break
             if isinstance(all_patterns, list):
                 all_patterns.extend(p)
-            allow_stdin = allow_stdin or d.get("allow_stdin", False)
 
         if all_patterns != "*":
             args_str = " ".join(args)
