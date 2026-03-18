@@ -9,16 +9,9 @@ add-feedback.py - タスクにユーザーフィードバックを手動で追�
 import argparse
 import json
 import sys
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from lib.task_store import load_task_yaml, save_task_yaml
-
-JST = timezone(timedelta(hours=9))
-
-
-def now_iso() -> str:
-    return datetime.now(JST).isoformat(timespec="seconds")
+from lib.task_store import FeedbackItem, load_task_yaml, save_task_yaml, now_iso
 
 
 def main() -> None:
@@ -57,27 +50,20 @@ def main() -> None:
         print(f"エラー: タスクが見つかりません: {task_id}", file=sys.stderr)
         sys.exit(1)
 
-    generation = task_data.get("generation", 1)
+    new_item = FeedbackItem(
+        source="user",
+        timestamp=now_iso(),
+        body=args.body,
+        generation=task_data.generation,
+    )
+    task_data.feedback.append(new_item)
 
-    feedback = task_data.get("feedback", [])
-    if not isinstance(feedback, list):
-        feedback = []
-
-    new_item = {
-        "source": "user",
-        "timestamp": now_iso(),
-        "body": args.body,
-        "generation": generation,
-    }
-    feedback.append(new_item)
-
-    task_data["feedback"] = feedback
     save_task_yaml(tasks_dir, task_id, task_data)
 
     report = {
         "task_id": task_id,
-        "feedback_item": new_item,
-        "total_feedback_count": len(feedback),
+        "feedback_item": new_item.to_dict(),
+        "total_feedback_count": len(task_data.feedback),
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

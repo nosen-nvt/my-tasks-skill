@@ -46,7 +46,7 @@ def main() -> None:
     # 対象タスクを検索
     entry = None
     for e in index_entries:
-        if e.get("id") == task_id:
+        if e.id == task_id:
             entry = e
             break
 
@@ -54,17 +54,17 @@ def main() -> None:
         print(f"エラー: タスクが見つかりません: {task_id}", file=sys.stderr)
         sys.exit(1)
 
-    if entry.get("status") not in ("done", "aborted"):
+    if entry.status not in ("done", "aborted"):
         print(
-            f"エラー: タスクは {entry.get('status')} 状態です。done または aborted のタスクのみ再オープンできます",
+            f"エラー: タスクは {entry.status} 状態です。done または aborted のタスクのみ再オープンできます",
             file=sys.stderr,
         )
         sys.exit(1)
 
     # 再オープン
-    old_generation = entry.get("generation", 1)
-    entry["status"] = "pending"
-    entry["generation"] = old_generation + 1
+    old_generation = entry.generation
+    entry.status = "pending"
+    entry.generation = old_generation + 1
 
     reopen_task_yaml(tasks_dir, entry)
 
@@ -74,11 +74,11 @@ def main() -> None:
     # レポート出力
     report = {
         "id": task_id,
-        "remote_id": entry.get("remote_id", ""),
-        "title": entry.get("title", ""),
+        "remote_id": entry.remote_id,
+        "title": entry.title,
         "old_generation": old_generation,
-        "new_generation": entry["generation"],
-        "status": entry["status"],
+        "new_generation": entry.generation,
+        "status": entry.status,
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

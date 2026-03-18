@@ -3,19 +3,21 @@
 import json
 from pathlib import Path
 
+from lib.task_store import TaskData
 
-def resolve_completion_commands(task: dict, datasource: dict | None) -> list[dict]:
+
+def resolve_completion_commands(task: TaskData, datasource: dict | None) -> list[dict]:
     """task の completion_actions からシェルコマンドを解決する。
 
     Returns:
         list[dict]: [{"description": ..., "command": ...}, ...]
     """
-    actions = task.get("completion_actions") or []
+    actions = task.completion_actions
     if not actions or not datasource:
         return []
 
     operations = datasource.get("operations") or {}
-    remote_id = task.get("remote_id", "")
+    remote_id = task.remote_id
     site_mapping = datasource.get("site_mapping") or {}
 
     # project_key を remote_id から推定 (e.g. "ROOK-123" -> "ROOK")
@@ -157,15 +159,15 @@ def build_lifecycle_session_prompts(
 
 
 def build_task_session_prompts(
-    task: dict,
+    task: TaskData,
     datasource: dict | None,
     repo_dir: str,
 ) -> tuple[str, str]:
     """タスク直接セッション用の (system_prompt, prompt) を構築する。"""
 
-    task_id = task.get("id", "")
-    datasource_id = task.get("datasource_id", "")
-    remote_id = task.get("remote_id", "")
+    task_id = task.id
+    datasource_id = task.datasource_id
+    remote_id = task.remote_id
     tasks_dir = str(Path(repo_dir) / "tasks")
     yaml_path = f"{tasks_dir}/{task_id}.yaml"
     index_path = f"{tasks_dir}/index.jsonl"
@@ -222,22 +224,19 @@ def build_task_session_prompts(
 1. completion_actions のコマンドを順次実行
 2. {yaml_path} の status を `done` に更新
 3. {index_path} の該当エントリ (id: {task_id}) の status を `done` に更新
-4. `git add {yaml_path} {index_path} && git commit -m "task {task_id}: done"`
 
 ### needs_input (ユーザー入力が必要)
 1. {yaml_path} の open_questions にユーザーへの質問を記録
 2. status は `pending` のまま変更しない
-3. `git add {yaml_path} && git commit -m "task {task_id}: needs_input"`
 
 ### abort (タスク中止)
 1. {yaml_path} の status を `aborted` に更新
 2. {index_path} の該当エントリ (id: {task_id}) の status を `aborted` に更新
-3. `git add {yaml_path} {index_path} && git commit -m "task {task_id}: aborted"`
 {completion_section}"""
 
     # --- prompt ---
-    title = task.get("title", "")
-    description = task.get("description", "")
+    title = task.title
+    description = task.description
 
     prompt_parts = [f"# タスク: {title}"]
     if description:
@@ -249,15 +248,14 @@ def build_task_session_prompts(
         prompt_parts.append(f"\nデータソース種別: {ds_type}")
 
     # 最新 Generation の状態に応じたコンテキスト
-    generations = task.get("generations") or []
-    latest_gen = generations[-1] if generations else None
+    latest_gen = task.generations[-1] if task.generations else None
 
     if latest_gen:
-        gen_status = latest_gen.get("status", "")
-        gen_output = latest_gen.get("output") or {}
+        gen_status = latest_gen.status
+        gen_output = latest_gen.output
 
         if gen_status == "needs_input":
-            oq = gen_output.get("open_questions") or task.get("open_questions") or []
+            oq = gen_output.get("open_questions") or task.open_questions
             if oq:
                 prompt_parts.append("\n# 前回の未決事項（要回答）")
                 for q in oq:
@@ -296,20 +294,16 @@ def build_task_session_prompts(
 
     else:
         # generations がない場合は history フォールバック
-        history = task.get("history") or []
-        if history:
+        if task.history:
             prompt_parts.append("\n# 前世代の履歴")
-            for h in history:
-                gen = h.get("generation", "?")
-                summary = h.get("summary", "")
-                prompt_parts.append(f"- Generation {gen}: {summary}")
+            for h in task.history:
+                prompt_parts.append(f"- Generation {h.generation}: {h.summary}")
 
     # open_questions（Generation にない場合の直接表示）
-    if not latest_gen or latest_gen.get("status") not in ("needs_input",):
-        open_questions = task.get("open_questions") or []
-        if open_questions:
+    if not latest_gen or latest_gen.status not in ("needs_input",):
+        if task.open_questions:
             prompt_parts.append("\n# 未決事項")
-            for q in open_questions:
+            for q in task.open_questions:
                 prompt_parts.append(f"- {q}")
 
     prompt = "\n".join(prompt_parts)

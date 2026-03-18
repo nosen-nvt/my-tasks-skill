@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .watcher import FileWatcher
 from lib.task_store import (
+    IndexEntry, FeedbackItem,
     load_index, save_index, load_task_yaml, save_task_yaml,
     reopen_task_yaml, update_task_yaml,
 )
@@ -197,64 +198,44 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
 
     # --- Action endpoints ---
 
-    def _load_task_data(tasks_dir: Path, task_id: str) -> dict:
-        """YAML タスクファイルを読み込む。なければ空 dict を返す。"""
-        return load_task_yaml(tasks_dir, task_id) or {}
-
     def _collect_feedback_for_task(tasks_dir: Path, datasources_dir: Path, task_id: str) -> int:
         """タスクに対するフィードバックを Jira/Bitbucket から収集する。収集件数を返す。"""
         task_data = load_task_yaml(tasks_dir, task_id)
         if not task_data:
             return 0
 
-        remote_id = task_data.get("remote_id", "")
-        datasource_id = task_data.get("datasource_id", "")
-        generation = task_data.get("generation", 1)
-
-        feedback = task_data.get("feedback", [])
-        if not isinstance(feedback, list):
-            feedback = []
-        cursor = task_data.get("feedback_cursor", {})
-        if not isinstance(cursor, dict):
-            cursor = {}
-
         collected_count = 0
 
         # Jira コメント収集
-        if datasource_id:
-            datasource = _collect_feedback_mod.load_datasource(datasources_dir, datasource_id)
-            if datasource and datasource.get("type") == "jira" and remote_id:
+        if task_data.datasource_id:
+            datasource = _collect_feedback_mod.load_datasource(datasources_dir, task_data.datasource_id)
+            if datasource and datasource.get("type") == "jira" and task_data.remote_id:
                 site_mapping = datasource.get("site_mapping", {})
-                site = _collect_feedback_mod.resolve_jira_site(remote_id, site_mapping)
+                site = _collect_feedback_mod.resolve_jira_site(task_data.remote_id, site_mapping)
                 if site:
-                    jira_cursor = cursor.get("jira_comment")
+                    jira_cursor = task_data.feedback_cursor.get("jira_comment")
                     new_comments, new_cursor = _collect_feedback_mod.collect_jira_comments(
-                        remote_id, site, jira_cursor,
+                        task_data.remote_id, site, jira_cursor,
                     )
                     for item in new_comments:
-                        item["generation"] = generation
-                    feedback.extend(new_comments)
+                        task_data.feedback.append(FeedbackItem.from_dict({**item, "generation": task_data.generation}))
                     collected_count += len(new_comments)
                     if new_cursor:
-                        cursor["jira_comment"] = new_cursor
+                        task_data.feedback_cursor["jira_comment"] = new_cursor
 
         # Bitbucket PR コメント収集
-        pr_url = task_data.get("pr_url", "")
-        if pr_url:
-            bb_cursor = cursor.get("bitbucket_pr")
+        if task_data.pr_url:
+            bb_cursor = task_data.feedback_cursor.get("bitbucket_pr")
             new_comments, new_cursor = _collect_feedback_mod.collect_bitbucket_pr_comments(
-                pr_url, bb_cursor,
+                task_data.pr_url, bb_cursor,
             )
             for item in new_comments:
-                item["generation"] = generation
-            feedback.extend(new_comments)
+                task_data.feedback.append(FeedbackItem.from_dict({**item, "generation": task_data.generation}))
             collected_count += len(new_comments)
             if new_cursor:
-                cursor["bitbucket_pr"] = new_cursor
+                task_data.feedback_cursor["bitbucket_pr"] = new_cursor
 
         if collected_count > 0:
-            task_data["feedback"] = feedback
-            task_data["feedback_cursor"] = cursor
             save_task_yaml(tasks_dir, task_id, task_data)
 
         return collected_count
@@ -265,24 +246,24 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
 
         async with index_lock:
             index_entries = load_index(tasks_dir)
-        entry = next((e for e in index_entries if e.get("id") == task_id), None)
+        entry = next((e for e in index_entries if e.id == task_id), None)
         if entry is None:
             return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-        if entry.get("status") != "pending":
-            return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（pending のみ実行可能）"})
+        if entry.status != "pending":
+            return JSONResponse({"ok": False, "error": f"タスクは {entry.status} 状態です（pending のみ実行可能）"})
 
-        project_id = entry.get("project_id", "")
-        generation = entry.get("generation", 1)
+        project_id = entry.project_id
+        generation = entry.generation
 
-        task_data = _load_task_data(tasks_dir, task_id)
+        task_data = load_task_yaml(tasks_dir, task_id)
         lifecycle_id = f"{task_id}-g{generation}"
 
         try:
             result = await dispatcher_send({
                 "command": "dispatch",
                 "project_id": project_id,
-                "prompt": task_data.get("description") or entry.get("title", ""),
-                "context": task_data or None,
+                "prompt": (task_data.description if task_data else "") or entry.title,
+                "context": task_data.to_dict() if task_data else None,
                 "lifecycle_id": lifecycle_id,
             })
         except (ConnectionRefusedError, FileNotFoundError):
@@ -292,8 +273,8 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             async with index_lock:
                 index_entries = load_index(tasks_dir)
                 for e in index_entries:
-                    if e.get("id") == task_id:
-                        e["status"] = "in_progress"
+                    if e.id == task_id:
+                        e.status = "in_progress"
                         break
                 save_index(tasks_dir, index_entries)
 
@@ -305,13 +286,13 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
 
         async with index_lock:
             index_entries = load_index(tasks_dir)
-            entry = next((e for e in index_entries if e.get("id") == task_id), None)
+            entry = next((e for e in index_entries if e.id == task_id), None)
             if entry is None:
                 return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-            if entry.get("status") not in ("in_progress", "pending"):
-                return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（in_progress/pending のみ完了可能）"})
+            if entry.status not in ("in_progress", "pending"):
+                return JSONResponse({"ok": False, "error": f"タスクは {entry.status} 状態です（in_progress/pending のみ完了可能）"})
 
-            entry["status"] = "done"
+            entry.status = "done"
             update_task_yaml(tasks_dir, entry)
             save_index(tasks_dir, index_entries)
 
@@ -323,15 +304,15 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
 
         async with index_lock:
             index_entries = load_index(tasks_dir)
-            entry = next((e for e in index_entries if e.get("id") == task_id), None)
+            entry = next((e for e in index_entries if e.id == task_id), None)
             if entry is None:
                 return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-            if entry.get("status") not in ("in_progress", "done", "aborted"):
-                return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（in_progress/done/aborted のみ再オープン可能）"})
+            if entry.status not in ("in_progress", "done", "aborted"):
+                return JSONResponse({"ok": False, "error": f"タスクは {entry.status} 状態です（in_progress/done/aborted のみ再オープン可能）"})
 
-            old_generation = entry.get("generation", 1)
-            entry["status"] = "pending"
-            entry["generation"] = old_generation + 1
+            old_generation = entry.generation
+            entry.status = "pending"
+            entry.generation = old_generation + 1
             reopen_task_yaml(tasks_dir, entry)
             save_index(tasks_dir, index_entries)
 
@@ -344,11 +325,11 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         # ステータスチェック
         async with index_lock:
             index_entries = load_index(tasks_dir)
-            entry = next((e for e in index_entries if e.get("id") == task_id), None)
+            entry = next((e for e in index_entries if e.id == task_id), None)
             if entry is None:
                 return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-            if entry.get("status") not in ("done", "aborted", "in_progress", "in_review"):
-                return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（done/aborted/in_progress/in_review のみ再実行可能）"})
+            if entry.status not in ("done", "aborted", "in_progress", "in_review"):
+                return JSONResponse({"ok": False, "error": f"タスクは {entry.status} 状態です（done/aborted/in_progress/in_review のみ再実行可能）"})
 
         # フィードバック収集（再オープン前 = 正しい generation でタグ付け）
         await asyncio.to_thread(
@@ -359,10 +340,10 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         prev_summary = ""
         async with index_lock:
             index_entries = load_index(tasks_dir)
-            entry = next((e for e in index_entries if e.get("id") == task_id), None)
+            entry = next((e for e in index_entries if e.id == task_id), None)
             if entry is None:
                 return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-            old_generation = entry.get("generation", 1)
+            old_generation = entry.generation
 
         prev_lc_id = f"{task_id}-g{old_generation}"
         lifecycles = read_jsonl(dispatch_dir / "lifecycles.jsonl")
@@ -383,28 +364,28 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         # 再オープン
         async with index_lock:
             index_entries = load_index(tasks_dir)
-            entry = next((e for e in index_entries if e.get("id") == task_id), None)
+            entry = next((e for e in index_entries if e.id == task_id), None)
             if entry is None:
                 return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
 
-            old_generation = entry.get("generation", 1)
-            entry["status"] = "pending"
-            entry["generation"] = old_generation + 1
+            old_generation = entry.generation
+            entry.status = "pending"
+            entry.generation = old_generation + 1
             reopen_task_yaml(tasks_dir, entry, prev_summary=prev_summary)
             save_index(tasks_dir, index_entries)
 
-        project_id = entry.get("project_id", "")
-        generation = entry.get("generation", 1)
+        project_id = entry.project_id
+        generation = entry.generation
 
-        task_data = _load_task_data(tasks_dir, task_id)
+        task_data = load_task_yaml(tasks_dir, task_id)
         lifecycle_id = f"{task_id}-g{generation}"
 
         try:
             result = await dispatcher_send({
                 "command": "dispatch",
                 "project_id": project_id,
-                "prompt": task_data.get("description") or entry.get("title", ""),
-                "context": task_data or None,
+                "prompt": (task_data.description if task_data else "") or entry.title,
+                "context": task_data.to_dict() if task_data else None,
                 "lifecycle_id": lifecycle_id,
             })
         except (ConnectionRefusedError, FileNotFoundError):
@@ -414,8 +395,8 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             async with index_lock:
                 index_entries = load_index(tasks_dir)
                 for e in index_entries:
-                    if e.get("id") == task_id:
-                        e["status"] = "in_progress"
+                    if e.id == task_id:
+                        e.status = "in_progress"
                         break
                 save_index(tasks_dir, index_entries)
 
@@ -471,19 +452,24 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
     async def api_task_open_session(task_id: str) -> JSONResponse:
         tasks_dir = repo_dir / "tasks"
         index_entries = load_index(tasks_dir)
-        entry = next((e for e in index_entries if e.get("id") == task_id), None)
+        entry = next((e for e in index_entries if e.id == task_id), None)
         if entry is None:
             return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-        if entry.get("status") not in ("pending", "in_progress", "in_review"):
-            return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（pending/in_progress/in_review のみ対話可能）"})
+        if entry.status not in ("pending", "in_progress", "in_review"):
+            return JSONResponse({"ok": False, "error": f"タスクは {entry.status} 状態です（pending/in_progress/in_review のみ対話可能）"})
 
         # タスクデータとデータソースを読み込み
-        task_data = _load_task_data(tasks_dir, task_id)
-        task_data.setdefault("id", task_id)
-        task_data.setdefault("datasource_id", entry.get("datasource_id", ""))
-        task_data.setdefault("project_id", entry.get("project_id", ""))
-        task_data.setdefault("remote_id", entry.get("remote_id", ""))
-        datasource = _load_datasource(task_data.get("datasource_id", ""))
+        task_data = load_task_yaml(tasks_dir, task_id)
+        if task_data is None:
+            from lib.task_store import TaskData
+            task_data = TaskData(id=task_id)
+        if not task_data.datasource_id:
+            task_data.datasource_id = entry.datasource_id
+        if not task_data.project_id:
+            task_data.project_id = entry.project_id
+        if not task_data.remote_id:
+            task_data.remote_id = entry.remote_id
+        datasource = _load_datasource(task_data.datasource_id)
 
         # プロンプト構築（ディスパッチャーから移動）
         from dispatcher.interactive_prompt import build_task_session_prompts
@@ -496,7 +482,7 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             "window_name": task_id,
             "activate": True,
         }
-        project_id = entry.get("project_id", "")
+        project_id = entry.project_id
         if project_id:
             request_data["project_id"] = project_id
 

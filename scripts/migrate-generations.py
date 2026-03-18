@@ -46,7 +46,7 @@ def main() -> None:
         sys.exit(1)
 
     index_entries = load_index(tasks_dir)
-    task_ids = [e["id"] for e in index_entries]
+    task_ids = [e.id for e in index_entries]
 
     migrated = 0
     skipped = 0
@@ -57,20 +57,17 @@ def main() -> None:
         if data is None:
             continue
 
-        generations = data.get("generations")
-        if isinstance(generations, list) and generations:
+        if data.generations:
             skipped += 1
             continue
 
-        history = data.get("history") or []
-        if history:
+        if data.history:
             # history[] → generations[] 変換
             data = migrate_history_to_generations(data)
             migrated += 1
-            action = f"migrated ({len(data['generations'])} entries from history)"
+            action = f"migrated ({len(data.generations)} entries from history)"
         else:
-            # generations[] フィールドを空で追加
-            data["generations"] = []
+            # generations[] フィールドは既に空で存在する（TaskData のデフォルト）
             added_empty += 1
             action = "added empty generations[]"
 

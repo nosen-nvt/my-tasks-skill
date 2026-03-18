@@ -19,7 +19,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
-from lib.task_store import load_task_yaml, save_task_yaml
+from lib.task_store import FeedbackItem, load_task_yaml, save_task_yaml
 
 # sync-tasks.py をモジュールとしてインポート（load_datasource のみ）
 _script_dir = Path(__file__).resolve().parent
@@ -191,63 +191,47 @@ def main() -> None:
         print(f"エラー: タスクが見つかりません: {task_id}", file=sys.stderr)
         sys.exit(1)
 
-    remote_id = task_data.get("remote_id", "")
-    datasource_id = task_data.get("datasource_id", "")
-    generation = task_data.get("generation", 1)
-
-    feedback = task_data.get("feedback", [])
-    if not isinstance(feedback, list):
-        feedback = []
-    cursor = task_data.get("feedback_cursor", {})
-    if not isinstance(cursor, dict):
-        cursor = {}
-
-    collected = []
+    collected: list[dict] = []
 
     # Jira コメント収集
-    if args.source in ("jira", "all") and datasource_id:
-        datasource = load_datasource(datasources_dir, datasource_id)
-        if datasource and datasource.get("type") == "jira" and remote_id:
+    if args.source in ("jira", "all") and task_data.datasource_id:
+        datasource = load_datasource(datasources_dir, task_data.datasource_id)
+        if datasource and datasource.get("type") == "jira" and task_data.remote_id:
             site_mapping = datasource.get("site_mapping", {})
-            site = resolve_jira_site(remote_id, site_mapping)
+            site = resolve_jira_site(task_data.remote_id, site_mapping)
             if site:
-                jira_cursor = cursor.get("jira_comment")
-                new_comments, new_cursor = collect_jira_comments(remote_id, site, jira_cursor)
+                jira_cursor = task_data.feedback_cursor.get("jira_comment")
+                new_comments, new_cursor = collect_jira_comments(task_data.remote_id, site, jira_cursor)
                 for item in new_comments:
-                    item["generation"] = generation
-                feedback.extend(new_comments)
+                    task_data.feedback.append(FeedbackItem.from_dict({**item, "generation": task_data.generation}))
                 collected.extend(new_comments)
                 if new_cursor:
-                    cursor["jira_comment"] = new_cursor
+                    task_data.feedback_cursor["jira_comment"] = new_cursor
             else:
                 print(
-                    f"警告: site_mapping にプレフィックスが見つかりません: {remote_id}",
+                    f"警告: site_mapping にプレフィックスが見つかりません: {task_data.remote_id}",
                     file=sys.stderr,
                 )
 
     # Bitbucket PR コメント収集
-    pr_url = task_data.get("pr_url", "")
-    if args.source in ("bitbucket", "all") and pr_url:
-        bb_cursor = cursor.get("bitbucket_pr")
-        new_comments, new_cursor = collect_bitbucket_pr_comments(pr_url, bb_cursor)
+    if args.source in ("bitbucket", "all") and task_data.pr_url:
+        bb_cursor = task_data.feedback_cursor.get("bitbucket_pr")
+        new_comments, new_cursor = collect_bitbucket_pr_comments(task_data.pr_url, bb_cursor)
         for item in new_comments:
-            item["generation"] = generation
-        feedback.extend(new_comments)
+            task_data.feedback.append(FeedbackItem.from_dict({**item, "generation": task_data.generation}))
         collected.extend(new_comments)
         if new_cursor:
-            cursor["bitbucket_pr"] = new_cursor
+            task_data.feedback_cursor["bitbucket_pr"] = new_cursor
 
     # タスク YAML を更新
-    task_data["feedback"] = feedback
-    task_data["feedback_cursor"] = cursor
     save_task_yaml(tasks_dir, task_id, task_data)
 
     # レポート出力
     report = {
         "task_id": task_id,
-        "remote_id": remote_id,
+        "remote_id": task_data.remote_id,
         "collected_count": len(collected),
-        "total_feedback_count": len(feedback),
+        "total_feedback_count": len(task_data.feedback),
         "collected": collected,
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))

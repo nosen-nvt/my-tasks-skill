@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from lib.task_store import (
+    IndexEntry,
     load_index, save_index, generate_task_id,
     create_task_yaml, update_task_yaml, reopen_task_yaml, delete_task,
 )
@@ -81,7 +82,7 @@ def process_datasource(
     incoming_tasks: list[dict],
     tasks_dir: Path,
     datasources_dir: Path,
-    index_entries: list[dict],
+    index_entries: list[IndexEntry],
 ) -> dict:
     """
     1データソース分のタスクを処理する。
@@ -114,25 +115,25 @@ def process_datasource(
     if sync_mode == "append":
         gc_ids = set()
         for entry in index_entries:
-            if (entry.get("datasource_id") == datasource_id
-                    and entry.get("status") == "done"
-                    and entry.get("remote_id") not in incoming_remote_ids):
+            if (entry.datasource_id == datasource_id
+                    and entry.status == "done"
+                    and entry.remote_id not in incoming_remote_ids):
                 gc.append({
                     "datasource_id": datasource_id,
-                    "remote_id": entry.get("remote_id", ""),
-                    "title": entry.get("title", ""),
-                    "id": entry["id"],
+                    "remote_id": entry.remote_id,
+                    "title": entry.title,
+                    "id": entry.id,
                 })
-                gc_ids.add(entry["id"])
-                delete_task(tasks_dir, entry["id"])
+                gc_ids.add(entry.id)
+                delete_task(tasks_dir, entry.id)
         if gc_ids:
             index_entries[:] = [e for e in index_entries
-                                if e.get("id") not in gc_ids]
+                                if e.id not in gc_ids]
 
     # 既存インデックスから当該データソースのエントリを取得
     existing_entries = {
-        e["remote_id"]: e for e in index_entries
-        if e.get("datasource_id") == datasource_id and e.get("remote_id")
+        e.remote_id: e for e in index_entries
+        if e.datasource_id == datasource_id and e.remote_id
     }
 
     incoming_ids = {t["remote_id"] for t in incoming_tasks}
@@ -149,45 +150,45 @@ def process_datasource(
         if remote_id in existing_entries:
             entry = existing_entries[remote_id]
 
-            if entry.get("status") == "done":
+            if entry.status == "done":
                 # 再オープン: 履歴を保持したまま pending に戻す
-                entry["status"] = "pending"
-                entry["generation"] = entry.get("generation", 1) + 1
-                if entry.get("title") != t["title"]:
-                    entry["title"] = t["title"]
+                entry.status = "pending"
+                entry.generation = entry.generation + 1
+                if entry.title != t["title"]:
+                    entry.title = t["title"]
                 reopen_task_yaml(tasks_dir, entry)
                 reopened.append({
                     "datasource_id": datasource_id,
                     "remote_id": remote_id,
-                    "title": entry["title"],
-                    "id": entry["id"],
-                    "generation": entry["generation"],
+                    "title": entry.title,
+                    "id": entry.id,
+                    "generation": entry.generation,
                 })
-            elif entry.get("title") != t["title"]:
+            elif entry.title != t["title"]:
                 # 既存タスク: title 変更があれば更新
-                entry["title"] = t["title"]
+                entry.title = t["title"]
                 update_task_yaml(tasks_dir, entry)
                 updated.append({
                     "datasource_id": datasource_id,
                     "remote_id": remote_id,
                     "title": t["title"],
-                    "id": entry["id"],
+                    "id": entry.id,
                 })
         else:
             # 新規タスク
             task_id = generate_task_id(index_entries, tasks_dir)
             project_id = resolve_project(t.get("project_key"), project_mapping) or ""
 
-            new_entry = {
-                "id": task_id,
-                "remote_id": remote_id,
-                "datasource_id": datasource_id,
-                "title": t["title"],
-                "status": "pending",
-                "project_id": project_id,
-                "run_count": 0,
-                "generation": 1,
-            }
+            new_entry = IndexEntry(
+                id=task_id,
+                remote_id=remote_id,
+                datasource_id=datasource_id,
+                title=t["title"],
+                status="pending",
+                project_id=project_id,
+                run_count=0,
+                generation=1,
+            )
             index_entries.append(new_entry)
             create_task_yaml(tasks_dir, new_entry)
 
@@ -222,15 +223,15 @@ def process_datasource(
                 vanished.append({
                     "datasource_id": datasource_id,
                     "remote_id": remote_id,
-                    "title": entry.get("title", ""),
-                    "id": entry["id"],
+                    "title": entry.title,
+                    "id": entry.id,
                 })
-                vanished_ids.add(entry["id"])
-                delete_task(tasks_dir, entry["id"])
+                vanished_ids.add(entry.id)
+                delete_task(tasks_dir, entry.id)
 
         # index_entries から消失タスクを除去
         index_entries[:] = [e for e in index_entries
-                            if e.get("id") not in vanished_ids]
+                            if e.id not in vanished_ids]
 
     return {
         "added": added,
@@ -316,8 +317,8 @@ def main() -> None:
     # --datasource 未指定時: index に存在する full sync mode のデータソースを
     # by_datasource に追加する（fetch 結果が0件でも消失検出を実行するため）
     if not args.datasource:
-        ds_ids_in_index = {e["datasource_id"] for e in index_entries
-                           if e.get("datasource_id")}
+        ds_ids_in_index = {e.datasource_id for e in index_entries
+                           if e.datasource_id}
         for ds_id in ds_ids_in_index:
             if ds_id not in by_datasource:
                 ds = load_datasource(datasources_dir, ds_id)
@@ -348,18 +349,18 @@ def main() -> None:
     # 全 datasource 横断の GC: done タスクを除去（manual 等、同期対象外も含む）
     gc_all_ids = set()
     for entry in index_entries:
-        if entry.get("status") == "done":
+        if entry.status == "done":
             total_gc.append({
-                "datasource_id": entry.get("datasource_id", ""),
-                "remote_id": entry.get("remote_id", ""),
-                "title": entry.get("title", ""),
-                "id": entry["id"],
+                "datasource_id": entry.datasource_id,
+                "remote_id": entry.remote_id,
+                "title": entry.title,
+                "id": entry.id,
             })
-            gc_all_ids.add(entry["id"])
-            delete_task(tasks_dir, entry["id"])
+            gc_all_ids.add(entry.id)
+            delete_task(tasks_dir, entry.id)
     if gc_all_ids:
         index_entries[:] = [e for e in index_entries
-                            if e.get("id") not in gc_all_ids]
+                            if e.id not in gc_all_ids]
 
     # index を保存
     save_index(tasks_dir, index_entries)

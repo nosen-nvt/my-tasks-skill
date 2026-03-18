@@ -448,8 +448,8 @@ class LifecycleManager:
         tasks_dir = self.repo_dir / "tasks"
         from lib.task_store import get_latest_generation
         gen = get_latest_generation(tasks_dir, task_id)
-        if gen and gen.get("status") == "running":
-            finish_generation(tasks_dir, task_id, gen["seq"], status, output)
+        if gen and gen.status == "running":
+            finish_generation(tasks_dir, task_id, gen.seq, status, output)
 
     def _update_context_yaml(self, lc: Lifecycle, data: dict):
         """YAML コンテキストファイルを更新。"""
