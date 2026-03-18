@@ -66,12 +66,12 @@ function buildLifecycleMetaHTML(lc) {
   if (lc.suspend_reason) {
     html += `<span class="meta-item suspend">${lc.suspend_reason}</span>`;
   }
-  if (lc.status === "suspend" && lc.suspend_reason === "approval_required") {
+  // approval_gate: Approve/Reject のみ
+  if (lc.status === "approval_gate" || (lc.status === "suspend" && lc.suspend_reason === "approval_required")) {
     html += `<button class="action-btn primary" data-action="approve" data-lifecycle-id="${lc.lifecycle_id}">Approve</button>`;
+    html += `<button class="action-btn danger" data-action="reject" data-lifecycle-id="${lc.lifecycle_id}">Reject</button>`;
   }
-  if (lc.status === "suspend") {
-    html += `<button class="action-btn primary" data-action="open-session" data-lifecycle-id="${lc.lifecycle_id}">Open</button>`;
-  }
+  // 後方互換: 旧 suspend 状態
   if (lc.status === "suspend" && lc.suspend_reason !== "approval_required") {
     html += `<button class="action-btn" data-action="resume" data-lifecycle-id="${lc.lifecycle_id}">Resume</button>`;
   }
@@ -85,10 +85,10 @@ function bindLifecycleActions(root) {
       handleAction(btn, `${BASE}/api/lifecycles/${btn.dataset.lifecycleId}/approve`, "Approving...");
     });
   });
-  root.querySelectorAll("[data-action=open-session]").forEach((btn) => {
+  root.querySelectorAll("[data-action=reject]").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
-      handleAction(btn, `${BASE}/api/lifecycles/${btn.dataset.lifecycleId}/open-session`, "Opening...");
+      handleAction(btn, `${BASE}/api/lifecycles/${btn.dataset.lifecycleId}/reject`, "Rejecting...");
     });
   });
   root.querySelectorAll("[data-action=resume]").forEach((btn) => {

@@ -7,20 +7,11 @@ reopen-task.py - done/aborted タスクを手動で再オープンする
 """
 
 import argparse
-import importlib
 import json
 import sys
 from pathlib import Path
 
-# sync-tasks.py をモジュールとしてインポート（ハイフン付きファイル名対応）
-_script_dir = Path(__file__).resolve().parent
-_spec = importlib.util.spec_from_file_location("sync_tasks", _script_dir / "sync-tasks.py")
-_sync_tasks = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_sync_tasks)
-
-load_index = _sync_tasks.load_index
-save_index = _sync_tasks.save_index
-reopen_task_yaml = _sync_tasks.reopen_task_yaml
+from lib.task_store import load_index, save_index, reopen_task_yaml
 
 
 def main() -> None:

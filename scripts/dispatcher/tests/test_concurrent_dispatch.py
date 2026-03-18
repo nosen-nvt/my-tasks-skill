@@ -422,9 +422,8 @@ async def test_on_job_complete_targets_correct_lifecycle(stub_server):
 
     # --- 検証 ---
 
-    # lc1: needs_input → suspend
-    assert server.lifecycle_mgr.lifecycles["lc-10"].status == "suspend"
-    assert server.lifecycle_mgr.lifecycles["lc-10"].suspend_reason == "needs_input"
+    # lc1: needs_input → done（新仕様: Lifecycle は終了し Generation に記録）
+    assert server.lifecycle_mgr.lifecycles["lc-10"].status == "done"
 
     # lc2, lc3: まだ planning のまま（dispatch もされていない）
     assert server.lifecycle_mgr.lifecycles["lc-20"].status == "planning"

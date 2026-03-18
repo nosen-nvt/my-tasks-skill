@@ -88,7 +88,7 @@ function buildTaskMetaHTML(task) {
     html += `<span class="meta-item">Gen ${task.generation}</span>`;
   if (task.status === "pending" && task.project_id)
     html += `<button class="action-btn primary" data-action="dispatch" data-task-id="${task.id}">Dispatch</button>`;
-  if (task.status === "pending")
+  if (task.status === "pending" || task.status === "in_progress")
     html += `<button class="action-btn" data-action="open-session" data-task-id="${task.id}">Open</button>`;
   const displayStatus = taskDisplayStatus(task);
   if (displayStatus === "in_review" && task.project_id)
@@ -129,9 +129,35 @@ function renderTaskDetailSections(data) {
     html += `<div class="detail-section"><div class="detail-heading">\u5b9f\u884c\u30d7\u30ed\u30f3\u30d7\u30c8</div><pre class="preview-text">${escapeHtml(data.execute_prompt)}</pre></div>`;
   }
 
-  if (data.history?.length > 0) {
+  // generations[] 表示（history[] フォールバック）
+  const generations = data.generations?.length > 0 ? data.generations : null;
+  const history = data.history?.length > 0 ? data.history : null;
+  const taskId = data.id || "";
+
+  if (generations) {
+    html += '<div class="detail-section"><div class="detail-heading">Generations</div><div class="phase-list">';
+    generations.forEach((g) => {
+      const label = `G${g.seq || "?"}`;
+      const typeLabel = g.type === "interactive" ? "interactive" : "dispatch";
+      const statusClass = g.status || "running";
+      const summary = g.output?.summary || "";
+      const prUrl = g.output?.pr_url || "";
+      // 紐づく Lifecycle があればリンク表示
+      const lcId = `${taskId}-g${g.seq}`;
+      const hasLc = state.lifecycles.some((lc) => lc.lifecycle_id === lcId);
+      html += `<div class="phase-item phase-${statusClass}"${hasLc ? ` data-lifecycle-id="${lcId}" style="cursor:pointer"` : ""}>
+        <span class="phase-num">${escapeHtml(label)}</span>
+        <span class="phase-goal">${escapeHtml(typeLabel)}</span>
+        ${statusBadge(statusClass)}
+        ${summary ? `<div class="phase-summary">${escapeHtml(summary)}</div>` : ""}
+        ${prUrl ? `<div class="phase-summary"><a href="${escapeHtml(prUrl)}" target="_blank">PR</a></div>` : ""}
+        ${hasLc ? '<span class="chevron">\u203a</span>' : ""}
+      </div>`;
+    });
+    html += "</div></div>";
+  } else if (history) {
     html += '<div class="detail-section"><div class="detail-heading">\u5b9f\u884c\u5c65\u6b74</div><div class="phase-list">';
-    data.history.forEach((h) => {
+    history.forEach((h) => {
       const label = h.generation != null ? `G${h.generation}` : (h.date || "?");
       const text = h.summary || h.note || "";
       html += `<div class="phase-item"><span class="phase-num">${escapeHtml(label)}</span><span class="phase-goal">${escapeHtml(text)}</span></div>`;

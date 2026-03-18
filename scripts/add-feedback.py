@@ -7,21 +7,12 @@ add-feedback.py - タスクにユーザーフィードバックを手動で追�
 """
 
 import argparse
-import importlib
 import json
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-import yaml
-
-# sync-tasks.py をモジュールとしてインポート
-_script_dir = Path(__file__).resolve().parent
-_spec = importlib.util.spec_from_file_location("sync_tasks", _script_dir / "sync-tasks.py")
-_sync_tasks = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_sync_tasks)
-
-_dump_yaml = _sync_tasks._dump_yaml
+from lib.task_store import load_task_yaml, save_task_yaml
 
 JST = timezone(timedelta(hours=9))
 
@@ -61,13 +52,10 @@ def main() -> None:
         print(f"エラー: リポジトリが見つかりません: {repo_dir}", file=sys.stderr)
         sys.exit(1)
 
-    yaml_path = tasks_dir / f"{task_id}.yaml"
-    if not yaml_path.exists():
+    task_data = load_task_yaml(tasks_dir, task_id)
+    if task_data is None:
         print(f"エラー: タスクが見つかりません: {task_id}", file=sys.stderr)
         sys.exit(1)
-
-    with open(yaml_path, encoding="utf-8") as f:
-        task_data = yaml.safe_load(f) or {}
 
     generation = task_data.get("generation", 1)
 
@@ -84,7 +72,7 @@ def main() -> None:
     feedback.append(new_item)
 
     task_data["feedback"] = feedback
-    _dump_yaml(task_data, yaml_path)
+    save_task_yaml(tasks_dir, task_id, task_data)
 
     report = {
         "task_id": task_id,

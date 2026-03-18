@@ -19,15 +19,14 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
-import yaml
+from lib.task_store import load_task_yaml, save_task_yaml
 
-# sync-tasks.py をモジュールとしてインポート
+# sync-tasks.py をモジュールとしてインポート（load_datasource のみ）
 _script_dir = Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location("sync_tasks", _script_dir / "sync-tasks.py")
 _sync_tasks = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_sync_tasks)
 
-_dump_yaml = _sync_tasks._dump_yaml
 load_datasource = _sync_tasks.load_datasource
 
 JST = timezone(timedelta(hours=9))
@@ -35,19 +34,6 @@ JST = timezone(timedelta(hours=9))
 
 def now_iso() -> str:
     return datetime.now(JST).isoformat(timespec="seconds")
-
-
-def load_task_yaml(tasks_dir: Path, task_id: str) -> dict | None:
-    yaml_path = tasks_dir / f"{task_id}.yaml"
-    if not yaml_path.exists():
-        return None
-    with open(yaml_path, encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
-
-
-def save_task_yaml(tasks_dir: Path, task_id: str, data: dict) -> None:
-    yaml_path = tasks_dir / f"{task_id}.yaml"
-    _dump_yaml(data, yaml_path)
 
 
 def resolve_jira_site(remote_id: str, site_mapping: dict) -> str | None:

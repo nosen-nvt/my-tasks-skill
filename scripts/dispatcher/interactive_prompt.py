@@ -248,21 +248,69 @@ def build_task_session_prompts(
     if ds_type:
         prompt_parts.append(f"\nデータソース種別: {ds_type}")
 
-    # 前世代の履歴
-    history = task.get("history") or []
-    if history:
-        prompt_parts.append("\n# 前世代の履歴")
-        for h in history:
-            gen = h.get("generation", "?")
-            summary = h.get("summary", "")
-            prompt_parts.append(f"- Generation {gen}: {summary}")
+    # 最新 Generation の状態に応じたコンテキスト
+    generations = task.get("generations") or []
+    latest_gen = generations[-1] if generations else None
 
-    # open_questions
-    open_questions = task.get("open_questions") or []
-    if open_questions:
-        prompt_parts.append("\n# 未決事項")
-        for q in open_questions:
-            prompt_parts.append(f"- {q}")
+    if latest_gen:
+        gen_status = latest_gen.get("status", "")
+        gen_output = latest_gen.get("output") or {}
+
+        if gen_status == "needs_input":
+            oq = gen_output.get("open_questions") or task.get("open_questions") or []
+            if oq:
+                prompt_parts.append("\n# 前回の未決事項（要回答）")
+                for q in oq:
+                    prompt_parts.append(f"- {q}")
+                prompt_parts.append(
+                    "\nこれらの未決事項を解決してください。回答をタスク YAML に反映し、"
+                    "open_questions を更新してください。"
+                )
+
+        elif gen_status == "review_needed":
+            reason = gen_output.get("reason", "")
+            summary = gen_output.get("summary", "")
+            prompt_parts.append("\n# 実行結果の確認が必要")
+            if summary:
+                prompt_parts.append(f"サマリー: {summary}")
+            if reason:
+                prompt_parts.append(f"理由: {reason}")
+            prompt_parts.append(
+                "\n実行結果を確認し、次のアクションを決定してください。"
+            )
+
+        elif gen_status == "rejected":
+            summary = gen_output.get("summary", "")
+            prompt_parts.append("\n# 計画が却下されました")
+            if summary:
+                prompt_parts.append(f"サマリー: {summary}")
+            prompt_parts.append(
+                "\n却下された計画についてフィードバックを記録してください。"
+                "次のディスパッチ時にフィードバックが反映されます。"
+            )
+
+        else:
+            # running, done, aborted 等
+            if gen_output.get("summary"):
+                prompt_parts.append(f"\n# 前回の結果\n{gen_output['summary']}")
+
+    else:
+        # generations がない場合は history フォールバック
+        history = task.get("history") or []
+        if history:
+            prompt_parts.append("\n# 前世代の履歴")
+            for h in history:
+                gen = h.get("generation", "?")
+                summary = h.get("summary", "")
+                prompt_parts.append(f"- Generation {gen}: {summary}")
+
+    # open_questions（Generation にない場合の直接表示）
+    if not latest_gen or latest_gen.get("status") not in ("needs_input",):
+        open_questions = task.get("open_questions") or []
+        if open_questions:
+            prompt_parts.append("\n# 未決事項")
+            for q in open_questions:
+                prompt_parts.append(f"- {q}")
 
     prompt = "\n".join(prompt_parts)
 

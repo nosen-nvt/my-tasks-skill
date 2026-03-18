@@ -12,21 +12,15 @@ from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .watcher import FileWatcher
+from lib.task_store import (
+    load_index, save_index, load_task_yaml, save_task_yaml,
+    reopen_task_yaml, update_task_yaml,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-# sync-tasks.py をモジュールとしてインポート（ハイフン付きファイル名対応）
+# collect-feedback.py をモジュールとしてインポート（外部コマンド呼び出しロジック用）
 _script_dir = Path(__file__).resolve().parent.parent
-_spec = importlib.util.spec_from_file_location("sync_tasks", _script_dir / "sync-tasks.py")
-_sync_tasks = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_sync_tasks)
-
-load_index = _sync_tasks.load_index
-save_index = _sync_tasks.save_index
-reopen_task_yaml = _sync_tasks.reopen_task_yaml
-update_task_yaml = _sync_tasks.update_task_yaml
-
-# collect-feedback.py をモジュールとしてインポート
 _cf_spec = importlib.util.spec_from_file_location("collect_feedback", _script_dir / "collect-feedback.py")
 _collect_feedback_mod = importlib.util.module_from_spec(_cf_spec)
 _cf_spec.loader.exec_module(_collect_feedback_mod)
@@ -205,14 +199,11 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
 
     def _load_task_data(tasks_dir: Path, task_id: str) -> dict:
         """YAML タスクファイルを読み込む。なければ空 dict を返す。"""
-        yaml_path = tasks_dir / f"{task_id}.yaml"
-        if yaml_path.exists():
-            return yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-        return {}
+        return load_task_yaml(tasks_dir, task_id) or {}
 
     def _collect_feedback_for_task(tasks_dir: Path, datasources_dir: Path, task_id: str) -> int:
         """タスクに対するフィードバックを Jira/Bitbucket から収集する。収集件数を返す。"""
-        task_data = _collect_feedback_mod.load_task_yaml(tasks_dir, task_id)
+        task_data = load_task_yaml(tasks_dir, task_id)
         if not task_data:
             return 0
 
@@ -264,7 +255,7 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         if collected_count > 0:
             task_data["feedback"] = feedback
             task_data["feedback_cursor"] = cursor
-            _collect_feedback_mod.save_task_yaml(tasks_dir, task_id, task_data)
+            save_task_yaml(tasks_dir, task_id, task_data)
 
         return collected_count
 
@@ -438,8 +429,8 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         entry = next((lc for lc in lifecycles if lc.get("lifecycle_id") == lifecycle_id), None)
         if entry is None:
             return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-        if entry.get("status") != "suspend":
-            return JSONResponse({"ok": False, "error": f"ライフサイクルは {entry.get('status')} 状態です（suspend のみ対話可能）"})
+        if entry.get("status") not in ("suspend", "approval_gate"):
+            return JSONResponse({"ok": False, "error": f"ライフサイクルは {entry.get('status')} 状態です（suspend/approval_gate のみ対話可能）"})
 
         project_id = entry.get("project_id", "")
         context_path_str = entry.get("context_path", "")
@@ -483,8 +474,8 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         entry = next((e for e in index_entries if e.get("id") == task_id), None)
         if entry is None:
             return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-        if entry.get("status") not in ("pending", "in_progress"):
-            return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（pending/in_progress のみ対話可能）"})
+        if entry.get("status") not in ("pending", "in_progress", "in_review"):
+            return JSONResponse({"ok": False, "error": f"タスクは {entry.get('status')} 状態です（pending/in_progress/in_review のみ対話可能）"})
 
         # タスクデータとデータソースを読み込み
         task_data = _load_task_data(tasks_dir, task_id)
@@ -519,7 +510,18 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
     async def api_approve(lifecycle_id: str) -> JSONResponse:
         try:
             result = await dispatcher_send({
-                "command": "resume",
+                "command": "approve",
+                "lifecycle_id": lifecycle_id,
+            })
+        except (ConnectionRefusedError, FileNotFoundError):
+            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
+        return JSONResponse(result)
+
+    @app.post("/api/lifecycles/{lifecycle_id}/reject")
+    async def api_reject(lifecycle_id: str) -> JSONResponse:
+        try:
+            result = await dispatcher_send({
+                "command": "reject",
                 "lifecycle_id": lifecycle_id,
             })
         except (ConnectionRefusedError, FileNotFoundError):

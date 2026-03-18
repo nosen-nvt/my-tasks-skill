@@ -156,6 +156,7 @@ def stub_server(tmp_runtime, tmp_path):
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
     (repo_dir / "projects").mkdir()
+    (repo_dir / "tasks").mkdir()
 
     # working_directory を実在するディレクトリに設定
     working_dir = tmp_path / "workdir"

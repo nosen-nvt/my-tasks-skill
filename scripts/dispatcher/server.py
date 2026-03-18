@@ -23,6 +23,7 @@ from .lifecycle import LifecycleManager
 from .tmux import detect_tmux_session, ensure_tmux_session
 from .project_classifier import classify_project
 from .executor import ExecutorMixin
+from lib.task_store import start_generation, migrate_history_to_generations
 
 
 def task_yaml_to_context_yaml(task_data: dict, prompt: str, project_id: str) -> dict:
@@ -37,13 +38,25 @@ def task_yaml_to_context_yaml(task_data: dict, prompt: str, project_id: str) -> 
 
     description = task_data.get("description", "") or prompt
 
-    # history から previous_generations を構築
+    # generations[] から previous_generations を構築（history[] フォールバック）
     previous_generations: list[dict] = []
-    for h in (task_data.get("history") or []):
-        previous_generations.append({
-            "generation": h.get("generation"),
-            "summary": h.get("summary", ""),
-        })
+    generations = task_data.get("generations") or []
+    if generations:
+        for g in generations:
+            if g.get("status") != "running":
+                previous_generations.append({
+                    "generation": g.get("seq"),
+                    "type": g.get("type", "dispatch"),
+                    "status": g.get("status", "done"),
+                    "summary": (g.get("output") or {}).get("summary", ""),
+                })
+    else:
+        # history[] フォールバック
+        for h in (task_data.get("history") or []):
+            previous_generations.append({
+                "generation": h.get("generation"),
+                "summary": h.get("summary", ""),
+            })
 
     return {
         "meta": meta,
@@ -185,6 +198,8 @@ class DispatchServer(ExecutorMixin):
                 "kill-all": self.cmd_kill_all,
                 "wait": self.cmd_wait,
                 "dispatch": self.cmd_dispatch,
+                "approve": self.cmd_approve,
+                "reject": self.cmd_reject,
                 "resume": self.cmd_resume,
             }.get(command)
 
@@ -447,6 +462,15 @@ class DispatchServer(ExecutorMixin):
         mgr._init_context_yaml(lc, context_data)
         mgr._save()
 
+        # タスクに紐づいている場合は Generation を開始
+        task_id = context_data.get("meta", {}).get("task_id", "")
+        if task_id:
+            tasks_dir = self.repo_dir / "tasks"
+            try:
+                start_generation(tasks_dir, task_id, "dispatch")
+            except FileNotFoundError:
+                pass
+
         await mgr.dispatch_plan(lc)
 
         return {
@@ -456,71 +480,121 @@ class DispatchServer(ExecutorMixin):
             "message": f"Lifecycle started: {lc.lifecycle_id}",
         }
 
-    async def cmd_resume(self, request: dict) -> dict:
+    async def cmd_approve(self, request: dict) -> dict:
+        """approval_gate からの承認。"""
         lifecycle_id = request.get("lifecycle_id")
-        context_update = request.get("context_update")
         mgr = self.lifecycle_mgr
         lc = mgr.lifecycles.get(lifecycle_id) if lifecycle_id else None
         if not lc:
             return {"ok": False, "error": f"Lifecycle not found: {lifecycle_id}"}
-        if lc.status != "suspend":
-            return {"ok": False, "error": f"Lifecycle is not suspended (current: {lc.status})"}
-
-        if context_update and lc.context_path:
-            # YAML として書き込み
-            import yaml
-            try:
-                data = yaml.safe_load(context_update)
-                if isinstance(data, dict):
-                    mgr._update_context_yaml(lc, data)
-                else:
-                    Path(lc.context_path).write_text(context_update, encoding="utf-8")
-            except yaml.YAMLError:
-                Path(lc.context_path).write_text(context_update, encoding="utf-8")
-
-        prev_reason = lc.suspend_reason
-
-        if lc.suspend_reason == "needs_input":
-            mgr._normalize_context_phases(lc)
-            # 対話セッション中にフェーズが進行したか確認
-            ctx = mgr._read_context_yaml(lc)
-            phases = (ctx or {}).get("phases", [])
-            done_count = sum(1 for p in phases if p.get("status") == "done")
-
-            if phases and done_count > 0:
-                if done_count >= len(phases):
-                    # 全フェーズ完了 → タスク完了
-                    mgr._sync_phases_from_context(lc)
-                    mgr._update_status(lc, "done")
-                else:
-                    # 一部完了 → 残フェーズの計画を生成
-                    mgr._update_status(lc, "planning")
-                    await mgr.dispatch_plan(lc, prev_suspend_reason="needs_input_with_progress")
+        if lc.status != "approval_gate":
+            # 後方互換: suspend + approval_required も受け付ける
+            if lc.status == "suspend" and lc.suspend_reason == "approval_required":
+                pass
             else:
-                # 進捗なし → 通常の reclarify フロー
-                mgr._update_status(lc, "planning")
-                await mgr.dispatch_plan(lc, prev_suspend_reason=prev_reason)
-        elif lc.suspend_reason == "approval_required":
-            mgr._update_status(lc, "phase_executing")
-            await mgr.dispatch_execute(lc)
-        elif lc.suspend_reason == "agent_review":
-            mgr._update_status(lc, "planning")
-            await mgr.dispatch_plan(lc)
-        elif lc.suspend_reason == "project_confirmation":
-            new_project_id = request.get("project_id")
-            if new_project_id:
-                lc.project_id = new_project_id
-            mgr._update_status(lc, "planning")
-            await mgr.dispatch_plan(lc)
-        else:
-            return {"ok": False, "error": f"Unknown suspend reason: {lc.suspend_reason}"}
+                return {"ok": False, "error": f"Lifecycle is not in approval_gate (current: {lc.status})"}
+
+        mgr._update_status(lc, "phase_executing")
+        await mgr.dispatch_execute(lc)
 
         return {
             "ok": True,
             "lifecycle_id": lc.lifecycle_id,
             "dispatch_id": lc.current_dispatch_id,
-            "message": f"Lifecycle resumed: {lc.lifecycle_id}",
+            "message": f"Lifecycle approved: {lc.lifecycle_id}",
         }
+
+    async def cmd_reject(self, request: dict) -> dict:
+        """approval_gate からの却下。"""
+        lifecycle_id = request.get("lifecycle_id")
+        mgr = self.lifecycle_mgr
+        lc = mgr.lifecycles.get(lifecycle_id) if lifecycle_id else None
+        if not lc:
+            return {"ok": False, "error": f"Lifecycle not found: {lifecycle_id}"}
+        if lc.status != "approval_gate":
+            if lc.status == "suspend" and lc.suspend_reason == "approval_required":
+                pass
+            else:
+                return {"ok": False, "error": f"Lifecycle is not in approval_gate (current: {lc.status})"}
+
+        mgr._finish_generation(lc, "rejected", {
+            "summary": "計画が却下されました",
+        })
+        mgr._update_status(lc, "done")
+
+        return {
+            "ok": True,
+            "lifecycle_id": lc.lifecycle_id,
+            "message": f"Lifecycle rejected: {lc.lifecycle_id}",
+        }
+
+    async def cmd_resume(self, request: dict) -> dict:
+        """後方互換の resume コマンド。approval_gate なら cmd_approve に委譲。"""
+        lifecycle_id = request.get("lifecycle_id")
+        mgr = self.lifecycle_mgr
+        lc = mgr.lifecycles.get(lifecycle_id) if lifecycle_id else None
+        if not lc:
+            return {"ok": False, "error": f"Lifecycle not found: {lifecycle_id}"}
+
+        # approval_gate なら approve に委譲
+        if lc.status == "approval_gate":
+            return await self.cmd_approve(request)
+
+        # 後方互換: 旧 suspend 状態のハンドリング
+        if lc.status == "suspend":
+            context_update = request.get("context_update")
+            if context_update and lc.context_path:
+                import yaml
+                try:
+                    data = yaml.safe_load(context_update)
+                    if isinstance(data, dict):
+                        mgr._update_context_yaml(lc, data)
+                    else:
+                        Path(lc.context_path).write_text(context_update, encoding="utf-8")
+                except yaml.YAMLError:
+                    Path(lc.context_path).write_text(context_update, encoding="utf-8")
+
+            prev_reason = lc.suspend_reason
+
+            if lc.suspend_reason == "needs_input":
+                mgr._normalize_context_phases(lc)
+                ctx = mgr._read_context_yaml(lc)
+                phases = (ctx or {}).get("phases", [])
+                done_count = sum(1 for p in phases if p.get("status") == "done")
+
+                if phases and done_count > 0:
+                    if done_count >= len(phases):
+                        mgr._sync_phases_from_context(lc)
+                        mgr._update_status(lc, "done")
+                    else:
+                        mgr._update_status(lc, "planning")
+                        await mgr.dispatch_plan(lc, prev_suspend_reason="needs_input_with_progress")
+                else:
+                    mgr._update_status(lc, "planning")
+                    await mgr.dispatch_plan(lc, prev_suspend_reason=prev_reason)
+            elif lc.suspend_reason == "approval_required":
+                mgr._update_status(lc, "phase_executing")
+                await mgr.dispatch_execute(lc)
+            elif lc.suspend_reason == "agent_review":
+                mgr._update_status(lc, "planning")
+                await mgr.dispatch_plan(lc)
+            elif lc.suspend_reason == "project_confirmation":
+                new_project_id = request.get("project_id")
+                if new_project_id:
+                    lc.project_id = new_project_id
+                mgr._update_status(lc, "planning")
+                await mgr.dispatch_plan(lc)
+            else:
+                return {"ok": False, "error": f"Unknown suspend reason: {lc.suspend_reason}"}
+
+            return {
+                "ok": True,
+                "lifecycle_id": lc.lifecycle_id,
+                "dispatch_id": lc.current_dispatch_id,
+                "message": f"Lifecycle resumed: {lc.lifecycle_id}",
+            }
+
+        return {"ok": False, "error": f"Lifecycle is not in a resumable state (current: {lc.status})"}
 
     # --- クリーンアップ・シャットダウン ---
 

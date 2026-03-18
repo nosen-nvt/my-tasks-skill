@@ -47,8 +47,8 @@ class Lifecycle:
     project_id: str
     prompt: str
     context_path: str = ""
-    status: str = "planning"  # planning|planned|phase_executing|phase_evaluating|suspend|done|aborted
-    suspend_reason: str | None = None  # needs_input|approval_required|agent_review
+    status: str = "planning"  # planning|planned|approval_gate|phase_executing|phase_evaluating|suspend|done|aborted
+    suspend_reason: str | None = None  # needs_input|approval_required|agent_review (後方互換) / verdict にリネーム予定
     phases: list[dict] = field(default_factory=list)
     current_phase: int = 0
     run_count: int = 0

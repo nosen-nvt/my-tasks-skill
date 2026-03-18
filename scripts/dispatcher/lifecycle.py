@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import sandbox_exec
 
 from .models import Lifecycle, Job, log, now_iso, SOCKET_DIR_NAME
+from lib.task_store import update_task_field, start_generation, finish_generation
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +288,8 @@ EVALUATE_TEMPLATE = """\
 
 - **DONE**: タスク全体の達成条件がすべて満たされている（残フェーズが不要になった場合も含む）
 - **NEXT_PHASE**: 現フェーズの criteria は満たされた。次のフェーズに進む。残フェーズの見直しと次フェーズの実行プロンプト生成が必要
-- **SUSPEND**: 達成条件が未達で、ユーザからの追加情報・判断が必要。何が必要かを明確に記載すること
+- **NEEDS_INPUT**: 達成条件が未達で、ユーザからの追加情報・判断が必要。何が必要かを明確に記載すること
+- **REVIEW_NEEDED**: 実行結果の確認が必要（部分的に完了、または予期しない結果がある場合）
 - **ABORT**: 根本的に実行不可能（前提条件の誤り、権限不足で回復不能など）
 
 # 出力指示
@@ -310,7 +312,8 @@ NEXT_PHASE の場合:
 フォーマット:
   {{"verdict": "DONE", "phase_summary": "...", "pr_url": "https://..."}} — タスク完了（pr_url は PR 作成時のみ）
   {{"verdict": "NEXT_PHASE", "phase_summary": "...", "remaining_phases": [{{"goal": "...", "criteria": "..."}}], "next_execute_prompt": "..."}} — 次フェーズへ
-  {{"verdict": "SUSPEND", "phase_summary": "...", "reason": "..."}} — ユーザ入力が必要
+  {{"verdict": "NEEDS_INPUT", "phase_summary": "...", "reason": "..."}} — ユーザ入力が必要
+  {{"verdict": "REVIEW_NEEDED", "phase_summary": "...", "reason": "..."}} — 実行結果の確認が必要
   {{"verdict": "ABORT", "phase_summary": "...", "reason": "..."}} — 実行不可能
 """
 
@@ -358,6 +361,13 @@ class LifecycleManager:
                 data.setdefault("phases", [])
                 data.setdefault("current_phase", 0)
                 lc = Lifecycle(**data)
+                # 後方互換: suspend 状態を新しいステートに変換
+                if lc.status == "suspend":
+                    if lc.suspend_reason == "approval_required":
+                        lc.status = "approval_gate"
+                    else:
+                        # needs_input, agent_review → done に自動遷移
+                        lc.status = "done"
                 self.lifecycles[lc.lifecycle_id] = lc
                 if lc.lifecycle_id.startswith("lc-"):
                     try:
@@ -369,7 +379,7 @@ class LifecycleManager:
     def _update_status(self, lc: Lifecycle, new_status: str):
         lc.status = new_status
         lc.updated_at = now_iso()
-        if new_status != "suspend":
+        if new_status not in ("suspend", "approval_gate"):
             lc.suspend_reason = None
         self._save()
         log.info(f"Lifecycle {lc.lifecycle_id}: {new_status}")
@@ -415,26 +425,31 @@ class LifecycleManager:
         except (yaml.YAMLError, OSError):
             return None
 
-    def _save_task_yaml_field(self, lc: Lifecycle, field: str, value):
-        """タスク YAML の指定フィールドを更新する。"""
+    def _get_task_id(self, lc: Lifecycle) -> str:
+        """コンテキスト YAML から task_id を取得する。"""
         context_data = self._read_context_yaml(lc)
         if not context_data:
-            return
-        task_id = context_data.get("meta", {}).get("task_id", "")
+            return ""
+        return context_data.get("meta", {}).get("task_id", "")
+
+    def _save_task_yaml_field(self, lc: Lifecycle, field: str, value):
+        """タスク YAML の指定フィールドを更新する。"""
+        task_id = self._get_task_id(lc)
         if not task_id:
             return
-        yaml_path = self.repo_dir / "tasks" / f"{task_id}.yaml"
-        if not yaml_path.exists():
+        tasks_dir = self.repo_dir / "tasks"
+        update_task_field(tasks_dir, task_id, field, value)
+
+    def _finish_generation(self, lc: Lifecycle, status: str, output: dict | None = None):
+        """タスクの最新 Generation を完了させる。"""
+        task_id = self._get_task_id(lc)
+        if not task_id:
             return
-        try:
-            data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-            data[field] = value
-            yaml_path.write_text(
-                yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False),
-                encoding="utf-8",
-            )
-        except (yaml.YAMLError, OSError) as e:
-            log.error(f"Lifecycle: failed to update task YAML field {field}: {e}")
+        tasks_dir = self.repo_dir / "tasks"
+        from lib.task_store import get_latest_generation
+        gen = get_latest_generation(tasks_dir, task_id)
+        if gen and gen.get("status") == "running":
+            finish_generation(tasks_dir, task_id, gen["seq"], status, output)
 
     def _update_context_yaml(self, lc: Lifecycle, data: dict):
         """YAML コンテキストファイルを更新。"""
@@ -686,14 +701,20 @@ class LifecycleManager:
                 self._update_status(lc, "phase_executing")
                 await self.dispatch_execute(lc)
             else:
-                lc.suspend_reason = "approval_required"
-                self._update_status(lc, "suspend")
+                self._update_status(lc, "approval_gate")
 
         elif next_status == "needs_input":
             # context YAML からフェーズ等を同期（plan エージェントが書き込み済みの場合）
             self._sync_phases_from_context(lc)
-            lc.suspend_reason = "needs_input"
-            self._update_status(lc, "suspend")
+            # context YAML から open_questions を取得して Generation に記録
+            ctx = self._read_context_yaml(lc)
+            open_questions = (ctx or {}).get("open_questions", [])
+            self._finish_generation(lc, "needs_input", {
+                "open_questions": open_questions,
+                "summary": "計画フェーズで未決事項を検出",
+            })
+            # Lifecycle を終了（対話セッションで解決後、新しい Generation で再開）
+            self._update_status(lc, "done")
 
         else:
             log.error(f"Lifecycle: unexpected plan result for {lc.lifecycle_id}: {next_status}")
@@ -727,6 +748,14 @@ class LifecycleManager:
             pr_url = (result or {}).get("pr_url", "")
             if pr_url:
                 self._save_task_yaml_field(lc, "pr_url", pr_url)
+            self._finish_generation(lc, "done", {
+                "summary": phase_summary,
+                "pr_url": pr_url,
+                "plan": {"phases": [
+                    {"goal": p["goal"], "status": p["status"], "summary": p.get("summary")}
+                    for p in lc.phases
+                ]},
+            })
             self._update_status(lc, "done")
 
         elif verdict == "NEXT_PHASE":
@@ -762,16 +791,39 @@ class LifecycleManager:
 
             # max_runs チェック
             if lc.run_count >= lc.max_runs:
+                self._finish_generation(lc, "aborted", {"summary": "max_runs exceeded"})
                 self._update_status(lc, "aborted")
             else:
                 self._update_status(lc, "phase_executing")
                 await self.dispatch_execute(lc)
 
         elif verdict == "SUSPEND":
-            lc.suspend_reason = "agent_review"
-            self._update_status(lc, "suspend")
+            self._finish_generation(lc, "review_needed", {
+                "summary": phase_summary,
+                "reason": (result or {}).get("reason", ""),
+            })
+            # Lifecycle を終了（対話セッションで確認後、新しい Generation で再開）
+            self._update_status(lc, "done")
+
+        elif verdict == "NEEDS_INPUT":
+            self._finish_generation(lc, "needs_input", {
+                "summary": phase_summary,
+                "reason": (result or {}).get("reason", ""),
+            })
+            self._update_status(lc, "done")
+
+        elif verdict == "REVIEW_NEEDED":
+            self._finish_generation(lc, "review_needed", {
+                "summary": phase_summary,
+                "reason": (result or {}).get("reason", ""),
+            })
+            self._update_status(lc, "done")
 
         elif verdict == "ABORT":
+            self._finish_generation(lc, "aborted", {
+                "summary": phase_summary,
+                "reason": (result or {}).get("reason", ""),
+            })
             self._update_status(lc, "aborted")
 
         else:
