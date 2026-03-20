@@ -404,7 +404,7 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
 
     @app.post("/api/lifecycles/{lifecycle_id}/open-session")
     async def api_open_session(lifecycle_id: str) -> JSONResponse:
-        from dispatcher.interactive_prompt import build_lifecycle_session_prompts
+        from dashboard.interactive_prompt import build_lifecycle_session_prompts
 
         lifecycles = read_jsonl(dispatch_dir / "lifecycles.jsonl")
         entry = next((lc for lc in lifecycles if lc.get("lifecycle_id") == lifecycle_id), None)
@@ -472,7 +472,7 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         datasource = _load_datasource(task_data.datasource_id)
 
         # プロンプト構築（ディスパッチャーから移動）
-        from dispatcher.interactive_prompt import build_task_session_prompts
+        from dashboard.interactive_prompt import build_task_session_prompts
         system_prompt, prompt = build_task_session_prompts(task_data, datasource, str(repo_dir))
 
         request_data = {

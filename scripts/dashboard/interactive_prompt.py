@@ -261,8 +261,11 @@ def build_task_session_prompts(
                 for q in oq:
                     prompt_parts.append(f"- {q}")
                 prompt_parts.append(
-                    "\nこれらの未決事項を解決してください。回答をタスク YAML に反映し、"
-                    "open_questions を更新してください。"
+                    "\nこれらの未決事項をユーザに質問して解決してください。回答をタスク YAML に反映し、"
+                    "open_questions を更新してください。\n\n"
+                    "**重要**: このセッションの目的は未決事項の解決のみです。"
+                    "実装計画の作成や実装作業には進まないでください。"
+                    "計画・実行はディスパッチ時に自動的に行われます。"
                 )
 
         elif gen_status == "review_needed":
