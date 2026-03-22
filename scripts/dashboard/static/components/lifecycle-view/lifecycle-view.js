@@ -102,8 +102,27 @@ function bindLifecycleActions(root) {
 function renderLifecycleDetailSections(ctx) {
   let html = "";
 
+  if (ctx.meta) {
+    const m = ctx.meta;
+    html += '<div class="detail-section"><div class="meta-row">';
+    if (m.task_id) html += `<span class="meta-item">task: ${escapeHtml(m.task_id)}</span>`;
+    if (m.project_id) html += `<span class="meta-item">project: ${escapeHtml(m.project_id)}</span>`;
+    if (m.datasource_id) html += `<span class="meta-item">datasource: ${escapeHtml(m.datasource_id)}</span>`;
+    if (m.remote_id) html += `<span class="meta-item">remote: ${escapeHtml(m.remote_id)}</span>`;
+    if (m.generation != null) html += `<span class="meta-item">generation: ${m.generation}</span>`;
+    html += "</div></div>";
+  }
+
   if (ctx.description) {
     html += `<div class="detail-section"><div class="detail-body">${escapeHtml(ctx.description)}</div></div>`;
+  }
+
+  if (ctx.preconditions?.length > 0) {
+    html += `<div class="detail-section"><div class="detail-heading">\u4e8b\u524d\u6761\u4ef6</div><ul class="detail-list">`;
+    ctx.preconditions.forEach((c) => {
+      html += `<li>${escapeHtml(c)}</li>`;
+    });
+    html += "</ul></div>";
   }
 
   if (ctx.phases?.length > 0) {
@@ -116,6 +135,7 @@ function renderLifecycleDetailSections(ctx) {
         <span class="phase-goal">${escapeHtml(p.goal || "")}</span>
         ${statusBadge(status)}
         ${p.summary ? `<div class="phase-summary">${escapeHtml(p.summary)}</div>` : ""}
+        ${p.criteria ? `<div class="phase-criteria">${escapeHtml(p.criteria)}</div>` : ""}
       </div>`;
     });
     html += "</div></div>";
@@ -129,10 +149,41 @@ function renderLifecycleDetailSections(ctx) {
     html += "</ul></div>";
   }
 
+  if (ctx.completion_actions?.length > 0) {
+    html += `<div class="detail-section"><div class="detail-heading">\u5b8c\u4e86\u6642\u30a2\u30af\u30b7\u30e7\u30f3</div><ul class="detail-list">`;
+    ctx.completion_actions.forEach((a) => {
+      html += `<li>${escapeHtml(a)}</li>`;
+    });
+    html += "</ul></div>";
+  }
+
   if (ctx.open_questions?.length > 0) {
     html += `<div class="detail-section"><div class="detail-heading">\u672a\u6c7a\u4e8b\u9805</div><ul class="detail-list">`;
     ctx.open_questions.forEach((q) => {
       html += `<li>${escapeHtml(q)}</li>`;
+    });
+    html += "</ul></div>";
+  }
+
+  if (ctx.execute_prompt) {
+    html += `<div class="detail-section"><div class="detail-heading">\u5b9f\u884c\u30d7\u30ed\u30f3\u30d7\u30c8</div><pre class="preview-text">${escapeHtml(ctx.execute_prompt)}</pre></div>`;
+  }
+
+  if (ctx.previous_generations?.length > 0) {
+    html += '<div class="detail-section"><div class="detail-heading">\u904e\u53bb\u306e\u5b9f\u884c\u5c65\u6b74</div><div class="phase-list">';
+    ctx.previous_generations.forEach((gen, i) => {
+      html += `<div class="phase-item">
+        <span class="phase-num">${gen.generation != null ? gen.generation : i + 1}</span>
+        ${gen.summary ? `<div class="phase-summary">${escapeHtml(gen.summary)}</div>` : ""}
+      </div>`;
+    });
+    html += "</div></div>";
+  }
+
+  if (ctx.feedback?.length > 0) {
+    html += `<div class="detail-section"><div class="detail-heading">\u30d5\u30a3\u30fc\u30c9\u30d0\u30c3\u30af</div><ul class="detail-list">`;
+    ctx.feedback.forEach((f) => {
+      html += `<li>${escapeHtml(typeof f === "string" ? f : JSON.stringify(f))}</li>`;
     });
     html += "</ul></div>";
   }

@@ -8,6 +8,7 @@
 .phase-item {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 6px 8px;
   border-radius: 4px;
@@ -39,4 +40,19 @@
   font-size: 11px;
   color: var(--text-muted);
   margin-top: 4px;
+}
+
+.phase-criteria {
+  width: 100%;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  font-style: italic;
+}
+
+.meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
