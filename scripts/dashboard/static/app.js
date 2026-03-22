@@ -139,6 +139,9 @@ function pollSyncStatus() {
           showNotification("Sync failed", true);
         } else {
           showNotification("Sync completed");
+          // SSE に依存せずタスクを再取得
+          state.tasks = await fetchJSON(`${BASE}/api/tasks`);
+          handleSSEUpdate("tasks");
         }
       }
     } catch {

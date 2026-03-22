@@ -534,15 +534,27 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         try:
             fetch_script = repo_dir / "scripts" / "fetch-all.sh"
             sync_script = Path(__file__).resolve().parent.parent / "sync-tasks.py"
-            proc = await asyncio.create_subprocess_exec(
-                "bash", "-c",
-                f'"{fetch_script}" | python3 "{sync_script}" --repo "{repo_dir}"',
+
+            # fetch と sync を分離: fetch 失敗時に部分データで sync しない
+            fetch_proc = await asyncio.create_subprocess_exec(
+                "bash", str(fetch_script),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            _, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                sync_state["error"] = stderr.decode(errors="replace")[:500]
+            fetch_stdout, fetch_stderr = await fetch_proc.communicate()
+            if fetch_proc.returncode != 0:
+                sync_state["error"] = f"fetch failed: {fetch_stderr.decode(errors='replace')[:500]}"
+                return
+
+            sync_proc = await asyncio.create_subprocess_exec(
+                "python3", str(sync_script), "--repo", str(repo_dir),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, sync_stderr = await sync_proc.communicate(input=fetch_stdout)
+            if sync_proc.returncode != 0:
+                sync_state["error"] = sync_stderr.decode(errors="replace")[:500]
         except Exception as e:
             sync_state["error"] = str(e)
         finally:
