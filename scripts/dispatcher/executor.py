@@ -14,6 +14,7 @@ import sandbox_exec
 
 from .models import Job, SOCKET_DIR_NAME, log, now_iso, get_host_cmd_broker_socket_path
 from .prompt import build_system_prompt
+from lib.worktree import ensure_worktree
 
 if TYPE_CHECKING:
     from .host_cmd import HostCommandBroker
@@ -37,7 +38,7 @@ class ExecutorMixin:
     def _result_path(self, dispatch_id: str) -> Path: raise NotImplementedError
     def generate_dispatch_id(self, project_id: str) -> str: raise NotImplementedError
     def count_running(self) -> int: raise NotImplementedError
-    def running_project_ids(self) -> set[str]: raise NotImplementedError
+    def running_working_dirs(self) -> set[str]: raise NotImplementedError
     def _save_jobs(self) -> None: raise NotImplementedError
 
     def _dispatch_dir(self) -> Path:
@@ -161,8 +162,8 @@ class ExecutorMixin:
 
     async def drain_queue(self):
         while self.queue and self.count_running() < self.max_slots:
-            running_projects = self.running_project_ids()
-            idx = next((i for i, j in enumerate(self.queue) if j.project_id not in running_projects), None)
+            running_dirs = self.running_working_dirs()
+            idx = next((i for i, j in enumerate(self.queue) if j.working_dir not in running_dirs), None)
             if idx is None:
                 break
             job = self.queue.pop(idx)
@@ -204,7 +205,7 @@ class ExecutorMixin:
     async def _dispatch_internal(
         self, project_id: str, prompt: str, job_type: str,
         lifecycle_id: str | None = None, dispatch_id_hint: str | None = None,
-        run: int | None = None,
+        run: int | None = None, branch: str | None = None,
     ) -> str:
         project = sandbox_exec.load_project(project_id, self.repo_dir)
         if not project:
@@ -222,6 +223,18 @@ class ExecutorMixin:
         except (FileNotFoundError, ValueError) as e:
             log.error(f"Internal dispatch: sandbox params error: {e}")
             return ""
+
+        # ワークツリー解決
+        if branch:
+            try:
+                wt_path = ensure_worktree(working_dir, branch)
+            except RuntimeError as e:
+                log.error(f"Internal dispatch: worktree error: {e}")
+                return ""
+            extra_binds = list(extra_binds) + [
+                {"source": f"{working_dir}/.git", "target": f"{working_dir}/.git", "mode": "rw"},
+            ]
+            working_dir = str(wt_path)
 
         dispatch_id = dispatch_id_hint or self.generate_dispatch_id(project_id)
 
@@ -241,7 +254,7 @@ class ExecutorMixin:
         self.jobs[dispatch_id] = job
         self._save_jobs()
 
-        if self.count_running() < self.max_slots and project_id not in self.running_project_ids():
+        if self.count_running() < self.max_slots and working_dir not in self.running_working_dirs():
             asyncio.create_task(self.execute_job(job))
             log.info(f"Internal dispatch: {job_type} job started: {dispatch_id}")
         else:

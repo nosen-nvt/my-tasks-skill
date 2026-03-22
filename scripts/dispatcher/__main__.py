@@ -209,6 +209,8 @@ def cmd_dispatch_cli(args: argparse.Namespace) -> None:
             request["context"] = context_text
     if args.lifecycle_id:
         request["lifecycle_id"] = args.lifecycle_id
+    if args.branch:
+        request["branch"] = args.branch
 
     response = asyncio.run(client_send(request))
     if response.get("ok"):
@@ -327,6 +329,7 @@ def main() -> None:
     p_dispatch.add_argument("--prompt", help="プロンプト（省略時は stdin）")
     p_dispatch.add_argument("--context-file", help="コンテキストファイルのパス")
     p_dispatch.add_argument("--lifecycle-id", help="ライフサイクル ID（呼び出し元で生成）")
+    p_dispatch.add_argument("--branch", help="ブランチ名（省略時はプロジェクト設定から自動導出）")
     p_dispatch.set_defaults(func=cmd_dispatch_cli)
 
     # resume

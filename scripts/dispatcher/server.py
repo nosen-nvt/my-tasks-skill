@@ -24,6 +24,7 @@ from .tmux import detect_tmux_session, ensure_tmux_session
 from .project_classifier import classify_project
 from .executor import ExecutorMixin
 from lib.task_store import start_generation, migrate_history_to_generations
+from lib.worktree import resolve_branch_name
 
 
 def task_yaml_to_context_yaml(task_data: dict, prompt: str, project_id: str) -> dict:
@@ -176,8 +177,8 @@ class DispatchServer(ExecutorMixin):
     def count_running(self) -> int:
         return sum(1 for j in self.jobs.values() if j.status == "running")
 
-    def running_project_ids(self) -> set[str]:
-        return {j.project_id for j in self.jobs.values() if j.status == "running"}
+    def running_working_dirs(self) -> set[str]:
+        return {j.working_dir for j in self.jobs.values() if j.status == "running"}
 
     # --- コマンドハンドラ ---
 
@@ -271,13 +272,13 @@ class DispatchServer(ExecutorMixin):
         self.jobs[dispatch_id] = job
         self._save_jobs()
 
-        if self.count_running() < self.max_slots and project_id not in self.running_project_ids():
+        if self.count_running() < self.max_slots and working_dir not in self.running_working_dirs():
             asyncio.create_task(self.execute_job(job))
             log.info(f"Job started: {dispatch_id}")
             return {"ok": True, "dispatch_id": dispatch_id, "message": "Job started"}
         else:
             self.queue.append(job)
-            reason = "project busy" if project_id in self.running_project_ids() else "slot full"
+            reason = "working_dir busy" if working_dir in self.running_working_dirs() else "slot full"
             log.info(f"Job queued ({reason}): {dispatch_id}")
             return {"ok": True, "dispatch_id": dispatch_id, "message": f"Job queued ({reason})"}
 
@@ -409,8 +410,8 @@ class DispatchServer(ExecutorMixin):
         if not project.get("working_directory"):
             return {"ok": False, "error": f"manual project: {project_id}"}
 
+        orchestration = project.get("orchestration", {})
         if max_runs is None:
-            orchestration = project.get("orchestration", {})
             max_runs = orchestration.get("max_runs_per_generation", 5)
 
         mgr = self.lifecycle_mgr
@@ -459,6 +460,16 @@ class DispatchServer(ExecutorMixin):
                 "previous_generations": [],
                 "feedback": [],
             }
+        # ワークツリー: ブランチ名の導出
+        worktree_config = orchestration.get("worktree", {})
+        if worktree_config.get("enabled"):
+            branch = request.get("branch")
+            if not branch:
+                meta = context_data.get("meta", {})
+                template = worktree_config.get("branch_template", "task/{task_id}")
+                branch = resolve_branch_name(template, meta)
+            lc.branch = branch
+
         mgr._init_context_yaml(lc, context_data)
         mgr._save()
 

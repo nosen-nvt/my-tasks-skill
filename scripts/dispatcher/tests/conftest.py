@@ -70,8 +70,8 @@ class StubServer(ExecutorMixin):
     def count_running(self) -> int:
         return sum(1 for j in self.jobs.values() if j.status == "running")
 
-    def running_project_ids(self) -> set[str]:
-        return {j.project_id for j in self.jobs.values() if j.status == "running"}
+    def running_working_dirs(self) -> set[str]:
+        return {j.working_dir for j in self.jobs.values() if j.status == "running"}
 
     async def execute_job(self, job: Job):
         """テスト用: サブプロセスを起動せず、即座に running にする。

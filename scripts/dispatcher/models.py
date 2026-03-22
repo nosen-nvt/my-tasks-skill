@@ -56,6 +56,7 @@ class Lifecycle:
     current_dispatch_id: str | None = None
     created_at: str = ""
     updated_at: str = ""
+    branch: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -72,6 +73,7 @@ class Lifecycle:
             "current_dispatch_id": self.current_dispatch_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "branch": self.branch,
         }
 
 

@@ -13,6 +13,7 @@ import sandbox_exec
 
 from .models import Lifecycle, Job, log, now_iso, SOCKET_DIR_NAME
 from lib.task_store import update_task_field, start_generation, finish_generation
+from lib.worktree import push_branch, create_pr_if_needed, remove_worktree
 
 
 # ---------------------------------------------------------------------------
@@ -746,6 +747,13 @@ class LifecycleManager:
                 lc.phases[i]["status"] = "skipped"
             # pr_url をタスク YAML に書き戻す
             pr_url = (result or {}).get("pr_url", "")
+
+            # ワークツリー: push → PR 作成 → 削除
+            if lc.branch:
+                wt_pr_url = self._worktree_cleanup(lc)
+                if wt_pr_url and not pr_url:
+                    pr_url = wt_pr_url
+
             if pr_url:
                 self._save_task_yaml_field(lc, "pr_url", pr_url)
             self._finish_generation(lc, "done", {
@@ -851,6 +859,7 @@ class LifecycleManager:
             lifecycle_id=lc.lifecycle_id,
             dispatch_id_hint=dispatch_id,
             run=lc.run_count,
+            branch=lc.branch,
         )
         lc.current_dispatch_id = actual_dispatch_id
         self._save()
@@ -872,6 +881,7 @@ class LifecycleManager:
             job_type="execute",
             lifecycle_id=lc.lifecycle_id,
             run=lc.current_phase,
+            branch=lc.branch,
         )
         lc.current_dispatch_id = dispatch_id
         if lc.current_phase < len(lc.phases):
@@ -902,9 +912,35 @@ class LifecycleManager:
             lifecycle_id=lc.lifecycle_id,
             dispatch_id_hint=dispatch_id,
             run=lc.current_phase,
+            branch=lc.branch,
         )
         lc.current_dispatch_id = actual_dispatch_id
         self._save()
+
+    def _worktree_cleanup(self, lc: Lifecycle) -> str | None:
+        """ワークツリーの push → PR 作成 → 削除を実行。PR URL を返す。"""
+        project = sandbox_exec.load_project(lc.project_id, self.repo_dir)
+        if not project:
+            return None
+        repo_dir = project.get("working_directory", "")
+        if not repo_dir:
+            return None
+
+        branch = lc.branch
+        if not branch:
+            return None
+        push_branch(repo_dir, branch)
+
+        # タスクタイトルを取得
+        ctx = self._read_context_yaml(lc)
+        title = (ctx or {}).get("description", "") or lc.prompt
+        # PR 作成コマンド
+        worktree_config = project.get("orchestration", {}).get("worktree", {})
+        pr_command = worktree_config.get("pr_command")
+        pr_url = create_pr_if_needed(repo_dir, branch, title, pr_command)
+
+        remove_worktree(repo_dir, branch)
+        return pr_url
 
     @staticmethod
     def should_auto_approve(orchestration: dict, run_count: int) -> bool:
