@@ -235,6 +235,18 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             if new_cursor:
                 task_data.feedback_cursor["bitbucket_pr"] = new_cursor
 
+        # GitHub PR コメント収集
+        if task_data.pr_url:
+            gh_cursor = task_data.feedback_cursor.get("github_pr")
+            new_comments, new_cursor = _collect_feedback_mod.collect_github_pr_comments(
+                task_data.pr_url, gh_cursor,
+            )
+            for item in new_comments:
+                task_data.feedback.append(FeedbackItem.from_dict({**item, "generation": task_data.generation}))
+            collected_count += len(new_comments)
+            if new_cursor:
+                task_data.feedback_cursor["github_pr"] = new_cursor
+
         if collected_count > 0:
             save_task_yaml(tasks_dir, task_id, task_data)
 

@@ -168,6 +168,7 @@ def build_task_session_prompts(
     task_id = task.id
     datasource_id = task.datasource_id
     remote_id = task.remote_id
+    generation = task.generation
     tasks_dir = str(Path(repo_dir) / "tasks")
     yaml_path = f"{tasks_dir}/{task_id}.yaml"
     index_path = f"{tasks_dir}/index.jsonl"
@@ -232,6 +233,18 @@ def build_task_session_prompts(
 ### abort (タスク中止)
 1. {yaml_path} の status を `aborted` に更新
 2. {index_path} の該当エントリ (id: {task_id}) の status を `aborted` に更新
+
+### フィードバック記録
+ユーザーからフィードバックや修正指示を受けた場合、{yaml_path} の `feedback` リストに追記してください:
+```yaml
+feedback:
+  - source: user
+    author: ""
+    timestamp: "YYYY-MM-DDTHH:MM:SS+09:00"  # 現在日時
+    body: "フィードバック内容"
+    generation: {generation}  # 現在の generation
+```
+フィードバックを記録したら、次のディスパッチ時に自動的に反映されます。
 {completion_section}"""
 
     # --- prompt ---

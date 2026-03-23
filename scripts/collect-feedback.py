@@ -98,6 +98,90 @@ def parse_pr_url(pr_url: str) -> tuple[str, str, str] | None:
     return None
 
 
+def parse_github_pr_url(pr_url: str) -> tuple[str, str, str] | None:
+    """GitHub PR URL をパースして (owner, repo, pr_number) を返す。"""
+    parsed = urlparse(pr_url)
+    if parsed.hostname not in ("github.com", "www.github.com"):
+        return None
+    # https://github.com/{owner}/{repo}/pull/{pr_number}
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) >= 4 and parts[2] == "pull":
+        return parts[0], parts[1], parts[3]
+    return None
+
+
+def collect_github_pr_comments(
+    pr_url: str, cursor_ts: str | None,
+) -> tuple[list[dict], str | None]:
+    """GitHub PR コメント（issue comments + review bodies）を収集する。"""
+    parsed = parse_github_pr_url(pr_url)
+    if not parsed:
+        return [], cursor_ts
+
+    owner, repo, pr_number = parsed
+    nwo = f"{owner}/{repo}"
+
+    new_feedback: list[dict] = []
+    latest_ts = cursor_ts
+
+    # 1) Issue comments (PR ページの会話コメント)
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", pr_number, "--repo", nwo,
+             "--json", "comments", "--jq", ".comments"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            comments = json.loads(result.stdout or "[]")
+            for c in comments:
+                created = c.get("createdAt", "")
+                if cursor_ts and created <= cursor_ts:
+                    continue
+                author = c.get("author", {})
+                new_feedback.append({
+                    "source": "github_pr",
+                    "author": author.get("login", "") if isinstance(author, dict) else str(author),
+                    "timestamp": created,
+                    "body": c.get("body", ""),
+                })
+                if latest_ts is None or created > latest_ts:
+                    latest_ts = created
+    except (subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+        print(f"警告: GitHub PR コメント取得に失敗しました: {e}", file=sys.stderr)
+
+    # 2) Review bodies (レビュー本文)
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", pr_number, "--repo", nwo,
+             "--json", "reviews", "--jq", ".reviews"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            reviews = json.loads(result.stdout or "[]")
+            for r in reviews:
+                body = r.get("body", "").strip()
+                if not body:
+                    continue
+                submitted = r.get("submittedAt", "")
+                if cursor_ts and submitted <= cursor_ts:
+                    continue
+                author = r.get("author", {})
+                state = r.get("state", "")
+                prefix = f"[{state}] " if state else ""
+                new_feedback.append({
+                    "source": "github_pr_review",
+                    "author": author.get("login", "") if isinstance(author, dict) else str(author),
+                    "timestamp": submitted,
+                    "body": f"{prefix}{body}",
+                })
+                if latest_ts is None or submitted > latest_ts:
+                    latest_ts = submitted
+    except (subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+        print(f"警告: GitHub PR レビュー取得に失敗しました: {e}", file=sys.stderr)
+
+    return new_feedback, latest_ts
+
+
 def collect_bitbucket_pr_comments(
     pr_url: str, cursor_ts: str | None,
 ) -> tuple[list[dict], str | None]:
@@ -170,7 +254,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--source",
-        choices=["jira", "bitbucket", "all"],
+        choices=["jira", "bitbucket", "github", "all"],
         default="all",
         help="収集ソース（デフォルト: all）",
     )
@@ -222,6 +306,16 @@ def main() -> None:
         collected.extend(new_comments)
         if new_cursor:
             task_data.feedback_cursor["bitbucket_pr"] = new_cursor
+
+    # GitHub PR コメント収集
+    if args.source in ("github", "all") and task_data.pr_url:
+        gh_cursor = task_data.feedback_cursor.get("github_pr")
+        new_comments, new_cursor = collect_github_pr_comments(task_data.pr_url, gh_cursor)
+        for item in new_comments:
+            task_data.feedback.append(FeedbackItem.from_dict({**item, "generation": task_data.generation}))
+        collected.extend(new_comments)
+        if new_cursor:
+            task_data.feedback_cursor["github_pr"] = new_cursor
 
     # タスク YAML を更新
     save_task_yaml(tasks_dir, task_id, task_data)
