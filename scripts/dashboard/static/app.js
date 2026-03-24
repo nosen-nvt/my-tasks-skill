@@ -4,8 +4,7 @@ import { updateElapsedTimes } from "./utils.js";
 import { currentView, setRenderer, popView } from "./navigation.js";
 import { postAction, showNotification } from "./actions.js";
 import { renderTaskList } from "./components/task-list/task-list.js";
-import { renderTaskView, updateTaskSummary, updateLifecycleList } from "./components/task-view/task-view.js";
-import { renderLifecycleView, updateLifecycleSummary, updateJobList } from "./components/lifecycle-view/lifecycle-view.js";
+import { renderTaskView, updateTaskSummary } from "./components/task-view/task-view.js";
 import { renderJobView, clearLogRefresh } from "./components/job-view/job-view.js";
 
 // --- Main render (router) ---
@@ -30,12 +29,6 @@ function renderCurrentView() {
       renderTaskView(view.taskId);
       break;
     }
-    case "lifecycle": {
-      const genMatch = view.lifecycleId.match(/-g(\d+)$/);
-      titleEl.textContent = `Generation ${genMatch ? genMatch[1] : "?"}`;
-      renderLifecycleView(view.lifecycleId);
-      break;
-    }
     case "job":
       titleEl.textContent = view.dispatchId;
       renderJobView(view.dispatchId);
@@ -57,11 +50,6 @@ function handleSSEUpdate(dataType) {
       break;
     case "task":
       if (dataType === "tasks") updateTaskSummary(view.taskId);
-      if (dataType === "lifecycles") updateLifecycleList(view.taskId);
-      break;
-    case "lifecycle":
-      if (dataType === "lifecycles") updateLifecycleSummary(view.lifecycleId);
-      if (dataType === "jobs") updateJobList(view.lifecycleId);
       break;
     case "job":
       if (dataType === "jobs") {
@@ -97,24 +85,17 @@ function connectSSE() {
     state.jobs = await fetchJSON(`${BASE}/api/jobs`);
     handleSSEUpdate("jobs");
   });
-
-  es.addEventListener("lifecycles_updated", async () => {
-    state.lifecycles = await fetchJSON(`${BASE}/api/lifecycles`);
-    handleSSEUpdate("lifecycles");
-  });
 }
 
 // --- Data loading ---
 
 async function loadAll() {
-  const [tasks, lifecycles, jobs, routines] = await Promise.all([
+  const [tasks, jobs, routines] = await Promise.all([
     fetchJSON(`${BASE}/api/tasks`),
-    fetchJSON(`${BASE}/api/lifecycles`),
     fetchJSON(`${BASE}/api/jobs`),
     fetchJSON(`${BASE}/api/routines`),
   ]);
   state.tasks = tasks;
-  state.lifecycles = lifecycles;
   state.jobs = jobs;
   state.routines = routines;
   renderCurrentView();
@@ -139,7 +120,6 @@ function pollSyncStatus() {
           showNotification("Sync failed", true);
         } else {
           showNotification("Sync completed");
-          // SSE に依存せずタスクを再取得
           state.tasks = await fetchJSON(`${BASE}/api/tasks`);
           handleSSEUpdate("tasks");
         }

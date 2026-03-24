@@ -6,14 +6,13 @@ export function statusBadge(status) {
 
 export function taskDisplayStatus(task) {
   if (task.status !== "in_progress") return task.status;
-  const prefix = task.id + "-g";
-  const taskLCs = state.lifecycles.filter(
-    (lc) => lc.lifecycle_id && lc.lifecycle_id.startsWith(prefix)
-  );
-  if (!taskLCs.length) return "in_review";
-  const latest = taskLCs[taskLCs.length - 1];
-  const activeStatuses = ["planning", "phase_executing", "phase_evaluating"];
-  return activeStatuses.includes(latest.status) ? "running" : "in_review";
+  // in_progress タスクの中で running ジョブがあれば running 表示
+  const taskJobs = state.jobs.filter((j) => j.dispatch_id === task.dispatch_id);
+  if (taskJobs.length > 0) {
+    const latest = taskJobs[taskJobs.length - 1];
+    if (latest.status === "running" || latest.status === "queued") return "running";
+  }
+  return "in_progress";
 }
 
 export function duration(startedAt, finishedAt) {
