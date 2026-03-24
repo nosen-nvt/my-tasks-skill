@@ -61,9 +61,8 @@ function buildTaskActionsHTML(task, taskData) {
     // Resume: available if session_id exists
     if (hasSession)
       html += `<button class="action-btn primary" data-action="resume" data-task-id="${task.id}">Resume</button>`;
-    // Feedback: available if pr_url exists
-    if (hasPrUrl)
-      html += `<button class="action-btn" data-action="feedback" data-task-id="${task.id}">Feedback</button>`;
+    // Feedback: always available for in_progress tasks
+    html += `<button class="action-btn" data-action="feedback" data-task-id="${task.id}">Feedback</button>`;
     // Open: general interactive session
     html += `<button class="action-btn" data-action="open-session" data-task-id="${task.id}">Open</button>`;
     // Done
