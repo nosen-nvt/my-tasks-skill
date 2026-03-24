@@ -345,6 +345,7 @@ sandbox は純粋なプロセス隔離ツールになる。何を実行するか
 | フィールド | 変更 | 説明 |
 |---|---|---|
 | `orchestration` | **削除** | auto_approve / require_first_approval / max_runs_per_generation は全て不要 |
+| `worktree` | **維持** | `enabled` と `branch_template` でブランチ自動導出を制御。remote_id の形式がデータソース依存のため、テンプレートはプロジェクト定義に必要 |
 | その他 | 維持 | project_id, name, description, repositories, working_directory, sandbox_profile, env, extra_binds, host_commands |
 
 ---
@@ -380,7 +381,7 @@ v1 と比べ、generation の管理が不要。グループの `collected_at` �
 変更なし。
 
 ### 9. 設定管理
-プロジェクト定義から `orchestration` フィールドを削除。
+プロジェクト定義から `orchestration` フィールドを削除。`worktree` フィールドは維持。
 
 ### 10. 対話セッション
 `open` に `--worktree` オプション追加（Resume 対応）。

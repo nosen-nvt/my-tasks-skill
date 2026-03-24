@@ -160,6 +160,15 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         with open(ds_path, encoding="utf-8") as f:
             return json.load(f)
 
+    def _load_project(project_id: str) -> dict | None:
+        if not project_id:
+            return None
+        p_path = repo_dir / "projects" / f"{project_id}.json"
+        if not p_path.exists():
+            return None
+        with open(p_path, encoding="utf-8") as f:
+            return json.load(f)
+
     @app.post("/api/tasks/{task_id}/plan")
     async def api_plan(task_id: str) -> JSONResponse:
         """Plan: 対話セッションを起動してタスクを計画する。"""
@@ -219,13 +228,32 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
 
         session_id = str(uuid.uuid4())
 
+        # プロジェクト設定から worktree ブランチを導出
+        branch = None
+        project = _load_project(project_id)
+        if project:
+            worktree_config = project.get("worktree", {})
+            if worktree_config.get("enabled"):
+                from lib.worktree import resolve_branch_name
+                template = worktree_config.get("branch_template", "task/{task_id}")
+                context = {
+                    "task_id": task_id,
+                    "remote_id": task_data.remote_id or task_id,
+                    "project_id": project_id,
+                }
+                branch = resolve_branch_name(template, context)
+
+        run_request: dict = {
+            "command": "run",
+            "project_id": project_id,
+            "prompt": prompt,
+            "session_id": session_id,
+        }
+        if branch:
+            run_request["branch"] = branch
+
         try:
-            result = await dispatcher_send({
-                "command": "run",
-                "project_id": project_id,
-                "prompt": prompt,
-                "session_id": session_id,
-            })
+            result = await dispatcher_send(run_request)
         except (ConnectionRefusedError, FileNotFoundError):
             return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
 
@@ -245,6 +273,8 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             task_data.status = "in_progress"
             task_data.dispatch_id = dispatch_id
             task_data.session_id = returned_session_id
+            if branch:
+                task_data.branch = branch
             save_task_yaml(tasks_dir, task_id, task_data)
 
         return JSONResponse(result)
@@ -267,14 +297,24 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         if not project_id:
             return JSONResponse({"ok": False, "error": "project_id が未設定です"})
 
+        resume_request: dict = {
+            "command": "resume",
+            "project_id": project_id,
+            "session_id": session_id,
+            "window_name": f"resume-{task_id}",
+            "activate": True,
+        }
+        # branch が記録されていれば worktree パスを渡す
+        if task_data.branch:
+            from lib.worktree import worktree_path
+            project = _load_project(project_id)
+            if project and project.get("working_directory"):
+                wt = worktree_path(project["working_directory"], task_data.branch)
+                if wt.is_dir():
+                    resume_request["worktree"] = str(wt)
+
         try:
-            result = await dispatcher_send({
-                "command": "resume",
-                "project_id": project_id,
-                "session_id": session_id,
-                "window_name": f"resume-{task_id}",
-                "activate": True,
-            })
+            result = await dispatcher_send(resume_request)
         except (ConnectionRefusedError, FileNotFoundError):
             return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
         return JSONResponse(result)
@@ -380,13 +420,18 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
 
         session_id = str(uuid.uuid4())
 
+        # 既存の branch を再利用（Feedback は同じブランチで作業する）
+        fb_run_request: dict = {
+            "command": "run",
+            "project_id": project_id,
+            "prompt": prompt,
+            "session_id": session_id,
+        }
+        if task_data.branch:
+            fb_run_request["branch"] = task_data.branch
+
         try:
-            result = await dispatcher_send({
-                "command": "run",
-                "project_id": project_id,
-                "prompt": prompt,
-                "session_id": session_id,
-            })
+            result = await dispatcher_send(fb_run_request)
         except (ConnectionRefusedError, FileNotFoundError):
             return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
 

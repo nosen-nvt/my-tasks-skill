@@ -56,19 +56,34 @@ class HostCommandBroker:
 
         host_commands = self._registry[token]
 
-        cmd_def = next((c for c in host_commands if c["name"] == command), None)
-        if cmd_def is None:
+        # 同名コマンドが複数定義されている場合（profile + project）、全てのパターンをマージ
+        matching_defs = [c for c in host_commands if c["name"] == command]
+        if not matching_defs:
             log.warning(f"Host command broker: command not allowed: {command} (token {token[:8]}...)")
             return {"ok": False, "error": f"command not allowed: {command}"}
 
-        allowed_patterns = cmd_def.get("allowed_patterns", [])
-        if allowed_patterns != "*":
+        cmd_def = matching_defs[0]  # path 等は最初の定義を使用
+
+        # allowed_patterns をマージ
+        all_patterns: list | str = []
+        allow_stdin = False
+        for d in matching_defs:
+            p = d.get("allowed_patterns", [])
+            if p == "*":
+                all_patterns = "*"
+                break
+            if isinstance(all_patterns, list):
+                all_patterns.extend(p if isinstance(p, list) else [p])
+            if d.get("allow_stdin", False):
+                allow_stdin = True
+
+        if all_patterns != "*":
             args_str = " ".join(args)
-            if not any(fnmatch.fnmatch(args_str, pat) for pat in allowed_patterns):
+            if not any(fnmatch.fnmatch(args_str, pat) for pat in all_patterns):
                 log.warning(f"Host command broker: args not allowed: {command} {args_str} (token {token[:8]}...)")
                 return {"ok": False, "error": f"args not allowed: {command} {args_str}"}
 
-        if stdin is not None and not cmd_def.get("allow_stdin", False):
+        if stdin is not None and not allow_stdin:
             log.warning(f"Host command broker: stdin not allowed for {command} (token {token[:8]}...)")
             return {"ok": False, "error": f"stdin not allowed for {command}"}
 

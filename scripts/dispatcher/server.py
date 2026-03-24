@@ -264,7 +264,8 @@ class DispatchServer(ExecutorMixin):
             return {"ok": False, "error": f"tmux session '{session_name}' not available"}
 
         env_file_args = "".join(f" --env-file '{ef}'" for ef in env_files)
-        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_id}'{env_file_args} -- claude --resume {shlex.quote(session_id)}"
+        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_id}'{env_file_args} -- claude --dangerously-skip-permissions --resume {shlex.quote(session_id)}"
+        log.info(f"Resume command: {cmd}")
 
         result = subprocess.run(
             ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, cmd],
