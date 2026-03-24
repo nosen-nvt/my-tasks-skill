@@ -2,12 +2,13 @@
 """
 collect-feedback.py - タスクへのフィードバックを外部ソースから収集する
 
-Jira コメントや Bitbucket PR コメントを取得し、タスク YAML の feedback フィールドに追記する。
+Jira コメントや PR コメント（Bitbucket/GitHub）を取得し、
+タスク YAML の feedback フィールドに新しいグループとして追記する。
 
 使い方:
   python3 collect-feedback.py --repo ~/.local/share/my-tasks --id 20260301-001
   python3 collect-feedback.py --repo ~/.local/share/my-tasks --id 20260301-001 --source jira
-  python3 collect-feedback.py --repo ~/.local/share/my-tasks --id 20260301-001 --source bitbucket
+  python3 collect-feedback.py --repo ~/.local/share/my-tasks --id 20260301-001 --source github
 """
 
 import argparse
@@ -19,7 +20,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
-from lib.task_store import FeedbackItem, load_task_yaml, save_task_yaml
+from lib.task_store import FeedbackItem, FeedbackGroup, load_task_yaml, save_task_yaml
 
 # sync-tasks.py をモジュールとしてインポート（load_datasource のみ）
 _script_dir = Path(__file__).resolve().parent
@@ -275,7 +276,7 @@ def main() -> None:
         print(f"エラー: タスクが見つかりません: {task_id}", file=sys.stderr)
         sys.exit(1)
 
-    collected: list[dict] = []
+    collected_items: list[dict] = []
 
     # Jira コメント収集
     if args.source in ("jira", "all") and task_data.datasource_id:
@@ -286,9 +287,7 @@ def main() -> None:
             if site:
                 jira_cursor = task_data.feedback_cursor.get("jira_comment")
                 new_comments, new_cursor = collect_jira_comments(task_data.remote_id, site, jira_cursor)
-                for item in new_comments:
-                    task_data.feedback.append(FeedbackItem.from_dict({**item, "generation": task_data.generation}))
-                collected.extend(new_comments)
+                collected_items.extend(new_comments)
                 if new_cursor:
                     task_data.feedback_cursor["jira_comment"] = new_cursor
             else:
@@ -301,9 +300,7 @@ def main() -> None:
     if args.source in ("bitbucket", "all") and task_data.pr_url:
         bb_cursor = task_data.feedback_cursor.get("bitbucket_pr")
         new_comments, new_cursor = collect_bitbucket_pr_comments(task_data.pr_url, bb_cursor)
-        for item in new_comments:
-            task_data.feedback.append(FeedbackItem.from_dict({**item, "generation": task_data.generation}))
-        collected.extend(new_comments)
+        collected_items.extend(new_comments)
         if new_cursor:
             task_data.feedback_cursor["bitbucket_pr"] = new_cursor
 
@@ -311,22 +308,30 @@ def main() -> None:
     if args.source in ("github", "all") and task_data.pr_url:
         gh_cursor = task_data.feedback_cursor.get("github_pr")
         new_comments, new_cursor = collect_github_pr_comments(task_data.pr_url, gh_cursor)
-        for item in new_comments:
-            task_data.feedback.append(FeedbackItem.from_dict({**item, "generation": task_data.generation}))
-        collected.extend(new_comments)
+        collected_items.extend(new_comments)
         if new_cursor:
             task_data.feedback_cursor["github_pr"] = new_cursor
+
+    # 収集結果をグループ化してタスク YAML に追記
+    if collected_items:
+        group = FeedbackGroup(
+            collected_at=now_iso(),
+            items=[FeedbackItem.from_dict(item) for item in collected_items],
+        )
+        task_data.feedback.append(group)
 
     # タスク YAML を更新
     save_task_yaml(tasks_dir, task_id, task_data)
 
     # レポート出力
+    total_items = sum(len(g.items) for g in task_data.feedback)
     report = {
         "task_id": task_id,
         "remote_id": task_data.remote_id,
-        "collected_count": len(collected),
-        "total_feedback_count": len(task_data.feedback),
-        "collected": collected,
+        "collected_count": len(collected_items),
+        "total_feedback_groups": len(task_data.feedback),
+        "total_feedback_items": total_items,
+        "collected": collected_items,
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

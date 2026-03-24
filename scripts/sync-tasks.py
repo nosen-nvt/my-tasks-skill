@@ -17,7 +17,7 @@ from pathlib import Path
 from lib.task_store import (
     IndexEntry,
     load_index, save_index, generate_task_id,
-    create_task_yaml, update_task_yaml, reopen_task_yaml, delete_task,
+    create_task_yaml, update_task_yaml, delete_task,
 )
 
 
@@ -151,18 +151,24 @@ def process_datasource(
             entry = existing_entries[remote_id]
 
             if entry.status == "done":
-                # 再オープン: 履歴を保持したまま pending に戻す
-                entry.status = "pending"
-                entry.generation = entry.generation + 1
-                if entry.title != t["title"]:
-                    entry.title = t["title"]
-                reopen_task_yaml(tasks_dir, entry)
+                # done タスクが再出現 → 新規タスクとして作成（v2: generation 廃止）
+                task_id = generate_task_id(index_entries, tasks_dir)
+                project_id = resolve_project(t.get("project_key"), project_mapping) or entry.project_id or ""
+                new_entry = IndexEntry(
+                    id=task_id,
+                    remote_id=remote_id,
+                    datasource_id=datasource_id,
+                    title=t["title"],
+                    status="pending",
+                    project_id=project_id,
+                )
+                index_entries.append(new_entry)
+                create_task_yaml(tasks_dir, new_entry)
                 reopened.append({
                     "datasource_id": datasource_id,
                     "remote_id": remote_id,
-                    "title": entry.title,
-                    "id": entry.id,
-                    "generation": entry.generation,
+                    "title": t["title"],
+                    "id": task_id,
                 })
             elif entry.title != t["title"]:
                 # 既存タスク: title 変更があれば更新
@@ -186,8 +192,6 @@ def process_datasource(
                 title=t["title"],
                 status="pending",
                 project_id=project_id,
-                run_count=0,
-                generation=1,
             )
             index_entries.append(new_entry)
             create_task_yaml(tasks_dir, new_entry)

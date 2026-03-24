@@ -92,9 +92,14 @@ def _start_server_background():
 # ---------------------------------------------------------------------------
 
 def cmd_run(args: argparse.Namespace) -> None:
-    prompt = sys.stdin.read().strip()
+    # プロンプトの読み込み: --prompt-file > stdin
+    if args.prompt_file:
+        prompt = Path(args.prompt_file).read_text(encoding="utf-8").strip()
+    else:
+        prompt = sys.stdin.read().strip()
+
     if not prompt:
-        print("エラー: プロンプトが空です（stdin からプロンプトを読み取ります）", file=sys.stderr)
+        print("エラー: プロンプトが空です（--prompt-file またはstdin からプロンプトを読み取ります）", file=sys.stderr)
         sys.exit(1)
 
     request: dict[str, Any] = {
@@ -102,15 +107,36 @@ def cmd_run(args: argparse.Namespace) -> None:
         "project_id": args.project,
         "prompt": prompt,
     }
-    if args.job_type:
-        request["job_type"] = args.job_type
-
+    if args.session_id:
+        request["session_id"] = args.session_id
     if args.sandbox_profile:
         request["sandbox_profile"] = args.sandbox_profile
+    if args.branch:
+        request["branch"] = args.branch
 
     response = asyncio.run(client_send(request))
     if response.get("ok"):
         print(f"{response.get('message', 'OK')}: {response.get('dispatch_id', '')}", file=sys.stderr)
+        if response.get("session_id"):
+            print(f"  session_id: {response['session_id']}", file=sys.stderr)
+    else:
+        print(f"エラー: {response.get('error', 'Unknown error')}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_resume_cli(args: argparse.Namespace) -> None:
+    request: dict[str, Any] = {
+        "command": "resume",
+        "project_id": args.project,
+        "session_id": args.session_id,
+        "activate": True,
+    }
+    if args.worktree:
+        request["worktree"] = args.worktree
+
+    response = asyncio.run(client_send(request))
+    if response.get("ok"):
+        print(f"{response.get('message', 'OK')}", file=sys.stderr)
     else:
         print(f"エラー: {response.get('error', 'Unknown error')}", file=sys.stderr)
         sys.exit(1)
@@ -127,6 +153,8 @@ def cmd_open(args: argparse.Namespace) -> None:
         request["sandbox_profile"] = args.sandbox_profile
     if args.prompt:
         request["prompt"] = args.prompt
+    if args.worktree:
+        request["worktree"] = args.worktree
     if args.activate:
         request["activate"] = True
 
@@ -147,94 +175,31 @@ def cmd_status(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     jobs = response.get("jobs", [])
-    lifecycles = response.get("lifecycles", [])
 
     if args.json:
-        print(json.dumps({"jobs": jobs, "lifecycles": lifecycles}, ensure_ascii=False, indent=2))
+        print(json.dumps({"jobs": jobs}, ensure_ascii=False, indent=2))
         return
 
-    active_lcs = [lc for lc in lifecycles if lc.get("status") != "done"]
-    if active_lcs:
-        print("Lifecycles:", file=sys.stderr)
-        for lc in active_lcs:
-            reason = f" ({lc['suspend_reason']})" if lc.get("suspend_reason") else ""
-            phases = lc.get("phases", [])
-            current_phase = lc.get("current_phase", 0)
-            phase_info = f"phase={current_phase + 1}/{len(phases)}" if phases else "no phases"
-            print(f"  {lc['lifecycle_id']:<10} {lc['status']:<18}{reason}  project={lc['project_id']:<12} {phase_info}")
-        print(file=sys.stderr)
-
-    if not jobs and not active_lcs:
+    if not jobs:
         print("ジョブはありません", file=sys.stderr)
         return
 
-    if jobs:
-        print("Jobs:", file=sys.stderr)
-        for job in jobs:
-            pid_str = str(job.get("pid", "")) or "-"
-            jtype = job.get("job_type", "execute")
-            print(f"  {job['dispatch_id']:<20} {job['status']:<10} {jtype:<10} pid={pid_str:<8} {job.get('started_at') or '-'}")
+    print("Jobs:", file=sys.stderr)
+    for job in jobs:
+        pid_str = str(job.get("pid", "")) or "-"
+        session = job.get("session_id", "")[:8] if job.get("session_id") else "-"
+        print(f"  {job['dispatch_id']:<20} {job['status']:<10} pid={pid_str:<8} session={session}  {job.get('started_at') or '-'}")
 
-        counts: dict[str, int] = {}
-        for job in jobs:
-            s = job["status"]
-            counts[s] = counts.get(s, 0) + 1
-        parts = []
-        for s in ["running", "queued", "done", "failed"]:
-            if counts.get(s, 0) > 0:
-                parts.append(f"{s}={counts[s]}")
-        if parts:
-            print(f"\n  [{', '.join(parts)}]")
-
-
-def cmd_dispatch_cli(args: argparse.Namespace) -> None:
-    request: dict[str, Any] = {"command": "dispatch"}
-
-    if args.project:
-        request["project_id"] = args.project
-    if args.prompt:
-        request["prompt"] = args.prompt
-    elif not sys.stdin.isatty():
-        request["prompt"] = sys.stdin.read().strip()
-    if args.context_file:
-        import yaml
-        context_text = Path(args.context_file).read_text(encoding="utf-8")
-        try:
-            context_data = yaml.safe_load(context_text)
-            if isinstance(context_data, dict):
-                request["context"] = context_data
-            else:
-                request["context"] = context_text
-        except yaml.YAMLError:
-            request["context"] = context_text
-    if args.lifecycle_id:
-        request["lifecycle_id"] = args.lifecycle_id
-    if args.branch:
-        request["branch"] = args.branch
-
-    response = asyncio.run(client_send(request))
-    if response.get("ok"):
-        print(f"{response.get('message', 'OK')}", file=sys.stderr)
-        if response.get("dispatch_id"):
-            print(f"  dispatch_id: {response['dispatch_id']}", file=sys.stderr)
-    else:
-        print(f"エラー: {response.get('error', 'Unknown error')}", file=sys.stderr)
-        sys.exit(1)
-
-
-def cmd_resume_cli(args: argparse.Namespace) -> None:
-    request: dict[str, Any] = {"command": "resume", "lifecycle_id": args.id}
-    if args.project:
-        request["project_id"] = args.project
-    if args.context_file:
-        request["context_update"] = Path(args.context_file).read_text(encoding="utf-8")
-
-    response = asyncio.run(client_send(request))
-    if response.get("ok"):
-        print(f"{response.get('message', 'OK')}", file=sys.stderr)
-    else:
-        print(f"エラー: {response.get('error', 'Unknown error')}", file=sys.stderr)
-        sys.exit(1)
+    counts: dict[str, int] = {}
+    for job in jobs:
+        s = job["status"]
+        counts[s] = counts.get(s, 0) + 1
+    parts = []
+    for s in ["running", "queued", "done", "failed"]:
+        if counts.get(s, 0) > 0:
+            parts.append(f"{s}={counts[s]}")
+    if parts:
+        print(f"\n  [{', '.join(parts)}]")
 
 
 def cmd_cancel(args: argparse.Namespace) -> None:
@@ -308,11 +273,20 @@ def main() -> None:
     p_server.set_defaults(func=cmd_server)
 
     # run
-    p_run = subparsers.add_parser("run", help="ジョブを投入する")
-    p_run.add_argument("--project", required=True, help="プロジェクト ID（プロンプトは stdin から）")
-    p_run.add_argument("--job-type", default=None, help="ジョブタイプ: execute, evaluate, plan")
+    p_run = subparsers.add_parser("run", help="ジョブを投入する（プロンプトは stdin or --prompt-file）")
+    p_run.add_argument("--project", required=True, help="プロジェクト ID")
+    p_run.add_argument("--prompt-file", default=None, help="プロンプトファイルのパス")
+    p_run.add_argument("--session-id", default=None, help="Claude Code セッション ID（省略時は自動生成）")
     p_run.add_argument("--sandbox-profile", help="サンドボックスプロファイルを上書き指定")
+    p_run.add_argument("--branch", default=None, help="worktree のブランチ名")
     p_run.set_defaults(func=cmd_run)
+
+    # resume
+    p_resume = subparsers.add_parser("resume", help="完了済みセッションを再開する")
+    p_resume.add_argument("--project", required=True, help="プロジェクト ID")
+    p_resume.add_argument("--session-id", required=True, help="再開するセッション ID")
+    p_resume.add_argument("--worktree", default=None, help="worktree パス")
+    p_resume.set_defaults(func=cmd_resume_cli)
 
     # open
     p_open = subparsers.add_parser("open", help="対話セッションを起動する")
@@ -320,24 +294,9 @@ def main() -> None:
     p_open.add_argument("--session", default=None, help="tmux セッション名を明示指定")
     p_open.add_argument("--sandbox-profile", help="サンドボックスプロファイルを上書き指定")
     p_open.add_argument("--prompt", default=None, help="初期プロンプトを指定")
+    p_open.add_argument("--worktree", default=None, help="worktree パス")
     p_open.add_argument("--activate", action="store_true", help="作成したウィンドウをアクティブにする")
     p_open.set_defaults(func=cmd_open)
-
-    # dispatch
-    p_dispatch = subparsers.add_parser("dispatch", help="ライフサイクルを開始する")
-    p_dispatch.add_argument("--project", help="プロジェクト ID")
-    p_dispatch.add_argument("--prompt", help="プロンプト（省略時は stdin）")
-    p_dispatch.add_argument("--context-file", help="コンテキストファイルのパス")
-    p_dispatch.add_argument("--lifecycle-id", help="ライフサイクル ID（呼び出し元で生成）")
-    p_dispatch.add_argument("--branch", help="ブランチ名（省略時はプロジェクト設定から自動導出）")
-    p_dispatch.set_defaults(func=cmd_dispatch_cli)
-
-    # resume
-    p_resume = subparsers.add_parser("resume", help="suspend 中のライフサイクルを再開する")
-    p_resume.add_argument("--id", required=True, help="ライフサイクル ID")
-    p_resume.add_argument("--project", default=None, help="プロジェクト ID（project_confirmation 時に指定）")
-    p_resume.add_argument("--context-file", default=None, help="更新されたコンテキストファイル")
-    p_resume.set_defaults(func=cmd_resume_cli)
 
     # status
     p_status = subparsers.add_parser("status", help="ジョブ状態を表示する")

@@ -33,7 +33,6 @@
 3. スクリプトのレポートを確認:
    - `added`: 新規追加されたタスク
    - `updated`: タイトルが更新されたタスク
-   - `reopened`: done から再オープンされたタスク
    - `project_assigned`: `project_mapping` でプロジェクトが特定できたタスク
    - `project_unassigned`: プロジェクトが特定できなかったタスク（dispatch 時に判定）
    - `vanished`: 消失タスク（full モード: インデックスと YAML から削除済み）
@@ -95,133 +94,173 @@
 
 ---
 
-## 3. dispatch（ライフサイクル開始）
+## 3. Plan（対話的タスク精査）
 
-ジョブチェーン（Lifecycle）を開始する。タスク情報の解決とステータス更新はスキル側（呼び出し元）が行い、dispatcher にはコンテキストとして送信する。
-Lifecycle はタスク管理の知識を持たない純粋なジョブオーケストレータ。
+ダッシュボードから対話セッションを起動し、タスクを精査・計画する。
+成果物はタスク YAML の `execute_prompt` フィールド。
 
 ### 手順
 
 1. タスク情報を読み込む（`tasks/index.jsonl` + `tasks/{id}.yaml`）
-2. タスクステータスを `in_progress` に更新（`tasks/index.jsonl` と `tasks/{id}.yaml`）
-3. ライフサイクルを開始:
+
+2. ディスパッチャーの `open` コマンドで対話セッションを起動:
    ```bash
-   # タスクをディスパッチ（スキル側でタスク解決後に呼び出す）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
-     --project bo --prompt "タスクタイトル" --context-file /path/to/task.yaml
-
-   # lifecycle_id を外部指定（タスクとのトレーサビリティ確保）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
-     --project bo --prompt "タスクタイトル" --context-file /path/to/task.yaml \
-     --lifecycle-id "20260312-001-g1"
-
-   # タスクなしの直接投入（プロンプトから最小コンテキストを自動生成し計画を実行）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
-     --project bo --prompt "バグを修正して"
-
-   # --project 省略時はプロンプトから自動判定を試みる
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher dispatch \
-     --prompt "バグを修正して" --context-file /path/to/task.yaml
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher open --project bo
    ```
 
-4. ステータスを確認:
-   ```bash
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher status
-   ```
+3. 対話セッション内で:
+   - タスク YAML を読み込み
+   - 作業ディレクトリのソースコードを調査
+   - ユーザーと対話しながら計画を立案
+   - タスク YAML の以下のフィールドを更新:
+     - `description`: タスクの説明
+     - `preconditions`: 事前条件リスト
+     - `acceptance_criteria`: 達成条件リスト
+     - `execute_prompt`: 実行プロンプト
 
-### Lifecycle ステートマシン
-
-ステータス値: `planning`, `planned`, `phase_executing`, `phase_evaluating`, `suspend`, `done`, `aborted`
-
-```
-dispatch → planning → 計画ジョブ完了
-                        ├── [planned + auto_approve] → phase_executing → 実行ジョブ → phase_evaluating → 評価ジョブ
-                        │                                                                ├── DONE → done
-                        │                                                                ├── NEXT_PHASE → phase_executing（次フェーズ）
-                        │                                                                ├── SUSPEND → suspend (agent_review)
-                        │                                                                └── ABORT → aborted
-                        ├── [planned + 手動承認が必要] → suspend (approval_required)
-                        └── [needs_input] → suspend (needs_input)
-```
-
-auto_approve の判定ロジック:
-- `orchestration.auto_approve = false` → 常に手動承認
-- `orchestration.require_first_approval = true`（デフォルト）→ 初回は手動承認
-- それ以外 → 自動承認
-
-### タスクステータス遷移（スキル側で管理）
-
-dispatch 時の `pending → in_progress` はスキル側で実行する（dispatcher CLI はタスク管理を行わない）。
-
-```
-dispatch 時（スキル側）: pending → in_progress
-Lifecycle done(DONE):    in_progress → done
-Lifecycle aborted(ABORT): in_progress → aborted
-```
-
-### suspend 理由
-
-| 理由 | 説明 | resume 時の動作 |
-|------|------|----------------|
-| `approval_required` | 手動承認が必要 | 実行ジョブをディスパッチ |
-| `needs_input` | ユーザ入力が必要 | 計画ジョブをディスパッチ |
-| `agent_review` | エージェントレビューが必要 | 次フェーズの実行を再開 |
-| `project_confirmation` | プロジェクト判定の確認 | 指定プロジェクトで計画開始 |
-
-### 計画ジョブの動作
-
-計画ジョブは以下を実行する:
-
-1. コンテキストファイル（`.context.yaml`）とプロジェクト定義を読み込み
-2. 必要に応じて作業ディレクトリ配下のソースコードを調査
-3. 未決事項を分析:
-   - **未決事項がある場合**: 未決事項をチェックボックス形式で記載し、`needs_input` に遷移
-   - **未決事項がない場合**: フェーズ分割された実行計画を作成し、`planned` に遷移
-4. コンテキストファイルを更新
+4. セッション終了 → ダッシュボードに戻る
 
 ### 達成条件の記述ルール
 
 - `manual` 以外のプロジェクトのタスクは AI エージェントが実装・実行する前提
 - **達成条件は AI エージェント自身がローカルで検証可能な内容** にすること
-- OK: ファイル内容の確認、YAML/JSON のパース検証、テスト実行（`dotnet test`, `npm test` 等）、ビルド成功、`az pipelines run` + 結果確認
+- OK: ファイル内容の確認、YAML/JSON のパース検証、テスト実行（`dotnet test`, `npm test` 等）、ビルド成功
 - NG: ブラウザでの手動確認、外部サービスの目視確認など、エージェントが実行できない操作
 
 ### manual プロジェクト
 
-`working_directory` が未設定のプロジェクトは manual 扱い。計画ジョブはスキップされ、メインセッションで直接処理する:
+`working_directory` が未設定のプロジェクトは manual 扱い。Plan をスキップし、メインセッションで直接処理する:
 - `done` に直接遷移
 - 完了時アクション（データソース側のステータス更新等）は通常通り実行する
 
 ---
 
-## 4. resume（ライフサイクル再開）
+## 4. Dispatch（ジョブ実行）
 
-suspend 中のライフサイクルを再開する。
+タスク YAML の `execute_prompt` をディスパッチャーの `run` に渡してジョブを実行する。
 
 ### 手順
 
-1. suspend 中のライフサイクルを確認:
+1. タスク情報を読み込む（`tasks/index.jsonl` + `tasks/{id}.yaml`）
+
+2. `execute_prompt` が存在することを確認（空なら先に Plan を実行）
+
+3. タスクステータスを `in_progress` に更新（`tasks/index.jsonl` と `tasks/{id}.yaml`）
+
+4. UUID 形式の `session_id` を生成
+
+5. ディスパッチャーの `run` コマンドでジョブを実行:
+   ```bash
+   # プロンプトファイル渡し
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher run \
+     --project bo --prompt-file /tmp/prompt-20260301-001.md \
+     --session-id "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+   # 標準入力渡し
+   echo "{execute_prompt}" | python3 ~/.claude/skills/my-tasks/scripts/dispatcher run \
+     --project bo --session-id "a1b2c3d4-..."
+   ```
+
+6. 返却された `dispatch_id` と `session_id` をタスク YAML に記録:
+   - `dispatch_id`: ジョブの識別に使用
+   - `session_id`: Resume でのセッション再開に使用
+
+7. ステータスを確認:
    ```bash
    python3 ~/.claude/skills/my-tasks/scripts/dispatcher status
    ```
 
-2. `needs_input` の場合: コンテキストファイルの未決事項に回答し `[x]` に更新
-
-3. ライフサイクルを再開:
-   ```bash
-   # 通常の再開（needs_input 回答済み / approval_required 承認）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher resume --id lc-1
-
-   # コンテキスト更新付きの再開（更新済みファイルを渡す）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher resume --id lc-1 --context-file /path/to/updated.yaml
-
-   # プロジェクト確認の場合（project_confirmation）
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher resume --id lc-1 --project correct-project-id
-   ```
+8. ジョブ完了後、結果に応じてタスクステータスを更新:
+   - 成功 → `done`（完了時アクション実行）
+   - 失敗・中止 → `aborted`
+   - 軽微な修正が必要 → Resume（操作5）へ
+   - レビュー指摘あり → Feedback（操作6）へ
 
 ---
 
-## 5. ステータス確認
+## 5. Resume（セッション再開）
+
+Dispatch したジョブの Claude Code セッションを再開し、同一コンテキスト上で軽微な修正を行う。
+
+### 手順
+
+1. タスク YAML から `session_id` を取得
+
+2. ディスパッチャーの `resume` コマンドでセッションを再開:
+   ```bash
+   python3 ~/.claude/skills/my-tasks/scripts/dispatcher resume \
+     --project bo --session-id "a1b2c3d4-..."
+   ```
+
+3. tmux ウィンドウで `claude --resume "{session_id}"` が対話モードで起動される
+
+4. 同一コンテキスト（会話履歴・ファイル状態）を引き継いだ状態で対話的に修正
+
+5. セッション終了
+
+### 用途
+
+- コミットメッセージの修正
+- 軽微なバグ修正
+- PR の説明文更新
+
+同一セッションのコンテキスト内で対応できる範囲の調整に限定する。
+それ以上の修正が必要な場合は、PR にコメントして Feedback フロー（操作6）に回す。
+
+---
+
+## 6. Feedback（フィードバック収集・対応）
+
+フィードバックを収集し、対応ジョブを Dispatch する。
+
+### フィードバック収集
+
+```bash
+# 全ソースから収集
+python3 ~/.claude/skills/my-tasks/scripts/collect-feedback.py \
+  --repo ~/.local/share/my-tasks --id 20260301-001
+
+# 特定ソースのみ
+python3 ~/.claude/skills/my-tasks/scripts/collect-feedback.py \
+  --repo ~/.local/share/my-tasks --id 20260301-001 --source github
+
+python3 ~/.claude/skills/my-tasks/scripts/collect-feedback.py \
+  --repo ~/.local/share/my-tasks --id 20260301-001 --source jira
+```
+
+スクリプトは以下を実行する:
+1. タスク YAML から `remote_id`, `datasource_id`, `pr_url`, `feedback_cursor` を取得
+2. 各ソースから `feedback_cursor` 以降の新規コメントを収集
+3. 収集結果をタスク YAML の `feedback` に新しいグループ（`collected_at` + `items[]`）として追加
+4. `feedback_cursor` を更新
+5. JSON レポートを stdout に出力
+
+### 手動フィードバック追加
+
+```bash
+python3 ~/.claude/skills/my-tasks/scripts/add-feedback.py \
+  --repo ~/.local/share/my-tasks --id 20260301-001 \
+  --body "ログレベルも変更してください"
+```
+
+### フィードバック対応ジョブの実行
+
+1. フィードバック収集後、最新のグループ（最新の `collected_at`）を特定
+2. 元の `execute_prompt` + フィードバック内容から対応プロンプトを構築
+3. Dispatch（操作4）と同じ手順でジョブを実行
+
+### 繰り返し
+
+Feedback は複数回実行可能。毎回新しいグループが追加され、ジョブには最新グループの `collected_at` を渡すことで「今回対応すべきフィードバック」を識別できる。
+
+### 前提条件
+
+- Jira フィードバック: datasource JSON に `site_mapping`（プロジェクトキー → サイト名）が設定されていること
+- PR フィードバック: タスク YAML に `pr_url` が設定されていること
+
+---
+
+## 7. ステータス確認
 
 タスク一覧やジョブ状況を表示する。
 
@@ -247,7 +286,7 @@ suspend 中のライフサイクルを再開する。
 
 ---
 
-## 6. タスク操作（データソース側）
+## 8. タスク操作（データソース側）
 
 データソース側のタスクを操作する（ステータス変更、担当者変更、新規作成等）。
 
@@ -269,7 +308,7 @@ suspend 中のライフサイクルを再開する。
 
 ---
 
-## 7. 設定管理
+## 9. 設定管理
 
 プロジェクト・データソースの CRUD を行う。
 
@@ -318,7 +357,7 @@ suspend 中のライフサイクルを再開する。
 ### プロジェクト追加
 
 1. ユーザーに以下を確認:
-   - プロジェクト ID、名前、説明、作業ディレクトリ、サンドボックスモード
+   - プロジェクト ID、名前、説明、作業ディレクトリ、サンドボックスプロファイル
 
 2. `projects/{project_id}.json` を作成（`schemas.md` 参照）
 
@@ -328,86 +367,9 @@ suspend 中のライフサイクルを再開する。
 
 1. 既存の `projects/{project_id}.json` を読み込み
 
-2. 変更内容を適用（sandbox_mode 変更、working_directory 変更等）
+2. 変更内容を適用（sandbox_profile 変更、working_directory 変更等）
 
 3. commit + push
-
----
-
-## 8. タスク再オープン
-
-done/aborted タスクを手動で次のジェネレーションに再オープンする。
-
-### 手順
-
-```bash
-python3 ~/.claude/skills/my-tasks/scripts/reopen-task.py \
-  --repo ~/.local/share/my-tasks --id 20260301-001
-```
-
-スクリプトは以下を実行する:
-1. `tasks/index.jsonl` の該当エントリを `pending` + `generation++` に更新
-2. `tasks/{id}.yaml` の `status`/`generation` を更新し、`history` に前世代サマリを追加
-3. JSON レポートを stdout に出力
-
-### 出力例
-
-```json
-{
-  "id": "20260301-001",
-  "remote_id": "UBS-101",
-  "title": "API実装",
-  "old_generation": 1,
-  "new_generation": 2,
-  "status": "pending"
-}
-```
-
----
-
-## 9. フィードバック収集
-
-タスクに対するフィードバック（Jira コメント、Bitbucket PR コメント）を収集し、タスク YAML に保存する。
-
-### 自動収集
-
-```bash
-# 全ソースから収集
-python3 ~/.claude/skills/my-tasks/scripts/collect-feedback.py \
-  --repo ~/.local/share/my-tasks --id 20260301-001
-
-# Jira コメントのみ
-python3 ~/.claude/skills/my-tasks/scripts/collect-feedback.py \
-  --repo ~/.local/share/my-tasks --id 20260301-001 --source jira
-
-# Bitbucket PR コメントのみ（タスク YAML に pr_url が設定されている場合）
-python3 ~/.claude/skills/my-tasks/scripts/collect-feedback.py \
-  --repo ~/.local/share/my-tasks --id 20260301-001 --source bitbucket
-```
-
-スクリプトは以下を実行する:
-1. タスク YAML から `remote_id`, `datasource_id`, `feedback_cursor` を取得
-2. Jira コメント収集: `atl jira issue view --key {remote_id} --json --site {site}` でコメントを取得し、`feedback_cursor.jira_comment` 以降のみ抽出
-3. Bitbucket PR コメント収集: `pr_url` から workspace/repo/pr_id をパースし、`atl bitbucket pr comment` でコメントを取得
-4. 収集結果をタスク YAML の `feedback` に追記し、`feedback_cursor` を更新
-5. JSON レポートを stdout に出力
-
-### 手動フィードバック追加
-
-```bash
-python3 ~/.claude/skills/my-tasks/scripts/add-feedback.py \
-  --repo ~/.local/share/my-tasks --id 20260301-001 \
-  --body "ログレベルも変更してください"
-```
-
-### 前提条件
-
-- Jira フィードバック: datasource JSON に `site_mapping`（プロジェクトキー → サイト名）が設定されていること
-- Bitbucket PR フィードバック: タスク YAML に `pr_url` が設定されていること
-
-### フィードバックの利用
-
-収集されたフィードバックは dispatch 時にコンテキスト YAML に含まれ、計画エージェントがフィードバックに基づいて修正フェーズを自律的に構築する。
 
 ---
 
@@ -418,8 +380,9 @@ python3 ~/.claude/skills/my-tasks/scripts/add-feedback.py \
 ### 手順
 
 ```bash
+# 通常の対話セッション
 python3 ~/.claude/skills/my-tasks/scripts/dispatcher open --project bo [--session main]
 
-# サンドボックスプロファイルを上書きして対話セッションを起動
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher open --project bo --sandbox-profile unrestricted
+# worktree を指定して対話セッションを起動（Resume 対応）
+python3 ~/.claude/skills/my-tasks/scripts/dispatcher open --project bo --worktree /path/to/worktree
 ```

@@ -61,54 +61,41 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 
 ## ステータスモデル
 
-タスク管理は **タスクインデックス**（スキル側）と **Lifecycle**（ディスパッチャー側）の2層で構成される。
+タスクのステータスはタスク YAML が唯一の真実の源（Single Source of Truth）。
 
-### タスクインデックスのステータス
-
-スキル側が `tasks/index.jsonl` で管理する。
+### タスクステータス
 
 ```
 pending → in_progress → done
                       → aborted
-
-※ done → sync で同じ remote_id が再出現 → pending（再オープン、generation++）
 ```
 
-- `pending`: データソースから取り込まれた初期状態
-- `in_progress`: Lifecycle にディスパッチ済み（Lifecycle 側の suspend 中も含む）
-- `done`: 完了（評価ジョブの DONE 判定、またはユーザが明示的に完了とした状態）
-- `aborted`: 実行不可能と判断された状態（ABORT 判定）
-
-### Lifecycle のステータス
-
-ディスパッチャーが管理するジョブチェーンの内部状態。タスク管理の知識を持たない。
-
-```
-dispatch → planning → 計画ジョブ
-                        ├── planned + auto_approve → phase_executing → 実行ジョブ → phase_evaluating → 評価ジョブ
-                        │                                                              ├── DONE → done
-                        │                                                              ├── NEXT_PHASE → phase_executing（次フェーズ）
-                        │                                                              ├── SUSPEND → suspend (agent_review)
-                        │                                                              └── ABORT → aborted
-                        ├── planned + 手動承認 → suspend (approval_required)
-                        └── needs_input → suspend (needs_input)
-```
-
-- `planning`: 計画・分析中
-- `planned`: フェーズ計画完了、承認待ち
-- `phase_executing`: フェーズ実行ジョブ実行中
-- `phase_evaluating`: フェーズ評価ジョブ実行中
-- `suspend`: ユーザーアクション待ち（`suspend_reason`: `approval_required` / `needs_input` / `agent_review`）
-- `done`: Lifecycle 完了
+- `pending`: データソースから取り込まれた初期状態、または Plan/Dispatch 待ち
+- `in_progress`: ジョブ実行中、Plan 中、Feedback 待ちなど、作業が進行中の状態
+- `done`: 完了
 - `aborted`: 中止
 
-### 2層の連携
+### 再オープン
 
-| Lifecycle イベント | タスクインデックス遷移 |
+done タスクと同じ `remote_id` がデータソースから再出現した場合、新規タスクとして作成する。
+
+### ジョブステータス（ディスパッチャー側）
+
+ディスパッチャーはジョブの実行状態をインメモリで管理する。タスク管理の知識を持たない。
+
+```
+queued → running → done
+                 → failed
+```
+
+### タスクとジョブの連携
+
+| イベント | タスクステータス遷移 |
 |---|---|
-| dispatch 時（スキル側） | `pending` → `in_progress` |
-| done (DONE) | `in_progress` → `done` |
-| aborted (ABORT) | `in_progress` → `aborted` |
+| Dispatch 時（スキル側） | `pending` → `in_progress` |
+| ジョブ完了後（スキル側が判断） | `in_progress` → `done` or `aborted` |
+
+タスクステータスの管理は全てスキル側が行う。ディスパッチャーはジョブの実行と完了通知のみを担う。
 
 ## git 操作ポリシー
 
@@ -151,8 +138,9 @@ bash "$SCRIPT_DIR/fetch-ms-todo.sh"
 
 ## ディスパッチャー
 
-Unix ドメインソケット C/S アーキテクチャのジョブランナー。
+Unix ドメインソケット C/S アーキテクチャの汎用ジョブランナー。
 サーバは systemd user service として常駐し、asyncio でジョブキューと子プロセスを管理する。
+プロンプト構築はスキル側が行い、ディスパッチャーは実行環境（sandbox / worktree）の構築とジョブ実行を担う。
 
 ### ソケットパス
 
@@ -163,35 +151,28 @@ Unix ドメインソケット C/S アーキテクチャのジョブランナー�
 
 | コマンド | 説明 |
 |---------|------|
-| `dispatch` | ライフサイクルを開始（計画→実行→評価を自動制御） |
-| `resume` | suspend 中のライフサイクルを再開 |
-| `run` | ジョブを直接投入（プロジェクト ID + プロンプト指定） |
-| `open` | 対話的セッションを tmux で開く |
-| `status` | 全ジョブ + ライフサイクルのステータスを返す |
+| `run` | プロンプトを受け取りジョブを実行（session_id 指定可） |
+| `resume` | 完了済みセッションを tmux で再開（session_id 指定） |
+| `open` | 対話的セッションを tmux で開く（worktree 指定可） |
+| `status` | 全ジョブのステータスを返す |
 | `cancel` | キュー内ジョブを取消 |
 | `kill` | 実行中ジョブを強制停止 |
 | `kill-all` | 全ジョブを強制停止 |
 | `wait` | ジョブ完了まで接続を保持 |
-
-### ジョブタイプ
-
-| タイプ | 説明 |
-|--------|------|
-| `execute` | タスク実行ジョブ（デフォルト） |
-| `evaluate` | 実行結果の評価ジョブ（達成条件の判定） |
-| `plan` | タスク計画・フェーズ分割ジョブ |
-
-### オーケストレーション
-
-プロジェクト定義に `orchestration` フィールドが設定されている場合、
-計画→実行→評価のフェーズベースチェーンが自動で動作する。
-詳細は `dispatcher-design.md` のオーケストレーションセクションを参照。
+| `log` | ジョブログを表示（CLI のみ） |
 
 詳細は `dispatcher-design.md` を参照。
 
 ## サンドボックス
 
 ジョブ実行時のプロセス隔離を提供する。プロファイルベースで構成を管理する。
+sandbox は純粋なプロセス隔離ツールであり、何を実行するかは呼び出し側が決める。
+
+```bash
+# 実行するコマンドを明示的に指定
+sandbox --sandbox-profile restricted-default --working-dir /path/to/repo -- claude -p "..."
+sandbox --sandbox-profile restricted-default --working-dir /path/to/repo -- bash -c "npm test"
+```
 
 | プロファイル | ネットワーク保護 | ネットワーク | 用途 |
 |-------------|---------------|-------------|------|
@@ -213,3 +194,14 @@ Unix ドメインソケット C/S アーキテクチャのジョブランナー�
 # ファイルから読み込む場合
 python3 ~/.claude/skills/my-tasks/scripts/sync-tasks.py --repo ~/.local/share/my-tasks --input /tmp/tasks.jsonl
 ```
+
+## オーケストレーション
+
+タスクに対する操作は以下の4つで構成される。全てスキル側（対話セッション or ダッシュボード）が起点。
+
+| 操作 | 説明 | 起点 |
+|------|------|------|
+| Plan | 対話セッションでタスクを精査・計画 | ダッシュボード → `open` |
+| Dispatch | `execute_prompt` をディスパッチャーの `run` に渡す | ダッシュボード or スキル |
+| Resume | 完了済みセッションを再開し軽微な修正 | ダッシュボード → `resume` |
+| Feedback | フィードバック収集 → 対応ジョブ Dispatch | ダッシュボード or スキル |

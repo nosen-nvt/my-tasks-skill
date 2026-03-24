@@ -32,8 +32,6 @@ class IndexEntry:
     title: str = ""
     status: str = "pending"
     project_id: str = ""
-    run_count: int = 0
-    generation: int = 1
 
     def to_dict(self) -> dict:
         return {
@@ -43,8 +41,6 @@ class IndexEntry:
             "title": self.title,
             "status": self.status,
             "project_id": self.project_id,
-            "run_count": self.run_count,
-            "generation": self.generation,
         }
 
     @classmethod
@@ -56,51 +52,16 @@ class IndexEntry:
             title=d.get("title", ""),
             status=d.get("status", "pending"),
             project_id=d.get("project_id", ""),
-            run_count=d.get("run_count", 0),
-            generation=d.get("generation", 1),
-        )
-
-
-@dataclass
-class Generation:
-    """generations[] の各エントリ。"""
-    seq: int
-    type: str = "dispatch"
-    status: str = "running"
-    started_at: str | None = None
-    finished_at: str | None = None
-    output: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        return {
-            "seq": self.seq,
-            "type": self.type,
-            "status": self.status,
-            "started_at": self.started_at,
-            "finished_at": self.finished_at,
-            "output": self.output,
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "Generation":
-        return cls(
-            seq=d.get("seq", 0),
-            type=d.get("type", "dispatch"),
-            status=d.get("status", "running"),
-            started_at=d.get("started_at"),
-            finished_at=d.get("finished_at"),
-            output=d.get("output") or {},
         )
 
 
 @dataclass
 class FeedbackItem:
-    """feedback[] の各エントリ。"""
+    """feedback グループ内の個別アイテム。"""
     source: str
     body: str = ""
     author: str = ""
     timestamp: str = ""
-    generation: int = 1
 
     def to_dict(self) -> dict:
         return {
@@ -108,7 +69,6 @@ class FeedbackItem:
             "author": self.author,
             "timestamp": self.timestamp,
             "body": self.body,
-            "generation": self.generation,
         }
 
     @classmethod
@@ -118,23 +78,55 @@ class FeedbackItem:
             body=d.get("body", ""),
             author=d.get("author", ""),
             timestamp=d.get("timestamp", ""),
-            generation=d.get("generation", 1),
+        )
+
+
+@dataclass
+class FeedbackGroup:
+    """収集タイミングごとにグループ化されたフィードバック。"""
+    collected_at: str
+    items: list[FeedbackItem] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "collected_at": self.collected_at,
+            "items": [item.to_dict() for item in self.items],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "FeedbackGroup":
+        items_raw = d.get("items") or []
+        return cls(
+            collected_at=d.get("collected_at", ""),
+            items=[FeedbackItem.from_dict(i) for i in items_raw if isinstance(i, dict)],
         )
 
 
 @dataclass
 class HistoryEntry:
-    """history[] の各エントリ（レガシー）。"""
-    generation: int = 0
+    """history[] の各エントリ。"""
+    dispatch_id: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+    exit_code: int | None = None
     summary: str = ""
 
     def to_dict(self) -> dict:
-        return {"generation": self.generation, "summary": self.summary}
+        return {
+            "dispatch_id": self.dispatch_id,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "exit_code": self.exit_code,
+            "summary": self.summary,
+        }
 
     @classmethod
     def from_dict(cls, d: dict) -> "HistoryEntry":
         return cls(
-            generation=d.get("generation", 0),
+            dispatch_id=d.get("dispatch_id", ""),
+            started_at=d.get("started_at", ""),
+            finished_at=d.get("finished_at", ""),
+            exit_code=d.get("exit_code"),
             summary=d.get("summary", ""),
         )
 
@@ -148,18 +140,18 @@ class TaskData:
     project_id: str = ""
     title: str = ""
     status: str = "pending"
-    generation: int = 1
     description: str = ""
-    open_questions: list[str] = field(default_factory=list)
     preconditions: list[str] = field(default_factory=list)
     acceptance_criteria: list[str] = field(default_factory=list)
     completion_actions: list = field(default_factory=list)
     execute_prompt: str = ""
-    generations: list[Generation] = field(default_factory=list)
-    history: list[HistoryEntry] = field(default_factory=list)
-    feedback: list[FeedbackItem] = field(default_factory=list)
-    feedback_cursor: dict[str, str] = field(default_factory=dict)
     pr_url: str = ""
+    branch: str = ""
+    dispatch_id: str = ""
+    session_id: str = ""
+    feedback: list[FeedbackGroup] = field(default_factory=list)
+    feedback_cursor: dict[str, str] = field(default_factory=dict)
+    history: list[HistoryEntry] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -169,25 +161,51 @@ class TaskData:
             "project_id": self.project_id,
             "title": self.title,
             "status": self.status,
-            "generation": self.generation,
             "description": self.description,
-            "open_questions": self.open_questions,
             "preconditions": self.preconditions,
             "acceptance_criteria": self.acceptance_criteria,
             "completion_actions": self.completion_actions,
             "execute_prompt": self.execute_prompt,
-            "generations": [g.to_dict() for g in self.generations],
-            "history": [h.to_dict() for h in self.history],
-            "feedback": [f.to_dict() for f in self.feedback],
-            "feedback_cursor": self.feedback_cursor,
             "pr_url": self.pr_url,
+            "branch": self.branch,
+            "dispatch_id": self.dispatch_id,
+            "session_id": self.session_id,
+            "feedback": [g.to_dict() for g in self.feedback],
+            "feedback_cursor": self.feedback_cursor,
+            "history": [h.to_dict() for h in self.history],
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "TaskData":
-        generations_raw = d.get("generations") or []
-        history_raw = d.get("history") or []
         feedback_raw = d.get("feedback") or []
+        history_raw = d.get("history") or []
+
+        # feedback の後方互換: v1 のフラットリスト形式を検出してグループ化
+        feedback_groups: list[FeedbackGroup] = []
+        if feedback_raw and isinstance(feedback_raw[0], dict):
+            if "collected_at" in feedback_raw[0]:
+                # v2 形式
+                feedback_groups = [FeedbackGroup.from_dict(g) for g in feedback_raw]
+            elif "source" in feedback_raw[0]:
+                # v1 フラット形式 → 単一グループに変換
+                items = [FeedbackItem.from_dict(f) for f in feedback_raw]
+                if items:
+                    feedback_groups = [FeedbackGroup(
+                        collected_at=items[0].timestamp or now_iso(),
+                        items=items,
+                    )]
+
+        # history の後方互換: v1 の generation ベース形式
+        history_entries: list[HistoryEntry] = []
+        if history_raw and isinstance(history_raw[0], dict):
+            if "dispatch_id" in history_raw[0]:
+                history_entries = [HistoryEntry.from_dict(h) for h in history_raw]
+            elif "generation" in history_raw[0]:
+                # v1 形式 → 変換
+                for h in history_raw:
+                    history_entries.append(HistoryEntry(
+                        summary=h.get("summary", ""),
+                    ))
 
         return cls(
             id=d.get("id", ""),
@@ -196,18 +214,18 @@ class TaskData:
             project_id=d.get("project_id", ""),
             title=d.get("title", ""),
             status=d.get("status", "pending"),
-            generation=d.get("generation", 1),
             description=d.get("description", ""),
-            open_questions=d.get("open_questions") or [],
             preconditions=d.get("preconditions") or [],
             acceptance_criteria=d.get("acceptance_criteria") or [],
             completion_actions=d.get("completion_actions") or [],
             execute_prompt=d.get("execute_prompt", ""),
-            generations=[Generation.from_dict(g) for g in generations_raw if isinstance(g, dict)],
-            history=[HistoryEntry.from_dict(h) for h in history_raw if isinstance(h, dict)],
-            feedback=[FeedbackItem.from_dict(f) for f in feedback_raw if isinstance(f, dict)],
-            feedback_cursor=d.get("feedback_cursor") or {},
             pr_url=d.get("pr_url", ""),
+            branch=d.get("branch", ""),
+            dispatch_id=d.get("dispatch_id", ""),
+            session_id=d.get("session_id", ""),
+            feedback=feedback_groups,
+            feedback_cursor=d.get("feedback_cursor") or {},
+            history=history_entries,
         )
 
     def to_index_entry(self) -> "IndexEntry":
@@ -218,7 +236,6 @@ class TaskData:
             title=self.title,
             status=self.status,
             project_id=self.project_id,
-            generation=self.generation,
         )
 
 
@@ -284,11 +301,7 @@ def save_index(tasks_dir: Path, entries: list[IndexEntry]) -> None:
 # ---------------------------------------------------------------------------
 
 def generate_task_id(index_entries: list[IndexEntry], tasks_dir: Path | None = None) -> str:
-    """YYYYMMDD-NNN 形式のタスク ID を生成する。
-
-    GC でインデックスから削除されたタスクの ID を再利用しないよう、
-    発行済みの最大シーケンス番号を .seq ファイルに永続化する。
-    """
+    """YYYYMMDD-NNN 形式のタスク ID を生成する。"""
     date_prefix = today_str()
 
     max_seq = 0
@@ -342,7 +355,6 @@ def create_task_yaml(tasks_dir: Path, entry: IndexEntry) -> None:
         project_id=entry.project_id,
         title=entry.title,
         status=entry.status,
-        generation=entry.generation,
     )
     yaml_path = tasks_dir / f"{entry.id}.yaml"
     _dump_yaml(task_data.to_dict(), yaml_path)
@@ -364,36 +376,9 @@ def update_task_yaml(tasks_dir: Path, entry: IndexEntry) -> None:
 
     data.title = entry.title
     data.status = entry.status
-    data.generation = entry.generation
     data.remote_id = entry.remote_id or data.remote_id
     data.datasource_id = entry.datasource_id
     data.project_id = entry.project_id or data.project_id
-
-    save_task_yaml(tasks_dir, task_id, data)
-
-
-def reopen_task_yaml(tasks_dir: Path, entry: IndexEntry, prev_summary: str = "") -> None:
-    """done タスクを再オープンする。history に前世代サマリを追加する。"""
-    task_id = entry.id
-    yaml_path = tasks_dir / f"{task_id}.yaml"
-
-    if not yaml_path.exists():
-        create_task_yaml(tasks_dir, entry)
-        return
-
-    data = load_task_yaml(tasks_dir, task_id)
-    if data is None:
-        create_task_yaml(tasks_dir, entry)
-        return
-
-    prev_gen = entry.generation - 1
-    data.status = entry.status
-    data.generation = entry.generation
-
-    if entry.title:
-        data.title = entry.title
-
-    data.history.append(HistoryEntry(generation=prev_gen, summary=prev_summary or ""))
 
     save_task_yaml(tasks_dir, task_id, data)
 
@@ -430,92 +415,3 @@ def update_index_status(tasks_dir: Path, task_id: str, status: str) -> None:
             entry.status = status
             break
     save_index(tasks_dir, entries)
-
-
-# ---------------------------------------------------------------------------
-# Generation 管理
-# ---------------------------------------------------------------------------
-
-def start_generation(tasks_dir: Path, task_id: str, gen_type: str, seq: int | None = None) -> Generation:
-    """generations[] に新エントリを追加する。
-
-    Args:
-        gen_type: "dispatch" | "interactive"
-        seq: 明示指定する場合。None なら自動採番。
-
-    Returns:
-        追加された Generation エントリ。
-    """
-    data = load_task_yaml(tasks_dir, task_id)
-    if data is None:
-        raise FileNotFoundError(f"Task not found: {task_id}")
-
-    if seq is None:
-        seq = (data.generations[-1].seq + 1) if data.generations else 1
-
-    gen = Generation(
-        seq=seq,
-        type=gen_type,
-        status="running",
-        started_at=now_iso(),
-    )
-    data.generations.append(gen)
-    save_task_yaml(tasks_dir, task_id, data)
-    return gen
-
-
-def finish_generation(tasks_dir: Path, task_id: str, seq: int, status: str, output: dict | None = None) -> None:
-    """generations[seq] の status, finished_at, output を更新する。
-
-    Args:
-        status: done | needs_input | plan_ready | rejected | review_needed | aborted
-        output: Generation の出力データ。
-    """
-    data = load_task_yaml(tasks_dir, task_id)
-    if data is None:
-        return
-
-    for gen in data.generations:
-        if gen.seq == seq:
-            gen.status = status
-            gen.finished_at = now_iso()
-            if output is not None:
-                gen.output = output
-            break
-
-    save_task_yaml(tasks_dir, task_id, data)
-
-
-def get_latest_generation(tasks_dir: Path, task_id: str) -> Generation | None:
-    """generations[-1] を返す。generations が空なら None。"""
-    data = load_task_yaml(tasks_dir, task_id)
-    if data is None:
-        return None
-    if not data.generations:
-        return None
-    return data.generations[-1]
-
-
-def migrate_history_to_generations(data: TaskData) -> TaskData:
-    """history[] → generations[] の自動変換（メモリ上のみ）。
-
-    既存の history[] エントリを generations[] 形式に変換する。
-    既に generations[] が存在する場合はそのまま返す。
-    """
-    if data.generations:
-        return data
-
-    if not data.history:
-        return data
-
-    data.generations = [
-        Generation(
-            seq=h.generation,
-            type="dispatch",
-            status="done",
-            output={"summary": h.summary},
-        )
-        for h in data.history
-    ]
-
-    return data

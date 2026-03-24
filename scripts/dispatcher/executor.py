@@ -18,7 +18,6 @@ from lib.worktree import ensure_worktree
 
 if TYPE_CHECKING:
     from .host_cmd import HostCommandBroker
-    from .lifecycle import LifecycleManager
 
 
 class ExecutorMixin:
@@ -32,10 +31,8 @@ class ExecutorMixin:
     max_slots: int
     repo_dir: Path
     host_cmd_broker: HostCommandBroker
-    lifecycle_mgr: LifecycleManager
 
     def _log_path(self, dispatch_id: str) -> Path: raise NotImplementedError
-    def _result_path(self, dispatch_id: str) -> Path: raise NotImplementedError
     def generate_dispatch_id(self, project_id: str) -> str: raise NotImplementedError
     def count_running(self) -> int: raise NotImplementedError
     def running_working_dirs(self) -> set[str]: raise NotImplementedError
@@ -71,7 +68,11 @@ class ExecutorMixin:
             broker_token = uuid.uuid4().hex
             self.host_cmd_broker.register(broker_token, job.host_commands)
 
-        system_prompt = build_system_prompt(job, self._result_path(job.dispatch_id))
+        system_prompt = build_system_prompt(
+            working_dir=job.working_dir,
+            sandbox_profile_id=job.sandbox_profile_id,
+            host_commands=job.host_commands,
+        )
         log_path = self._log_path(job.dispatch_id)
         log_file = None
         try:
@@ -84,6 +85,8 @@ class ExecutorMixin:
                 "-p", job.prompt,
                 "--append-system-prompt", system_prompt,
             ]
+            if job.session_id:
+                command.extend(["--session-id", job.session_id])
 
             exec_args = sandbox_exec.build_exec_args(
                 sandbox_profile=job.sandbox_profile_id,
@@ -154,10 +157,6 @@ class ExecutorMixin:
             log.info(f"Job finished: {job.dispatch_id} status={job.status} exit_code={job.exit_code}")
 
         self._notify_waiters(job)
-
-        if job.lifecycle_id:
-            await self.lifecycle_mgr.on_job_complete(job)
-
         await self.drain_queue()
 
     async def drain_queue(self):
@@ -201,64 +200,3 @@ class ExecutorMixin:
         for future in waiters:
             if not future.done():
                 future.set_result(result)
-
-    async def _dispatch_internal(
-        self, project_id: str, prompt: str, job_type: str,
-        lifecycle_id: str | None = None, dispatch_id_hint: str | None = None,
-        run: int | None = None, branch: str | None = None,
-    ) -> str:
-        project = sandbox_exec.load_project(project_id, self.repo_dir)
-        if not project:
-            log.error(f"Internal dispatch: project not found: {project_id}")
-            return ""
-
-        working_dir = project.get("working_directory", "")
-        if not working_dir or not Path(working_dir).is_dir():
-            log.error(f"Internal dispatch: invalid working_directory for project: {project_id}")
-            return ""
-
-        try:
-            sandbox_profile_id, env_files, host_commands, extra_binds = \
-                sandbox_exec.resolve_project_sandbox_params(project)
-        except (FileNotFoundError, ValueError) as e:
-            log.error(f"Internal dispatch: sandbox params error: {e}")
-            return ""
-
-        # ワークツリー解決
-        if branch:
-            try:
-                wt_path = ensure_worktree(working_dir, branch)
-            except RuntimeError as e:
-                log.error(f"Internal dispatch: worktree error: {e}")
-                return ""
-            extra_binds = list(extra_binds) + [
-                {"source": f"{working_dir}/.git", "target": f"{working_dir}/.git", "mode": "rw"},
-            ]
-            working_dir = str(wt_path)
-
-        dispatch_id = dispatch_id_hint or self.generate_dispatch_id(project_id)
-
-        job = Job(
-            dispatch_id=dispatch_id,
-            project_id=project_id,
-            prompt=prompt,
-            working_dir=working_dir,
-            job_type=job_type,
-            sandbox_profile_id=sandbox_profile_id,
-            env_files=env_files,
-            host_commands=host_commands,
-            extra_binds=extra_binds,
-            lifecycle_id=lifecycle_id,
-            run=run,
-        )
-        self.jobs[dispatch_id] = job
-        self._save_jobs()
-
-        if self.count_running() < self.max_slots and working_dir not in self.running_working_dirs():
-            asyncio.create_task(self.execute_job(job))
-            log.info(f"Internal dispatch: {job_type} job started: {dispatch_id}")
-        else:
-            self.queue.append(job)
-            log.info(f"Internal dispatch: {job_type} job queued: {dispatch_id}")
-
-        return dispatch_id

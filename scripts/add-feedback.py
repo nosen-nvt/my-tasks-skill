@@ -11,7 +11,7 @@ import json
 import sys
 from pathlib import Path
 
-from lib.task_store import FeedbackItem, load_task_yaml, save_task_yaml, now_iso
+from lib.task_store import FeedbackItem, FeedbackGroup, load_task_yaml, save_task_yaml, now_iso
 
 
 def main() -> None:
@@ -54,16 +54,21 @@ def main() -> None:
         source="user",
         timestamp=now_iso(),
         body=args.body,
-        generation=task_data.generation,
     )
-    task_data.feedback.append(new_item)
+    group = FeedbackGroup(
+        collected_at=now_iso(),
+        items=[new_item],
+    )
+    task_data.feedback.append(group)
 
     save_task_yaml(tasks_dir, task_id, task_data)
 
+    total_items = sum(len(g.items) for g in task_data.feedback)
     report = {
         "task_id": task_id,
         "feedback_item": new_item.to_dict(),
-        "total_feedback_count": len(task_data.feedback),
+        "total_feedback_groups": len(task_data.feedback),
+        "total_feedback_items": total_items,
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

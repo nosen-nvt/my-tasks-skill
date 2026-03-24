@@ -1,9 +1,10 @@
-"""FastAPI アプリケーション。"""
+"""FastAPI アプリケーション (v2)。"""
 
 import asyncio
 import importlib.util
 import json
 import os
+import uuid
 from pathlib import Path
 
 import yaml
@@ -13,14 +14,14 @@ from fastapi.staticfiles import StaticFiles
 
 from .watcher import FileWatcher
 from lib.task_store import (
-    IndexEntry, FeedbackItem,
+    IndexEntry, FeedbackItem, FeedbackGroup,
     load_index, save_index, load_task_yaml, save_task_yaml,
-    reopen_task_yaml, update_task_yaml,
+    update_task_yaml, now_iso,
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-# collect-feedback.py をモジュールとしてインポート（外部コマンド呼び出しロジック用）
+# collect-feedback.py をモジュールとしてインポート
 _script_dir = Path(__file__).resolve().parent.parent
 _cf_spec = importlib.util.spec_from_file_location("collect_feedback", _script_dir / "collect-feedback.py")
 _collect_feedback_mod = importlib.util.module_from_spec(_cf_spec)
@@ -94,13 +95,12 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         await writer.wait_closed()
         return json.loads(data)
 
-    # --- API ---
+    # --- Read API ---
 
     @app.get("/api/projects")
     async def api_projects() -> list[dict]:
         projects = read_json_dir(repo_dir / "projects")
         tasks = read_jsonl(repo_dir / "tasks" / "index.jsonl")
-        # プロジェクトごとのタスク数集計
         counts: dict[str, dict[str, int]] = {}
         for t in tasks:
             pid = t.get("project_id") or t.get("project", "")
@@ -133,46 +133,11 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             except Exception:
                 pass
             return JSONResponse({"id": task_id, "content": content})
-        # 後方互換: .md ファイルが残っている場合
-        md_path = repo_dir / "tasks" / f"{task_id}.md"
-        if md_path.exists():
-            content = md_path.read_text(encoding="utf-8")
-            return JSONResponse({"id": task_id, "content": content})
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    @app.get("/api/lifecycles")
-    async def api_lifecycles() -> list[dict]:
-        return read_jsonl(dispatch_dir / "lifecycles.jsonl")
-
-    @app.get("/api/lifecycles/{lifecycle_id}/context")
-    async def api_lifecycle_context(lifecycle_id: str) -> JSONResponse:
-        lifecycles = read_jsonl(dispatch_dir / "lifecycles.jsonl")
-        entry = next((lc for lc in lifecycles if lc.get("lifecycle_id") == lifecycle_id), None)
-        if entry is None:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        context_path_str = entry.get("context_path")
-        if not context_path_str:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        context_path = Path(context_path_str)
-        if not context_path.exists() or context_path.stat().st_size == 0:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        content = context_path.read_text(encoding="utf-8")
-        # YAML ファイルなら構造化データとして返却
-        if context_path.suffix == ".yaml":
-            try:
-                data = yaml.safe_load(content)
-                return JSONResponse({"lifecycle_id": lifecycle_id, "context": data})
-            except Exception:
-                pass
-        # fallback: テキストとして返却
-        return JSONResponse({"lifecycle_id": lifecycle_id, "content": content})
-
     @app.get("/api/jobs")
-    async def api_jobs(lifecycle_id: str | None = Query(default=None)) -> list[dict]:
-        jobs = read_jsonl(dispatch_dir / "jobs.jsonl")
-        if lifecycle_id:
-            jobs = [j for j in jobs if j.get("lifecycle_id") == lifecycle_id]
-        return jobs
+    async def api_jobs() -> list[dict]:
+        return read_jsonl(dispatch_dir / "jobs.jsonl")
 
     @app.get("/api/jobs/{dispatch_id}/log")
     async def api_job_log(dispatch_id: str, tail: int = Query(default=200)) -> JSONResponse:
@@ -184,27 +149,143 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             lines = lines[-tail:]
         return JSONResponse({"dispatch_id": dispatch_id, "lines": lines})
 
-    @app.get("/api/jobs/{dispatch_id}/result")
-    async def api_job_result(dispatch_id: str) -> JSONResponse:
-        result_path = dispatch_dir / f"{dispatch_id}.result.json"
-        if not result_path.exists():
-            return JSONResponse({"error": "not found"}, status_code=404)
-        try:
-            with open(result_path, encoding="utf-8") as f:
-                data = json.load(f)
-            return JSONResponse(data)
-        except (json.JSONDecodeError, OSError):
-            return JSONResponse({"error": "parse error"}, status_code=500)
+    # --- Action API ---
 
-    # --- Action endpoints ---
+    def _load_datasource(datasource_id: str) -> dict | None:
+        if not datasource_id:
+            return None
+        ds_path = repo_dir / "datasources" / f"{datasource_id}.json"
+        if not ds_path.exists():
+            return None
+        with open(ds_path, encoding="utf-8") as f:
+            return json.load(f)
+
+    @app.post("/api/tasks/{task_id}/plan")
+    async def api_plan(task_id: str) -> JSONResponse:
+        """Plan: 対話セッションを起動してタスクを計画する。"""
+        tasks_dir = repo_dir / "tasks"
+        index_entries = load_index(tasks_dir)
+        entry = next((e for e in index_entries if e.id == task_id), None)
+        if entry is None:
+            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+
+        task_data = load_task_yaml(tasks_dir, task_id)
+        if task_data is None:
+            return JSONResponse({"ok": False, "error": "task yaml not found"}, status_code=404)
+
+        datasource = _load_datasource(task_data.datasource_id)
+
+        from dashboard.interactive_prompt import build_plan_session_prompts
+        system_prompt, prompt = build_plan_session_prompts(task_data, datasource, str(repo_dir))
+
+        request_data = {
+            "command": "open",
+            "system_prompt": system_prompt,
+            "prompt": prompt,
+            "window_name": f"plan-{task_id}",
+            "activate": True,
+        }
+        if entry.project_id:
+            request_data["project_id"] = entry.project_id
+
+        try:
+            result = await dispatcher_send(request_data)
+        except (ConnectionRefusedError, FileNotFoundError):
+            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
+        return JSONResponse(result)
+
+    @app.post("/api/tasks/{task_id}/dispatch")
+    async def api_dispatch(task_id: str) -> JSONResponse:
+        """Dispatch: execute_prompt を使ってジョブを実行する。"""
+        tasks_dir = repo_dir / "tasks"
+
+        async with index_lock:
+            index_entries = load_index(tasks_dir)
+        entry = next((e for e in index_entries if e.id == task_id), None)
+        if entry is None:
+            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+
+        task_data = load_task_yaml(tasks_dir, task_id)
+        if task_data is None:
+            return JSONResponse({"ok": False, "error": "task yaml not found"}, status_code=404)
+
+        prompt = task_data.execute_prompt
+        if not prompt:
+            return JSONResponse({"ok": False, "error": "execute_prompt が空です。先に Plan を実行してください"})
+
+        project_id = entry.project_id
+        if not project_id:
+            return JSONResponse({"ok": False, "error": "project_id が未設定です"})
+
+        session_id = str(uuid.uuid4())
+
+        try:
+            result = await dispatcher_send({
+                "command": "run",
+                "project_id": project_id,
+                "prompt": prompt,
+                "session_id": session_id,
+            })
+        except (ConnectionRefusedError, FileNotFoundError):
+            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
+
+        if result.get("ok"):
+            dispatch_id = result.get("dispatch_id", "")
+            returned_session_id = result.get("session_id", session_id)
+
+            # タスクを in_progress に更新し、dispatch_id と session_id を記録
+            async with index_lock:
+                index_entries = load_index(tasks_dir)
+                for e in index_entries:
+                    if e.id == task_id:
+                        e.status = "in_progress"
+                        break
+                save_index(tasks_dir, index_entries)
+
+            task_data.status = "in_progress"
+            task_data.dispatch_id = dispatch_id
+            task_data.session_id = returned_session_id
+            save_task_yaml(tasks_dir, task_id, task_data)
+
+        return JSONResponse(result)
+
+    @app.post("/api/tasks/{task_id}/resume")
+    async def api_resume(task_id: str) -> JSONResponse:
+        """Resume: 完了済みセッションを再開する。"""
+        tasks_dir = repo_dir / "tasks"
+        task_data = load_task_yaml(tasks_dir, task_id)
+        if task_data is None:
+            return JSONResponse({"ok": False, "error": "task yaml not found"}, status_code=404)
+
+        session_id = task_data.session_id
+        if not session_id:
+            return JSONResponse({"ok": False, "error": "session_id が記録されていません"})
+
+        index_entries = load_index(tasks_dir)
+        entry = next((e for e in index_entries if e.id == task_id), None)
+        project_id = entry.project_id if entry else task_data.project_id
+        if not project_id:
+            return JSONResponse({"ok": False, "error": "project_id が未設定です"})
+
+        try:
+            result = await dispatcher_send({
+                "command": "resume",
+                "project_id": project_id,
+                "session_id": session_id,
+                "window_name": f"resume-{task_id}",
+                "activate": True,
+            })
+        except (ConnectionRefusedError, FileNotFoundError):
+            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
+        return JSONResponse(result)
 
     def _collect_feedback_for_task(tasks_dir: Path, datasources_dir: Path, task_id: str) -> int:
-        """タスクに対するフィードバックを Jira/Bitbucket から収集する。収集件数を返す。"""
+        """タスクに対するフィードバックを外部ソースから収集する。収集件数を返す。"""
         task_data = load_task_yaml(tasks_dir, task_id)
         if not task_data:
             return 0
 
-        collected_count = 0
+        collected_items: list[dict] = []
 
         # Jira コメント収集
         if task_data.datasource_id:
@@ -217,9 +298,7 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
                     new_comments, new_cursor = _collect_feedback_mod.collect_jira_comments(
                         task_data.remote_id, site, jira_cursor,
                     )
-                    for item in new_comments:
-                        task_data.feedback.append(FeedbackItem.from_dict({**item, "generation": task_data.generation}))
-                    collected_count += len(new_comments)
+                    collected_items.extend(new_comments)
                     if new_cursor:
                         task_data.feedback_cursor["jira_comment"] = new_cursor
 
@@ -229,9 +308,7 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             new_comments, new_cursor = _collect_feedback_mod.collect_bitbucket_pr_comments(
                 task_data.pr_url, bb_cursor,
             )
-            for item in new_comments:
-                task_data.feedback.append(FeedbackItem.from_dict({**item, "generation": task_data.generation}))
-            collected_count += len(new_comments)
+            collected_items.extend(new_comments)
             if new_cursor:
                 task_data.feedback_cursor["bitbucket_pr"] = new_cursor
 
@@ -241,56 +318,86 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             new_comments, new_cursor = _collect_feedback_mod.collect_github_pr_comments(
                 task_data.pr_url, gh_cursor,
             )
-            for item in new_comments:
-                task_data.feedback.append(FeedbackItem.from_dict({**item, "generation": task_data.generation}))
-            collected_count += len(new_comments)
+            collected_items.extend(new_comments)
             if new_cursor:
                 task_data.feedback_cursor["github_pr"] = new_cursor
 
-        if collected_count > 0:
+        if collected_items:
+            group = FeedbackGroup(
+                collected_at=now_iso(),
+                items=[FeedbackItem.from_dict(item) for item in collected_items],
+            )
+            task_data.feedback.append(group)
             save_task_yaml(tasks_dir, task_id, task_data)
 
-        return collected_count
+        return len(collected_items)
 
-    @app.post("/api/tasks/{task_id}/dispatch")
-    async def api_dispatch(task_id: str) -> JSONResponse:
+    @app.post("/api/tasks/{task_id}/feedback")
+    async def api_feedback(task_id: str) -> JSONResponse:
+        """Feedback: フィードバックを収集し、対応ジョブを Dispatch する。"""
         tasks_dir = repo_dir / "tasks"
 
-        async with index_lock:
-            index_entries = load_index(tasks_dir)
-        entry = next((e for e in index_entries if e.id == task_id), None)
-        if entry is None:
-            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-        if entry.status != "pending":
-            return JSONResponse({"ok": False, "error": f"タスクは {entry.status} 状態です（pending のみ実行可能）"})
+        # フィードバック収集
+        collected = await asyncio.to_thread(
+            _collect_feedback_for_task, tasks_dir, repo_dir / "datasources", task_id,
+        )
 
-        project_id = entry.project_id
-        generation = entry.generation
+        if collected == 0:
+            return JSONResponse({"ok": True, "message": "新しいフィードバックはありません", "collected": 0})
 
+        # タスクデータを再読み込み
         task_data = load_task_yaml(tasks_dir, task_id)
-        lifecycle_id = f"{task_id}-g{generation}"
+        if task_data is None:
+            return JSONResponse({"ok": False, "error": "task yaml not found"}, status_code=404)
+
+        index_entries = load_index(tasks_dir)
+        entry = next((e for e in index_entries if e.id == task_id), None)
+        project_id = entry.project_id if entry else task_data.project_id
+        if not project_id:
+            return JSONResponse({"ok": True, "message": f"フィードバック {collected} 件収集（project_id 未設定のため Dispatch はスキップ）", "collected": collected})
+
+        # 最新のフィードバックグループ
+        latest_group = task_data.feedback[-1] if task_data.feedback else None
+        if not latest_group:
+            return JSONResponse({"ok": True, "message": f"フィードバック {collected} 件収集", "collected": collected})
+
+        # フィードバック対応プロンプトの生成
+        fb_lines = []
+        for item in latest_group.items:
+            fb_lines.append(f"- [{item.source}] {item.author}: {item.body}")
+        fb_text = "\n".join(fb_lines)
+
+        base_prompt = task_data.execute_prompt or task_data.description or task_data.title
+        prompt = f"""{base_prompt}
+
+# フィードバック対応 ({latest_group.collected_at})
+
+以下のフィードバックに対応してください:
+
+{fb_text}
+
+変更をコミットし、PR を更新してください。"""
+
+        session_id = str(uuid.uuid4())
 
         try:
             result = await dispatcher_send({
-                "command": "dispatch",
+                "command": "run",
                 "project_id": project_id,
-                "prompt": (task_data.description if task_data else "") or entry.title,
-                "context": task_data.to_dict() if task_data else None,
-                "lifecycle_id": lifecycle_id,
+                "prompt": prompt,
+                "session_id": session_id,
             })
         except (ConnectionRefusedError, FileNotFoundError):
             return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
 
         if result.get("ok"):
-            async with index_lock:
-                index_entries = load_index(tasks_dir)
-                for e in index_entries:
-                    if e.id == task_id:
-                        e.status = "in_progress"
-                        break
-                save_index(tasks_dir, index_entries)
+            dispatch_id = result.get("dispatch_id", "")
+            returned_session_id = result.get("session_id", session_id)
+            task_data.dispatch_id = dispatch_id
+            task_data.session_id = returned_session_id
+            save_task_yaml(tasks_dir, task_id, task_data)
 
-        return JSONResponse(result)
+        return JSONResponse({**result, "collected": collected})
 
     @app.post("/api/tasks/{task_id}/complete")
     async def api_complete(task_id: str) -> JSONResponse:
@@ -301,8 +408,6 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             entry = next((e for e in index_entries if e.id == task_id), None)
             if entry is None:
                 return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-            if entry.status not in ("in_progress", "pending"):
-                return JSONResponse({"ok": False, "error": f"タスクは {entry.status} 状態です（in_progress/pending のみ完了可能）"})
 
             entry.status = "done"
             update_task_yaml(tasks_dir, entry)
@@ -310,8 +415,8 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
 
         return JSONResponse({"ok": True})
 
-    @app.post("/api/tasks/{task_id}/reopen")
-    async def api_reopen(task_id: str) -> JSONResponse:
+    @app.post("/api/tasks/{task_id}/abort")
+    async def api_abort(task_id: str) -> JSONResponse:
         tasks_dir = repo_dir / "tasks"
 
         async with index_lock:
@@ -319,146 +424,12 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             entry = next((e for e in index_entries if e.id == task_id), None)
             if entry is None:
                 return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-            if entry.status not in ("in_progress", "done", "aborted"):
-                return JSONResponse({"ok": False, "error": f"タスクは {entry.status} 状態です（in_progress/done/aborted のみ再オープン可能）"})
 
-            old_generation = entry.generation
-            entry.status = "pending"
-            entry.generation = old_generation + 1
-            reopen_task_yaml(tasks_dir, entry)
+            entry.status = "aborted"
+            update_task_yaml(tasks_dir, entry)
             save_index(tasks_dir, index_entries)
 
         return JSONResponse({"ok": True})
-
-    @app.post("/api/tasks/{task_id}/redispatch")
-    async def api_redispatch(task_id: str) -> JSONResponse:
-        tasks_dir = repo_dir / "tasks"
-
-        # ステータスチェック
-        async with index_lock:
-            index_entries = load_index(tasks_dir)
-            entry = next((e for e in index_entries if e.id == task_id), None)
-            if entry is None:
-                return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-            if entry.status not in ("done", "aborted", "in_progress", "in_review"):
-                return JSONResponse({"ok": False, "error": f"タスクは {entry.status} 状態です（done/aborted/in_progress/in_review のみ再実行可能）"})
-
-        # フィードバック収集（再オープン前 = 正しい generation でタグ付け）
-        await asyncio.to_thread(
-            _collect_feedback_for_task, tasks_dir, repo_dir / "datasources", task_id,
-        )
-
-        # 前世代のライフサイクル context からサマリーを取得
-        prev_summary = ""
-        async with index_lock:
-            index_entries = load_index(tasks_dir)
-            entry = next((e for e in index_entries if e.id == task_id), None)
-            if entry is None:
-                return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-            old_generation = entry.generation
-
-        prev_lc_id = f"{task_id}-g{old_generation}"
-        lifecycles = read_jsonl(dispatch_dir / "lifecycles.jsonl")
-        prev_lc = next((lc for lc in lifecycles if lc.get("lifecycle_id") == prev_lc_id), None)
-        if prev_lc and prev_lc.get("context_path"):
-            try:
-                ctx = yaml.safe_load(Path(prev_lc["context_path"]).read_text(encoding="utf-8")) or {}
-                phase_summaries = [
-                    f"Phase {i+1} ({p.get('goal', '')}): {p.get('summary', '')}"
-                    for i, p in enumerate(ctx.get("phases", []))
-                    if p.get("status") == "done" and p.get("summary")
-                ]
-                if phase_summaries:
-                    prev_summary = "; ".join(phase_summaries)
-            except (OSError, yaml.YAMLError):
-                pass
-
-        # 再オープン
-        async with index_lock:
-            index_entries = load_index(tasks_dir)
-            entry = next((e for e in index_entries if e.id == task_id), None)
-            if entry is None:
-                return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-
-            old_generation = entry.generation
-            entry.status = "pending"
-            entry.generation = old_generation + 1
-            reopen_task_yaml(tasks_dir, entry, prev_summary=prev_summary)
-            save_index(tasks_dir, index_entries)
-
-        project_id = entry.project_id
-        generation = entry.generation
-
-        task_data = load_task_yaml(tasks_dir, task_id)
-        lifecycle_id = f"{task_id}-g{generation}"
-
-        try:
-            result = await dispatcher_send({
-                "command": "dispatch",
-                "project_id": project_id,
-                "prompt": (task_data.description if task_data else "") or entry.title,
-                "context": task_data.to_dict() if task_data else None,
-                "lifecycle_id": lifecycle_id,
-            })
-        except (ConnectionRefusedError, FileNotFoundError):
-            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
-
-        if result.get("ok"):
-            async with index_lock:
-                index_entries = load_index(tasks_dir)
-                for e in index_entries:
-                    if e.id == task_id:
-                        e.status = "in_progress"
-                        break
-                save_index(tasks_dir, index_entries)
-
-        return JSONResponse(result)
-
-    @app.post("/api/lifecycles/{lifecycle_id}/open-session")
-    async def api_open_session(lifecycle_id: str) -> JSONResponse:
-        from dashboard.interactive_prompt import build_lifecycle_session_prompts
-
-        lifecycles = read_jsonl(dispatch_dir / "lifecycles.jsonl")
-        entry = next((lc for lc in lifecycles if lc.get("lifecycle_id") == lifecycle_id), None)
-        if entry is None:
-            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-        if entry.get("status") not in ("suspend", "approval_gate"):
-            return JSONResponse({"ok": False, "error": f"ライフサイクルは {entry.get('status')} 状態です（suspend/approval_gate のみ対話可能）"})
-
-        project_id = entry.get("project_id", "")
-        context_path_str = entry.get("context_path", "")
-        context_path = Path(context_path_str) if context_path_str else None
-
-        # コンテキスト YAML を読み込み
-        ctx = {}
-        if context_path and context_path.exists():
-            try:
-                ctx = yaml.safe_load(context_path.read_text(encoding="utf-8")) or {}
-            except Exception:
-                pass
-
-        system_prompt, prompt = build_lifecycle_session_prompts(entry, ctx, str(dispatch_dir))
-
-        try:
-            result = await dispatcher_send({
-                "command": "open",
-                "project_id": project_id,
-                "system_prompt": system_prompt,
-                "prompt": prompt,
-                "activate": True,
-            })
-        except (ConnectionRefusedError, FileNotFoundError):
-            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
-        return JSONResponse(result)
-
-    def _load_datasource(datasource_id: str) -> dict | None:
-        if not datasource_id:
-            return None
-        ds_path = repo_dir / "datasources" / f"{datasource_id}.json"
-        if not ds_path.exists():
-            return None
-        with open(ds_path, encoding="utf-8") as f:
-            return json.load(f)
 
     @app.post("/api/tasks/{task_id}/open-session")
     async def api_task_open_session(task_id: str) -> JSONResponse:
@@ -467,10 +438,7 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         entry = next((e for e in index_entries if e.id == task_id), None)
         if entry is None:
             return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-        if entry.status not in ("pending", "in_progress", "in_review"):
-            return JSONResponse({"ok": False, "error": f"タスクは {entry.status} 状態です（pending/in_progress/in_review のみ対話可能）"})
 
-        # タスクデータとデータソースを読み込み
         task_data = load_task_yaml(tasks_dir, task_id)
         if task_data is None:
             from lib.task_store import TaskData
@@ -483,7 +451,6 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             task_data.remote_id = entry.remote_id
         datasource = _load_datasource(task_data.datasource_id)
 
-        # プロンプト構築（ディスパッチャーから移動）
         from dashboard.interactive_prompt import build_task_session_prompts
         system_prompt, prompt = build_task_session_prompts(task_data, datasource, str(repo_dir))
 
@@ -504,27 +471,7 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
         return JSONResponse(result)
 
-    @app.post("/api/lifecycles/{lifecycle_id}/approve")
-    async def api_approve(lifecycle_id: str) -> JSONResponse:
-        try:
-            result = await dispatcher_send({
-                "command": "approve",
-                "lifecycle_id": lifecycle_id,
-            })
-        except (ConnectionRefusedError, FileNotFoundError):
-            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
-        return JSONResponse(result)
-
-    @app.post("/api/lifecycles/{lifecycle_id}/reject")
-    async def api_reject(lifecycle_id: str) -> JSONResponse:
-        try:
-            result = await dispatcher_send({
-                "command": "reject",
-                "lifecycle_id": lifecycle_id,
-            })
-        except (ConnectionRefusedError, FileNotFoundError):
-            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
-        return JSONResponse(result)
+    # --- Sync ---
 
     @app.post("/api/sync")
     async def api_sync() -> JSONResponse:
@@ -547,7 +494,6 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
             fetch_script = repo_dir / "scripts" / "fetch-all.sh"
             sync_script = Path(__file__).resolve().parent.parent / "sync-tasks.py"
 
-            # fetch と sync を分離: fetch 失敗時に部分データで sync しない
             fetch_proc = await asyncio.create_subprocess_exec(
                 "bash", str(fetch_script),
                 stdout=asyncio.subprocess.PIPE,
@@ -572,6 +518,8 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         finally:
             sync_state["running"] = False
 
+    # --- Events ---
+
     @app.get("/api/events")
     async def api_events() -> StreamingResponse:
         async def event_stream():
@@ -591,18 +539,7 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-    @app.get("/", response_class=HTMLResponse)
-    async def index() -> HTMLResponse:
-        html_path = STATIC_DIR / "index.html"
-        html = html_path.read_text(encoding="utf-8")
-        if base_path:
-            html = html.replace("/static/style.css", f"{base_path}/static/style.css")
-            html = html.replace("/static/app.js", f"{base_path}/static/app.js")
-        html = html.replace(
-            "</head>",
-            f'<script>window.__BASE_PATH__ = "{base_path}";</script>\n</head>',
-        )
-        return HTMLResponse(html)
+    # --- Routines ---
 
     @app.get("/api/routines")
     async def api_routines() -> JSONResponse:
@@ -656,6 +593,21 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         except (ConnectionRefusedError, FileNotFoundError):
             return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
         return JSONResponse(result)
+
+    # --- Static & Index ---
+
+    @app.get("/", response_class=HTMLResponse)
+    async def index() -> HTMLResponse:
+        html_path = STATIC_DIR / "index.html"
+        html = html_path.read_text(encoding="utf-8")
+        if base_path:
+            html = html.replace("/static/style.css", f"{base_path}/static/style.css")
+            html = html.replace("/static/app.js", f"{base_path}/static/app.js")
+        html = html.replace(
+            "</head>",
+            f'<script>window.__BASE_PATH__ = "{base_path}";</script>\n</head>',
+        )
+        return HTMLResponse(html)
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

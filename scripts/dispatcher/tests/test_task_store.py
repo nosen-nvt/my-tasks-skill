@@ -1,4 +1,4 @@
-"""task_store モジュールのテスト。"""
+"""task_store モジュールのテスト (v2)。"""
 
 import json
 import sys
@@ -10,13 +10,11 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from lib.task_store import (
-    IndexEntry, TaskData, Generation, HistoryEntry, FeedbackItem,
+    IndexEntry, TaskData, HistoryEntry, FeedbackItem, FeedbackGroup,
     load_index, save_index, generate_task_id,
     load_task_yaml, save_task_yaml,
-    create_task_yaml, update_task_yaml, reopen_task_yaml, delete_task,
+    create_task_yaml, update_task_yaml, delete_task,
     update_task_field, update_index_status,
-    start_generation, finish_generation, get_latest_generation,
-    migrate_history_to_generations,
 )
 
 
@@ -69,8 +67,8 @@ class TestTaskYamlRoundTrip:
         assert data.id == "20260318-001"
         assert data.title == "Test Task"
         assert data.status == "pending"
-        assert data.generations == []
         assert data.history == []
+        assert data.feedback == []
 
     def test_load_nonexistent(self, tasks_dir):
         assert load_task_yaml(tasks_dir, "nonexistent") is None
@@ -110,31 +108,6 @@ class TestTaskYamlRoundTrip:
         assert load_task_yaml(tasks_dir, "t2") is not None
 
 
-class TestReopenTask:
-    """タスク再オープン。"""
-
-    def test_reopen_adds_history(self, tasks_dir):
-        entry = IndexEntry(
-            id="t1",
-            datasource_id="jira",
-            title="Task",
-            status="done",
-            generation=1,
-        )
-        create_task_yaml(tasks_dir, entry)
-
-        entry.status = "pending"
-        entry.generation = 2
-        reopen_task_yaml(tasks_dir, entry, prev_summary="Gen 1 done")
-
-        data = load_task_yaml(tasks_dir, "t1")
-        assert data.status == "pending"
-        assert data.generation == 2
-        assert len(data.history) == 1
-        assert data.history[0].generation == 1
-        assert data.history[0].summary == "Gen 1 done"
-
-
 class TestDeleteTask:
     """タスク削除。"""
 
@@ -152,7 +125,6 @@ class TestDeleteTask:
         assert not (tasks_dir / "t1.yaml").exists()
 
     def test_delete_nonexistent(self, tasks_dir):
-        # should not raise
         delete_task(tasks_dir, "nonexistent")
 
 
@@ -165,7 +137,6 @@ class TestGenerateTaskId:
         entries.append(IndexEntry(id=id1))
         id2 = generate_task_id(entries, tasks_dir)
         assert id1 != id2
-        # Both should end with -001 and -002
         assert id1.endswith("-001")
         assert id2.endswith("-002")
 
@@ -188,7 +159,6 @@ class TestUpdateTaskField:
         assert data.pr_url == "https://example.com/pr/1"
 
     def test_update_field_nonexistent(self, tasks_dir):
-        # should not raise
         update_task_field(tasks_dir, "nonexistent", "field", "value")
 
 
@@ -209,139 +179,89 @@ class TestUpdateIndexStatus:
         assert loaded[1].status == "pending"
 
 
-class TestStartGeneration:
-    """Generation の開始。"""
+class TestFeedbackGrouping:
+    """フィードバックのグループ化。"""
 
-    def test_start_generation(self, tasks_dir):
-        entry = IndexEntry(
-            id="t1",
-            datasource_id="jira",
-            title="Task",
-            status="pending",
+    def test_v2_format_roundtrip(self, tasks_dir):
+        data = TaskData(id="t1", title="Task")
+        group = FeedbackGroup(
+            collected_at="2026-03-24T10:00:00+09:00",
+            items=[
+                FeedbackItem(source="github_pr", author="user1", body="fix this"),
+                FeedbackItem(source="github_pr_review", author="user2", body="[CHANGES_REQUESTED] add tests"),
+            ],
         )
-        create_task_yaml(tasks_dir, entry)
+        data.feedback.append(group)
+        save_task_yaml(tasks_dir, "t1", data)
 
-        gen = start_generation(tasks_dir, "t1", "dispatch")
-        assert gen.seq == 1
-        assert gen.type == "dispatch"
-        assert gen.status == "running"
-        assert gen.started_at is not None
+        loaded = load_task_yaml(tasks_dir, "t1")
+        assert len(loaded.feedback) == 1
+        assert loaded.feedback[0].collected_at == "2026-03-24T10:00:00+09:00"
+        assert len(loaded.feedback[0].items) == 2
+        assert loaded.feedback[0].items[0].source == "github_pr"
 
-        data = load_task_yaml(tasks_dir, "t1")
-        assert len(data.generations) == 1
-
-    def test_start_multiple(self, tasks_dir):
-        entry = IndexEntry(
-            id="t1",
-            datasource_id="jira",
-            title="Task",
-            status="pending",
-        )
-        create_task_yaml(tasks_dir, entry)
-
-        start_generation(tasks_dir, "t1", "dispatch")
-        gen2 = start_generation(tasks_dir, "t1", "interactive")
-        assert gen2.seq == 2
-
-    def test_start_nonexistent_raises(self, tasks_dir):
-        with pytest.raises(FileNotFoundError):
-            start_generation(tasks_dir, "nonexistent", "dispatch")
-
-
-class TestFinishGeneration:
-    """Generation の完了。"""
-
-    def test_finish_generation(self, tasks_dir):
-        entry = IndexEntry(
-            id="t1",
-            datasource_id="jira",
-            title="Task",
-            status="pending",
-        )
-        create_task_yaml(tasks_dir, entry)
-        start_generation(tasks_dir, "t1", "dispatch")
-
-        finish_generation(tasks_dir, "t1", 1, "done", {"summary": "completed"})
-
-        data = load_task_yaml(tasks_dir, "t1")
-        gen = data.generations[0]
-        assert gen.status == "done"
-        assert gen.finished_at is not None
-        assert gen.output["summary"] == "completed"
-
-    def test_finish_nonexistent_seq(self, tasks_dir):
-        entry = IndexEntry(
-            id="t1",
-            datasource_id="jira",
-            title="Task",
-            status="pending",
-        )
-        create_task_yaml(tasks_dir, entry)
-        start_generation(tasks_dir, "t1", "dispatch")
-
-        # finishing a non-existent seq should not crash
-        finish_generation(tasks_dir, "t1", 999, "done", {})
-        data = load_task_yaml(tasks_dir, "t1")
-        assert data.generations[0].status == "running"
-
-
-class TestGetLatestGeneration:
-    """最新 Generation の取得。"""
-
-    def test_get_latest(self, tasks_dir):
-        entry = IndexEntry(
-            id="t1",
-            datasource_id="jira",
-            title="Task",
-            status="pending",
-        )
-        create_task_yaml(tasks_dir, entry)
-        start_generation(tasks_dir, "t1", "dispatch")
-        start_generation(tasks_dir, "t1", "interactive")
-
-        latest = get_latest_generation(tasks_dir, "t1")
-        assert latest.seq == 2
-        assert latest.type == "interactive"
-
-    def test_get_latest_empty(self, tasks_dir):
-        entry = IndexEntry(
-            id="t1",
-            datasource_id="jira",
-            title="Task",
-            status="pending",
-        )
-        create_task_yaml(tasks_dir, entry)
-        assert get_latest_generation(tasks_dir, "t1") is None
-
-
-class TestMigrateHistoryToGenerations:
-    """history[] → generations[] の変換。"""
-
-    def test_migrate(self):
-        data = TaskData.from_dict({
+    def test_v1_flat_backward_compat(self):
+        """v1 のフラットなフィードバック形式が v2 グループに変換される。"""
+        raw = {
             "id": "t1",
+            "title": "Task",
+            "feedback": [
+                {"source": "jira_comment", "author": "u1", "body": "old", "timestamp": "2026-03-20T10:00:00+09:00", "generation": 1},
+                {"source": "user", "author": "", "body": "manual", "timestamp": "2026-03-21T10:00:00+09:00", "generation": 1},
+            ],
+        }
+        data = TaskData.from_dict(raw)
+        assert len(data.feedback) == 1
+        assert len(data.feedback[0].items) == 2
+        assert data.feedback[0].items[0].source == "jira_comment"
+
+
+class TestHistoryV2:
+    """v2 の実行履歴。"""
+
+    def test_history_roundtrip(self, tasks_dir):
+        data = TaskData(id="t1", title="Task")
+        data.history.append(HistoryEntry(
+            dispatch_id="bo-3",
+            started_at="2026-03-24T10:00:00+09:00",
+            finished_at="2026-03-24T10:15:00+09:00",
+            exit_code=0,
+            summary="API 実装完了",
+        ))
+        save_task_yaml(tasks_dir, "t1", data)
+
+        loaded = load_task_yaml(tasks_dir, "t1")
+        assert len(loaded.history) == 1
+        assert loaded.history[0].dispatch_id == "bo-3"
+        assert loaded.history[0].exit_code == 0
+
+    def test_v1_history_backward_compat(self):
+        """v1 の generation ベース履歴が変換される。"""
+        raw = {
+            "id": "t1",
+            "title": "Task",
             "history": [
                 {"generation": 1, "summary": "Gen 1 done"},
                 {"generation": 2, "summary": "Gen 2 done"},
             ],
-            "generations": [],
-        })
-        result = migrate_history_to_generations(data)
-        assert len(result.generations) == 2
-        assert result.generations[0].seq == 1
-        assert result.generations[0].output["summary"] == "Gen 1 done"
+        }
+        data = TaskData.from_dict(raw)
+        assert len(data.history) == 2
+        assert data.history[0].summary == "Gen 1 done"
 
-    def test_skip_if_generations_exist(self):
-        data = TaskData.from_dict({
-            "id": "t1",
-            "history": [{"generation": 1, "summary": "old"}],
-            "generations": [{"seq": 1, "type": "dispatch", "status": "done"}],
-        })
-        result = migrate_history_to_generations(data)
-        assert len(result.generations) == 1
-        assert result.generations[0].output == {}  # not overwritten
 
-    def test_no_history(self):
-        data = TaskData(id="t1")
-        result = migrate_history_to_generations(data)
-        assert result.generations == []
+class TestSessionId:
+    """session_id フィールド。"""
+
+    def test_session_id_roundtrip(self, tasks_dir):
+        data = TaskData(
+            id="t1",
+            title="Task",
+            session_id="123e4567-e89b-12d3-a456-426614174000",
+            dispatch_id="bo-5",
+        )
+        save_task_yaml(tasks_dir, "t1", data)
+
+        loaded = load_task_yaml(tasks_dir, "t1")
+        assert loaded.session_id == "123e4567-e89b-12d3-a456-426614174000"
+        assert loaded.dispatch_id == "bo-5"

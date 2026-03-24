@@ -42,57 +42,20 @@ def is_inside_sandbox() -> bool:
 
 
 @dataclass
-class Lifecycle:
-    lifecycle_id: str
-    project_id: str
-    prompt: str
-    context_path: str = ""
-    status: str = "planning"  # planning|planned|approval_gate|phase_executing|phase_evaluating|suspend|done|aborted
-    suspend_reason: str | None = None  # needs_input|approval_required|agent_review (後方互換) / verdict にリネーム予定
-    phases: list[dict] = field(default_factory=list)
-    current_phase: int = 0
-    run_count: int = 0
-    max_runs: int = 5
-    current_dispatch_id: str | None = None
-    created_at: str = ""
-    updated_at: str = ""
-    branch: str | None = None
-
-    def to_dict(self) -> dict:
-        return {
-            "lifecycle_id": self.lifecycle_id,
-            "project_id": self.project_id,
-            "prompt": self.prompt,
-            "context_path": self.context_path,
-            "status": self.status,
-            "suspend_reason": self.suspend_reason,
-            "phases": self.phases,
-            "current_phase": self.current_phase,
-            "run_count": self.run_count,
-            "max_runs": self.max_runs,
-            "current_dispatch_id": self.current_dispatch_id,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "branch": self.branch,
-        }
-
-
-@dataclass
 class Job:
     dispatch_id: str
     project_id: str
     prompt: str
     working_dir: str
-    job_type: str = "execute"  # "execute" | "evaluate" | "plan"
     sandbox_profile_id: str = "default"
     env_files: list[str] = field(default_factory=list)
     host_commands: list[dict] = field(default_factory=list)
     extra_binds: list[dict] = field(default_factory=list)
-    lifecycle_id: str | None = None
-    run: int | None = None
+    session_id: str = ""
     status: str = "queued"
     pid: int | None = None
     exit_code: int | None = None
+    branch: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
 
@@ -100,12 +63,11 @@ class Job:
         return {
             "dispatch_id": self.dispatch_id,
             "project_id": self.project_id,
-            "job_type": self.job_type,
-            "lifecycle_id": self.lifecycle_id,
-            "run": self.run,
+            "session_id": self.session_id,
             "status": self.status,
             "pid": self.pid,
             "exit_code": self.exit_code,
+            "branch": self.branch,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
         }

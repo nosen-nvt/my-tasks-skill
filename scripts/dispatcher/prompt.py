@@ -1,4 +1,4 @@
-"""システムプロンプト構築。"""
+"""システムプロンプト構築（環境情報のみ）。"""
 
 import sys
 from pathlib import Path
@@ -6,12 +6,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import sandbox_exec
 
-from .models import Job
 
-
-def build_system_prompt(job: Job, result_path: Path) -> str:
-    """ジョブ用のシステムプロンプトを構築する。"""
-    profile = sandbox_exec.resolve_profile(job.sandbox_profile_id)
+def build_system_prompt(
+    working_dir: str,
+    sandbox_profile_id: str,
+    host_commands: list[dict],
+) -> str:
+    """ジョブ用のシステムプロンプトを構築する（環境情報のみ）。"""
+    profile = sandbox_exec.resolve_profile(sandbox_profile_id)
     network_protected = sandbox_exec.uses_network_protection(profile)
 
     network_desc = ""
@@ -22,7 +24,7 @@ def build_system_prompt(job: Job, result_path: Path) -> str:
 - ファイル: 作業ディレクトリ内のファイルのみ変更可能"""
 
     cred_desc = ""
-    pass_cmd = next((c for c in job.host_commands if c["name"] == "pass"), None)
+    pass_cmd = next((c for c in host_commands if c["name"] == "pass"), None)
     if pass_cmd:
         allowed_patterns = pass_cmd.get("allowed_patterns", [])
         if allowed_patterns == "*":
@@ -40,7 +42,7 @@ def build_system_prompt(job: Job, result_path: Path) -> str:
 - `pass show <entry>` で以下の認証情報を取得できます:
 {entries}"""
 
-    other_cmds = [c for c in job.host_commands if c["name"] != "pass"]
+    other_cmds = [c for c in host_commands if c["name"] != "pass"]
     host_cmd_desc = ""
     if other_cmds:
         cmd_lines = []
@@ -52,37 +54,13 @@ def build_system_prompt(job: Job, result_path: Path) -> str:
                 cmd_lines.append(f"  - `{cmd['name']}` (許可パターン: {', '.join(patterns)})")
         host_cmd_desc = "\n\nホストコマンド:\n- 以下のコマンドがホスト側で実行されます:\n" + "\n".join(cmd_lines)
 
-    result_desc = ""
-    if job.job_type == "plan":
-        result_desc = f"""
-
-結果ファイル:
-ジョブ完了時、以下のパスに結果 JSON を書き出してください:
-  {result_path}
-
-計画ジョブの結果フォーマット:
-  {{"next_status": "planned", "phases": [{{"goal": "...", "criteria": "..."}}]}} — 計画完了、実行可能
-  {{"next_status": "needs_input"}} — ユーザへの質問あり"""
-    elif job.job_type == "evaluate":
-        result_desc = f"""
-
-結果ファイル:
-ジョブ完了時、以下のパスに結果 JSON を書き出してください:
-  {result_path}
-
-評価ジョブの結果フォーマット:
-  {{"verdict": "DONE", "phase_summary": "..."}} — タスク完了
-  {{"verdict": "NEXT_PHASE", "phase_summary": "...", "remaining_phases": [...], "next_execute_prompt": "..."}} — 次フェーズへ
-  {{"verdict": "SUSPEND", "phase_summary": "...", "reason": "..."}} — ユーザ入力が必要
-  {{"verdict": "ABORT", "phase_summary": "...", "reason": "..."}} — 実行不可能"""
-
     network_mode = "保護あり (netns + proxy)" if network_protected else "ホストネットワーク直接"
     return f"""あなたはサンドボックス環境で実行されています。
 
 実行環境:
-- 作業ディレクトリ: {job.working_dir}
+- 作業ディレクトリ: {working_dir}
 - ネットワーク: {network_mode}
-{network_desc}{cred_desc}{host_cmd_desc}{result_desc}
+{network_desc}{cred_desc}{host_cmd_desc}
 
 作業が完了したら、変更をコミットしてください。
 プロセスの終了がジョブ完了の通知になります（シグナルファイルは不要です）。"""

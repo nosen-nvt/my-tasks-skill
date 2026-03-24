@@ -24,7 +24,7 @@
 | 値 | 説明 |
 |---|---|
 | `"full"` | 全量同期。JSONL に含まれないタスクを「消失」として検出・削除する。JIRA・To Do などの状態型データソース向け |
-| `"append"` | 追記同期。消失検出をスキップし、新規追加と既存更新のみ行う。sync 実行時に `done` タスクを GC（インデックス除去 + md 削除）する。メールなどのイベント型データソース向け |
+| `"append"` | 追記同期。消失検出をスキップし、新規追加と既存更新のみ行う。sync 実行時に `done` タスクを GC（インデックス除去 + YAML 削除）する。メールなどのイベント型データソース向け |
 
 デフォルト値は `"full"`（後方互換性）。
 
@@ -88,7 +88,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
   "project_mapping": {},
   "operations": {
     "mark_read": {
-      "description": "メールを既読にする（google-cli modify 実装後に有効）",
+      "description": "メールを既読にする",
       "command": "google mail modify {remote_id} --remove-label UNREAD --account nvt"
     }
   }
@@ -105,7 +105,7 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
   "project_mapping": {},
   "operations": {
     "mark_read": {
-      "description": "メールを既読にする（google-cli modify 実装後に有効）",
+      "description": "メールを既読にする",
       "command": "google mail modify {remote_id} --remove-label UNREAD --account qzl"
     }
   }
@@ -129,33 +129,27 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 | `title` | string | Yes | タスクタイトル |
 | `status` | string | Yes | タスクステータス |
 | `project_id` | string | No | 紐づくプロジェクトの ID |
-| `lifecycle_id` | string | No | 関連する Lifecycle ID（dispatch 済みの場合） |
-| `run_count` | integer | No | 実行回数（デフォルト: `0`）。sync-tasks.py が初期値を設定 |
-| `generation` | integer | No | 再オープン世代（デフォルト: `1`）。done タスクが同じ remote_id で再度取り込まれた際にインクリメントする |
 
 ### ステータス定義
 
 ```
 pending → in_progress → done
                       → aborted
-
-※ done → sync で同じ remote_id が再出現 → pending（再オープン、generation++）
 ```
 
 | ステータス | 意味 |
 |-----------|------|
-| `pending` | データソースから取り込まれた初期状態 |
-| `in_progress` | Lifecycle にディスパッチ済み（Lifecycle 側の suspend 中も含む） |
+| `pending` | データソースから取り込まれた初期状態、または Plan/Dispatch 待ち |
+| `in_progress` | ジョブ実行中、Plan 中、Feedback 待ちなど、作業が進行中の状態 |
 | `done` | 完了 |
 | `aborted` | 中止 |
 
-### 遷移ルール補足
+### 遷移ルール
 
-- dispatch 時: `pending` → `in_progress`
-- Lifecycle done(DONE): `in_progress` → `done`
-- Lifecycle done(ABORT/max_runs): `in_progress` → `aborted`
-- `done` → `pending`: 同じ remote_id のタスクが再度取り込まれたとき（再オープン、`generation` をインクリメント）
-- **manual プロジェクト**: プロジェクト定義に `working_directory` がないプロジェクトは manual 扱い。Lifecycle を経由せず、メインセッションで直接処理する。完了時アクション（操作9）は通常通り実行する
+- Dispatch 時: `pending` → `in_progress`
+- ジョブ完了・手動完了: `in_progress` → `done`
+- 中止: `in_progress` → `aborted`
+- 再オープン: done タスクと同じ `remote_id` が再出現 → 新規タスクとして作成
 
 ### ID 生成規則
 
@@ -166,8 +160,8 @@ pending → in_progress → done
 ### 例
 
 ```jsonl
-{"id":"20260301-001","remote_id":"UBS-101","datasource_id":"jira","title":"API実装","status":"pending","project_id":"ubs-mgmt-tool","generation":1}
-{"id":"20260301-002","remote_id":"abc123","datasource_id":"ms-todo","title":"書類提出","status":"in_progress","project_id":"","generation":1}
+{"id":"20260301-001","remote_id":"UBS-101","datasource_id":"jira","title":"API実装","status":"pending","project_id":"ubs-mgmt-tool"}
+{"id":"20260301-002","remote_id":"abc123","datasource_id":"ms-todo","title":"書類提出","status":"in_progress","project_id":""}
 ```
 
 ---
@@ -175,6 +169,7 @@ pending → in_progress → done
 ## 3. タスク実体 (`tasks/{id}.yaml`)
 
 1タスク1ファイル。タスクの詳細情報を YAML 形式で保持する。
+タスク YAML が唯一の真実の源（Single Source of Truth）。
 
 ### スキーマ
 
@@ -186,34 +181,36 @@ pending → in_progress → done
 | `project_id` | string | No | 紐づくプロジェクトの ID |
 | `title` | string | Yes | タスクタイトル |
 | `status` | string | Yes | タスクステータス |
-| `generation` | integer | No | 再オープン世代（デフォルト: `1`） |
-| `description` | string | No | タスクの説明（sync-tasks.py による初期生成時は空） |
-| `open_questions` | array | No | 未決事項リスト（精査フェーズで生成） |
+| `description` | string | No | タスクの説明（Plan で精査） |
 | `preconditions` | array | No | タスク実行の事前条件リスト |
 | `acceptance_criteria` | array | No | タスクの達成条件リスト |
 | `completion_actions` | array | No | タスク完了後に実行するアクションリスト |
-| `execute_prompt` | string | No | 計画ジョブが生成する実行プロンプト |
-| `history` | array | No | 実行履歴（再オープン時に前世代サマリを追加） |
-| `feedback` | array | No | フィードバック項目リスト（Jira コメント、PR コメント、ユーザー入力） |
+| `execute_prompt` | string | No | 実行プロンプト（Plan で生成） |
+| `pr_url` | string | No | PR の URL |
+| `branch` | string | No | 作業ブランチ名 |
+| `dispatch_id` | string | No | 現在のジョブの dispatch_id |
+| `session_id` | string | No | Claude Code セッション ID（UUID 形式。Resume で再開に使用） |
+| `feedback` | array | No | フィードバック（グループ化、下記参照） |
 | `feedback_cursor` | object | No | ソースごとの最終取得タイムスタンプ（重複取得を防ぐ） |
-| `pr_url` | string | No | 関連する Bitbucket PR の URL（PR フィードバック収集に使用） |
+| `history` | array | No | 実行履歴 |
 
-### `history` 要素
+### `feedback` 構造（FeedbackGroup）
 
-| フィールド | 型 | 説明 |
-|---|---|---|
-| `generation` | integer | 世代番号 |
-| `summary` | string | その世代の実行サマリ |
-
-### `feedback` 要素
+フィードバックは収集タイミングごとにグループ化する。
 
 | フィールド | 型 | 説明 |
 |---|---|---|
-| `source` | string | フィードバックソース: `jira_comment` \| `bitbucket_pr` \| `user` |
-| `author` | string | フィードバックの著者（`user` ソースの場合は省略） |
+| `collected_at` | string | 収集実行時のタイムスタンプ（ISO 8601）。グループ識別子として機能 |
+| `items` | array | フィードバック項目の配列 |
+
+### `feedback.items` 要素（FeedbackItem）
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `source` | string | フィードバックソース: `github_pr` \| `github_pr_review` \| `jira_comment` \| `bitbucket_pr` \| `user` |
+| `author` | string | フィードバックの著者（`user` ソースの場合は省略可） |
 | `timestamp` | string | フィードバックの日時（ISO 8601） |
 | `body` | string | フィードバックの内容 |
-| `generation` | integer | どの世代に対するフィードバックか |
 
 ### `feedback_cursor`
 
@@ -221,6 +218,17 @@ pending → in_progress → done
 |---|---|---|
 | `jira_comment` | string | Jira コメントの最終取得タイムスタンプ |
 | `bitbucket_pr` | string | Bitbucket PR コメントの最終取得タイムスタンプ |
+| `github_pr` | string | GitHub PR コメントの最終取得タイムスタンプ |
+
+### `history` 要素
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `dispatch_id` | string | ジョブの dispatch_id |
+| `started_at` | string | 開始日時（ISO 8601） |
+| `finished_at` | string | 終了日時（ISO 8601） |
+| `exit_code` | integer | 終了コード |
+| `summary` | string | 実行サマリ |
 
 ### 例
 
@@ -231,19 +239,21 @@ datasource_id: jira
 project_id: ubs-mgmt-tool
 title: API実装
 status: pending
-generation: 1
 description: ""
-open_questions: []
 preconditions: []
 acceptance_criteria: []
 completion_actions: []
 execute_prompt: ""
-history: []
+pr_url: ""
+branch: ""
+dispatch_id: ""
+session_id: ""
 feedback: []
 feedback_cursor: {}
+history: []
 ```
 
-### 再オープン後の例
+### Plan 後の例
 
 ```yaml
 id: "20260301-001"
@@ -252,33 +262,89 @@ datasource_id: jira
 project_id: ubs-mgmt-tool
 title: API実装
 status: pending
-generation: 2
-description: API エンドポイントの実装
-open_questions: []
-preconditions: []
+description: |
+  API エンドポイントの実装。CRUD 操作を提供する。
+preconditions:
+  - データベーススキーマが定義済みであること
 acceptance_criteria:
   - API が正常にレスポンスを返すこと
-completion_actions: []
-execute_prompt: ""
-history:
-  - generation: 1
-    summary: "Phase 1-3 完了。API 実装済み"
+  - dotnet test が全件パスすること
+completion_actions:
+  - jira issue move UBS-101 "Done" --site urbanb
+execute_prompt: |
+  UBS管理ツールの API エンドポイントを実装してください。
+  ...
+pr_url: ""
+branch: ""
+dispatch_id: ""
+session_id: ""
+feedback: []
+feedback_cursor: {}
+history: []
+```
+
+### Dispatch 後（Feedback 収集済み）の例
+
+```yaml
+id: "20260301-001"
+remote_id: "UBS-101"
+datasource_id: jira
+project_id: ubs-mgmt-tool
+title: API実装
+status: in_progress
+description: |
+  API エンドポイントの実装。CRUD 操作を提供する。
+preconditions:
+  - データベーススキーマが定義済みであること
+acceptance_criteria:
+  - API が正常にレスポンスを返すこと
+  - dotnet test が全件パスすること
+completion_actions:
+  - jira issue move UBS-101 "Done" --site urbanb
+execute_prompt: |
+  UBS管理ツールの API エンドポイントを実装してください。
+  ...
+pr_url: "https://github.com/example/ubs-mgmt-tool/pull/42"
+branch: "task/20260301-001"
+dispatch_id: "ubs-mgmt-tool-3"
+session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 feedback:
-  - source: jira_comment
-    author: "レビュアー名"
-    timestamp: "2026-03-14T10:00:00+09:00"
-    body: "エラーハンドリングが不十分です。NullReferenceException の対策を追加してください"
-    generation: 1
+  - collected_at: "2026-03-24T10:30:00+09:00"
+    items:
+      - source: "github_pr"
+        author: "reviewer-a"
+        timestamp: "2026-03-24T10:25:00+09:00"
+        body: "エラーハンドリングが不足しています"
+      - source: "github_pr_review"
+        author: "reviewer-b"
+        timestamp: "2026-03-24T10:28:00+09:00"
+        body: "[CHANGES_REQUESTED] テストケースを追加してください"
+  - collected_at: "2026-03-24T15:00:00+09:00"
+    items:
+      - source: "github_pr"
+        author: "reviewer-a"
+        timestamp: "2026-03-24T14:55:00+09:00"
+        body: "まだこの部分が..."
 feedback_cursor:
-  jira_comment: "2026-03-14T10:00:00+09:00"
+  github_pr: "2026-03-24T14:55:00+09:00"
+history:
+  - dispatch_id: "ubs-mgmt-tool-3"
+    started_at: "2026-03-24T10:00:00+09:00"
+    finished_at: "2026-03-24T10:15:00+09:00"
+    exit_code: 0
+    summary: "API エンドポイント実装完了、PR作成済み"
+  - dispatch_id: "ubs-mgmt-tool-5"
+    started_at: "2026-03-24T16:00:00+09:00"
+    finished_at: "2026-03-24T16:10:00+09:00"
+    exit_code: 0
+    summary: "レビュー指摘対応（fb-20260324T1500）"
 ```
 
 ### 規約
 
 - 全フィールドはプログラムから読み書きする（`yaml.safe_load` / `yaml.dump`）
-- `open_questions` は精査フェーズで計画ジョブが未決事項を洗い出す
-- `execute_prompt` は計画ジョブが生成し、承認後にディスパッチャーに渡される
-- `history` はフェーズ実行後に結果を追記する
+- `execute_prompt` は Plan（対話セッション）で生成し、Dispatch 時にディスパッチャーに渡される
+- `history` はジョブ完了後に結果を追記する
 
 ---
 
@@ -299,7 +365,6 @@ feedback_cursor:
 | `env` | object | No | サンドボックス内で設定する環境変数。値は plain string または `{"pass": "entry"}` 形式（後者は `pass show` で解決）。`.env` ファイルより低優先度 |
 | `extra_binds` | array | No | プロジェクト固有の追加 bind mount。サンドボックスプロファイルの `extra_binds` に追加される |
 | `host_commands` | array | No | プロジェクト固有の追加ホストコマンド。サンドボックスプロファイルの `host_commands` に追加される |
-| `orchestration` | object | No | オーケストレーションポリシー。未設定の場合は手動フロー（従来動作） |
 
 ### 例
 
@@ -323,36 +388,6 @@ feedback_cursor:
   "host_commands": [
     {"name": "az", "path": "/usr/bin/az", "allowed_patterns": ["pipelines run *", "pipelines runs show *"]}
   ]
-}
-```
-
-### `orchestration`
-
-タスク実行の自動オーケストレーションポリシーを定義する。
-未設定の場合は手動フロー（従来動作）。
-
-| フィールド | 型 | デフォルト | 説明 |
-|---|---|---|---|
-| `auto_approve` | boolean | `false` | `planned` → 自動で実行を開始するか |
-| `require_first_approval` | boolean | `true` | 初回（`run_count=0`）のみ手動承認を要求。`false` の場合は初回から自動承認 |
-| `max_runs_per_generation` | integer | `5` | 1世代あたりの最大フェーズ実行回数。超過時は `aborted` に遷移 |
-
-**オーケストレーション有効時のフロー**:
-1. 計画ジョブ完了 → `planned` かつ auto_approve 条件を満たせば自動で実行ジョブをディスパッチ
-2. 実行ジョブ完了 → 評価ジョブを自動ディスパッチ
-3. 評価ジョブ完了 → verdict に応じて次のアクションを自動実行:
-   - DONE → `done`
-   - NEXT_PHASE → 次フェーズの実行ジョブをディスパッチ
-   - SUSPEND → `suspend (agent_review)`（ユーザ介入待ち）
-   - ABORT → `aborted`
-
-```json
-{
-  "orchestration": {
-    "auto_approve": true,
-    "require_first_approval": true,
-    "max_runs_per_generation": 5
-  }
 }
 ```
 
@@ -492,67 +527,7 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 
 ---
 
-## 6. Lifecycle（ライフサイクル状態）
-
-ジョブチェーンの状態を管理するステートマシン。タスク管理の知識を持たない純粋なジョブオーケストレータ。
-永続化: `$XDG_RUNTIME_DIR/my-tasks-dispatch/lifecycles.jsonl`
-コンテキスト: `$XDG_RUNTIME_DIR/my-tasks-dispatch/{lifecycle_id}.context.yaml`
-
-### フィールド
-
-| フィールド | 型 | 説明 |
-|---|---|---|
-| `lifecycle_id` | string | 識別子。内部生成時は `lc-{連番}` 形式、外部指定時は任意文字列（例: `{task_id}-g{generation}`） |
-| `project_id` | string | プロジェクト ID |
-| `prompt` | string | 元の依頼内容 |
-| `context_path` | string | コンテキストファイルの絶対パス（直接投入時は空） |
-| `status` | string | `planning` \| `planned` \| `phase_executing` \| `phase_evaluating` \| `suspend` \| `done` \| `aborted` |
-| `suspend_reason` | string\|null | suspend 時の理由: `needs_input`, `approval_required`, `agent_review` |
-| `phases` | array | フェーズ定義の配列（コンテキスト YAML の phases を反映） |
-| `current_phase` | integer | 現在実行中のフェーズインデックス（0始まり） |
-| `run_count` | integer | 実行回数 |
-| `max_runs` | integer | 最大実行回数 |
-| `current_dispatch_id` | string\|null | 現在のサブジョブの dispatch_id |
-| `created_at` | string | 作成日時（ISO 8601） |
-| `updated_at` | string | 更新日時（ISO 8601） |
-
-### 例
-
-```jsonl
-{"lifecycle_id":"lc-1","project_id":"bo","prompt":"API実装","context_path":"/run/user/1000/my-tasks-dispatch/lc-1.context.yaml","status":"phase_executing","suspend_reason":null,"phases":[{"goal":"API エンドポイント実装","status":"running"},{"goal":"テスト追加","status":"pending"}],"current_phase":0,"run_count":0,"max_runs":5,"current_dispatch_id":"bo-3","created_at":"2026-03-01T10:00:00+09:00","updated_at":"2026-03-01T10:05:00+09:00"}
-{"lifecycle_id":"lc-2","project_id":"ubs","prompt":"バグ修正","context_path":"/run/user/1000/my-tasks-dispatch/lc-2.context.yaml","status":"suspend","suspend_reason":"needs_input","phases":[{"goal":"原因調査","status":"done"},{"goal":"修正実装","status":"pending"}],"current_phase":1,"run_count":1,"max_runs":5,"current_dispatch_id":null,"created_at":"2026-03-01T09:00:00+09:00","updated_at":"2026-03-01T09:30:00+09:00"}
-```
-
----
-
-## 7. 結果ファイル
-
-ジョブ完了時にジョブが書き出す結果ファイル。Lifecycle ステートマシンが次の状態を決定するために使用する。
-パス: `$XDG_RUNTIME_DIR/my-tasks-dispatch/{dispatch_id}.result.json`
-
-### 計画ジョブ (plan)
-
-```json
-{"next_status": "planned"}
-{"next_status": "needs_input"}
-```
-
-### 評価ジョブ (evaluate)
-
-```json
-{"verdict": "DONE", "phase_summary": "全達成条件を確認済み"}
-{"verdict": "NEXT_PHASE", "phase_summary": "フェーズ1完了、次フェーズへ進行"}
-{"verdict": "SUSPEND", "phase_summary": "API キーが必要"}
-{"verdict": "ABORT", "phase_summary": "前提条件が誤り"}
-```
-
-### 実行ジョブ (execute)
-
-結果ファイル不要。exit code で判定（0=成功、非0=失敗）。
-
----
-
-## 8. ディスパッチャージョブ状態（インメモリ）
+## 6. ディスパッチャージョブ状態（インメモリ）
 
 ディスパッチャーサーバがインメモリで管理するジョブ状態。
 ファイルへの永続化は行わない（サーバ再起動時にリセット）。
@@ -564,12 +539,11 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 |---|---|---|
 | `dispatch_id` | string | 識別子（`{project_id}-{連番}` 形式、例: `bo-1`） |
 | `project_id` | string | プロジェクト ID |
-| `job_type` | string | `execute` \| `evaluate` \| `plan` |
-| `lifecycle_id` | string\|null | 関連する Lifecycle ID |
-| `run` | integer\|null | ライフサイクル内のフェーズインデックス（0始まり） |
 | `status` | string | `queued` \| `running` \| `done` \| `failed` |
 | `pid` | integer\|null | 子プロセスの PID |
 | `exit_code` | integer\|null | 終了コード |
+| `working_dir` | string | 作業ディレクトリ（worktree パス） |
+| `branch` | string\|null | worktree のブランチ名 |
 | `started_at` | string\|null | 開始日時（ISO 8601形式） |
 | `finished_at` | string\|null | 終了日時（ISO 8601形式） |
 
@@ -577,70 +551,7 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 
 ```json
 {"ok": true, "jobs": [
-  {"dispatch_id": "bo-1", "project_id": "bo", "job_type": "execute", "status": "running", "pid": 12345, "exit_code": null, "started_at": "2026-03-01T10:00:00+09:00", "finished_at": null},
-  {"dispatch_id": "bo-2", "project_id": "bo", "job_type": "plan", "status": "queued", "pid": null, "exit_code": null, "started_at": null, "finished_at": null}
-], "lifecycles": [
-  {"lifecycle_id": "lc-1", "project_id": "bo", "prompt": "API実装", "context_path": "/run/user/1000/my-tasks-dispatch/lc-1.context.yaml", "status": "phase_executing", "suspend_reason": null, "phases": [{"goal": "API エンドポイント実装", "status": "running"}], "current_phase": 0, "run_count": 0, "max_runs": 5, "current_dispatch_id": "bo-1", "created_at": "2026-03-01T10:00:00+09:00", "updated_at": "2026-03-01T10:05:00+09:00"}
+  {"dispatch_id": "bo-1", "project_id": "bo", "status": "running", "pid": 12345, "exit_code": null, "working_dir": "/tmp/wt/bo-1", "branch": "task/20260301-001", "started_at": "2026-03-01T10:00:00+09:00", "finished_at": null},
+  {"dispatch_id": "bo-2", "project_id": "bo", "status": "queued", "pid": null, "exit_code": null, "working_dir": "", "branch": null, "started_at": null, "finished_at": null}
 ]}
-```
-
----
-
-## 9. コンテキスト YAML スキーマ
-
-ライフサイクルのコンテキスト情報を YAML 形式で保持する。
-パス: `$XDG_RUNTIME_DIR/my-tasks-dispatch/{lifecycle_id}.context.yaml`
-
-### スキーマ
-
-| フィールド | 型 | 説明 |
-|---|---|---|
-| `meta` | object | タスクのメタ情報 |
-| `meta.task_id` | string | タスク ID |
-| `meta.remote_id` | string | データソース内でのタスク一意識別子 |
-| `meta.datasource_id` | string | データソースの識別子 |
-| `meta.project_id` | string | プロジェクト ID |
-| `meta.generation` | integer | 再オープン世代 |
-| `description` | string | タスクの説明文 |
-| `preconditions` | array | タスク実行の事前条件リスト |
-| `acceptance_criteria` | array | タスクの達成条件リスト |
-| `open_questions` | array | 未決事項リスト |
-| `completion_actions` | array | タスク完了後に実行するアクションリスト |
-| `phases` | array | フェーズ定義の配列 |
-| `execute_prompt` | string | 実行ジョブに渡すプロンプト |
-| `previous_generations` | array | 過去世代の実行履歴 |
-| `feedback` | array | レビュアー・ユーザーからのフィードバックリスト（タスク YAML の `feedback` と同一構造） |
-
-### `phases` 要素
-
-| フィールド | 型 | 説明 |
-|---|---|---|
-| `goal` | string | フェーズの目標 |
-| `criteria` | string | フェーズの完了判定基準 |
-| `status` | string | `pending` \| `running` \| `done` \| `skipped` |
-| `summary` | string\|null | フェーズ完了時のサマリ |
-
-### 例
-
-```yaml
-meta:
-  task_id: ""
-  remote_id: ""
-  datasource_id: ""
-  project_id: ""
-  generation: 1
-description: |
-  タスクの説明文
-preconditions: []
-acceptance_criteria: []
-open_questions: []
-completion_actions: []
-phases:
-  - goal: "フェーズの目標"
-    criteria: "完了判定基準"
-    status: "pending"  # pending|running|done|skipped
-    summary: null
-execute_prompt: ""
-previous_generations: []
-feedback: []
 ```
