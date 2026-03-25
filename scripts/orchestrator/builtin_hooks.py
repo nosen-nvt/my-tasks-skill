@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import subprocess
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -38,9 +39,13 @@ async def hook_plan_session(server: OrchestratorServer, task_id: str, task: Task
     session_name, is_caller = detect_tmux_session(None)
     window_name = f"plan-{task_id}"
 
-    # 冪等性: tmux 窓が既にあれば何もしない
+    # 冪等性: tmux 窓が既にあればアクティブにして終了
     if has_tmux_window(session_name, window_name):
-        log.info(f"plan_session: window {window_name} already exists, skipping")
+        log.info(f"plan_session: window {window_name} already exists, activating")
+        subprocess.run(
+            ["tmux", "select-window", "-t", f"{session_name}:{window_name}"],
+            capture_output=True,
+        )
         return
 
     if not ensure_tmux_session(session_name, is_caller):
