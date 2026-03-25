@@ -106,6 +106,7 @@ async def hook_dispatch_job(server: OrchestratorServer, task_id: str, task: Task
 
     # worktree ブランチ
     branch = task.branch
+    project = None
     if not branch:
         project = _load_project(server, task.project_id)
         if project:
@@ -122,6 +123,13 @@ async def hook_dispatch_job(server: OrchestratorServer, task_id: str, task: Task
 
     if branch:
         run_request["branch"] = branch
+        base_branch = "main"
+        if not project:
+            project = _load_project(server, task.project_id)
+        if project:
+            worktree_config = project.get("worktree", {})
+            base_branch = worktree_config.get("base_branch", "main")
+        run_request["base_branch"] = base_branch
 
     result = await server.cmd_run(run_request)
     if result.get("ok"):

@@ -48,7 +48,11 @@ def ensure_worktree(repo_dir: str, branch: str, base_branch: str = "main") -> Pa
     if branch_exists:
         cmd = ["git", "worktree", "add", str(wt_path), branch]
     else:
-        cmd = ["git", "worktree", "add", "-b", branch, str(wt_path), base_branch]
+        subprocess.run(
+            ["git", "fetch", "origin", base_branch],
+            cwd=repo_dir, capture_output=True, text=True,
+        )
+        cmd = ["git", "worktree", "add", "-b", branch, str(wt_path), f"origin/{base_branch}"]
 
     result = subprocess.run(cmd, cwd=repo_dir, capture_output=True, text=True)
     if result.returncode != 0:

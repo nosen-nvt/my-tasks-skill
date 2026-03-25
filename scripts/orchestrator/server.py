@@ -349,7 +349,8 @@ class OrchestratorServer(ExecutorMixin):
         branch = request.get("branch")
         if branch:
             try:
-                wt_path = ensure_worktree(working_dir, branch)
+                base_branch = request.get("base_branch", "main")
+                wt_path = ensure_worktree(working_dir, branch, base_branch=base_branch)
             except RuntimeError as e:
                 return {"ok": False, "error": f"worktree error: {e}"}
             extra_binds = list(extra_binds) + [
