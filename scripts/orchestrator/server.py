@@ -170,10 +170,36 @@ class OrchestratorServer(ExecutorMixin):
         except Exception as e:
             log.error(f"Builtin hook {hook.id} error: {e}")
 
+    def _expand_hook_command(self, template: str, task_id: str, task_data) -> str:
+        """フックコマンドテンプレートを展開する。値は shlex.quote でエスケープ。"""
+        raw: dict[str, str] = {
+            "task_id": task_id,
+            "branch": task_data.branch or "",
+            "title": task_data.title or "",
+            "project_id": task_data.project_id or "",
+            "remote_id": task_data.remote_id or "",
+            "pr.url": task_data.pr.url or "",
+            "pr.ci_status": task_data.pr.ci_status or "",
+        }
+        if task_data.project_id:
+            p_path = self.repo_dir / "projects" / f"{task_data.project_id}.json"
+            if p_path.exists():
+                try:
+                    with open(p_path, encoding="utf-8") as f:
+                        project = json.load(f)
+                    raw["working_directory"] = project.get("working_directory", "")
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+        result = template
+        for key, val in raw.items():
+            result = result.replace(f"{{{key}}}", shlex.quote(str(val)))
+        return result
+
     async def _run_script_hook(self, hook, task_id: str, task_data) -> None:
         """ホスト側でシェルスクリプトを実行する。"""
         try:
-            cmd = hook.command.replace("{task_id}", task_id)
+            cmd = self._expand_hook_command(hook.command, task_id, task_data)
             proc = await asyncio.create_subprocess_shell(
                 cmd,
                 stdout=asyncio.subprocess.PIPE,
