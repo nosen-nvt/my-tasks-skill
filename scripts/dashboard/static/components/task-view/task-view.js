@@ -30,6 +30,16 @@ function buildJobListHTML(taskData) {
   return html;
 }
 
+function buildRelatedJobsWarningHTML(taskData) {
+  if (!taskData?.related_jobs?.length) return "";
+  const runningRelated = taskData.related_jobs.filter((jobId) => {
+    const job = state.jobs.find((j) => j.dispatch_id === jobId);
+    return job && (job.status === "running" || job.status === "queued");
+  });
+  if (!runningRelated.length) return "";
+  return `<div class="related-jobs-warning">\u26a0 \u30ec\u30d3\u30e5\u30fc\u30a8\u30fc\u30b8\u30a7\u30f3\u30c8\u304c\u4f5c\u696d\u4e2d\u3067\u3059 (${runningRelated.join(", ")})</div>`;
+}
+
 function bindJobClicks(root) {
   root.querySelectorAll("[data-dispatch-id]").forEach((el) => {
     el.addEventListener("click", () =>
@@ -47,34 +57,29 @@ function buildTaskActionsHTML(task, taskData) {
   const hasPrUrl = !!taskData?.pr_url;
 
   if (status === "pending") {
-    // Plan: always available for pending tasks with a project
     if (hasProject)
-      html += `<button class="action-btn" data-action="plan" data-task-id="${task.id}">Plan</button>`;
-    // Dispatch: available if execute_prompt exists
-    if (hasPrompt && hasProject)
-      html += `<button class="action-btn primary" data-action="dispatch" data-task-id="${task.id}">Dispatch</button>`;
-    // Open: general interactive session
-    html += `<button class="action-btn" data-action="open-session" data-task-id="${task.id}">Open</button>`;
-  }
-
-  if (status === "in_progress") {
-    // Resume: available if session_id exists
-    if (hasSession)
-      html += `<button class="action-btn primary" data-action="resume" data-task-id="${task.id}">Resume</button>`;
-    // Feedback: available if pr_url exists
-    if (hasPrUrl)
-      html += `<button class="action-btn" data-action="feedback" data-task-id="${task.id}">Feedback</button>`;
-    // Open: general interactive session
-    html += `<button class="action-btn" data-action="open-session" data-task-id="${task.id}">Open</button>`;
-    // Done
-    html += `<button class="action-btn success" data-action="complete" data-task-id="${task.id}">Done</button>`;
-    // Abort
+      html += `<button class="action-btn primary" data-action="plan" data-task-id="${task.id}">Plan</button>`;
     html += `<button class="action-btn danger" data-action="abort" data-task-id="${task.id}">Abort</button>`;
   }
 
-  if (status === "done" || status === "aborted") {
-    // Open: can always open a session
-    html += `<button class="action-btn" data-action="open-session" data-task-id="${task.id}">Open</button>`;
+  if (status === "planning") {
+    html += `<button class="action-btn" data-action="plan" data-task-id="${task.id}">Plan</button>`;
+    if (hasPrompt && hasProject)
+      html += `<button class="action-btn primary" data-action="dispatch" data-task-id="${task.id}">Dispatch</button>`;
+    html += `<button class="action-btn danger" data-action="abort" data-task-id="${task.id}">Abort</button>`;
+  }
+
+  if (status === "executing") {
+    html += `<button class="action-btn danger" data-action="abort" data-task-id="${task.id}">Abort</button>`;
+  }
+
+  if (status === "in_review") {
+    if (hasSession)
+      html += `<button class="action-btn primary" data-action="resume" data-task-id="${task.id}">Resume</button>`;
+    if (hasPrUrl)
+      html += `<button class="action-btn" data-action="feedback" data-task-id="${task.id}">Feedback</button>`;
+    html += `<button class="action-btn success" data-action="complete" data-task-id="${task.id}">Done</button>`;
+    html += `<button class="action-btn danger" data-action="abort" data-task-id="${task.id}">Abort</button>`;
   }
 
   return html;
@@ -86,7 +91,6 @@ function bindTaskActions(root) {
     dispatch: { endpoint: "dispatch", text: "Dispatching..." },
     resume: { endpoint: "resume", text: "Resuming..." },
     feedback: { endpoint: "feedback", text: "Collecting..." },
-    "open-session": { endpoint: "open-session", text: "Opening..." },
     complete: { endpoint: "complete", text: "Completing..." },
     abort: { endpoint: "abort", text: "Aborting..." },
   };
@@ -106,14 +110,37 @@ function bindTaskActions(root) {
 }
 
 function buildTaskMetaHTML(task) {
-  let html = `<span class="meta-item">${statusBadge(taskDisplayStatus(task))}</span>`;
+  let html = "";
+  html += `<span class="meta-item" style="font-family:monospace;font-weight:600;">${escapeHtml(task.id)}</span>`;
+  html += `<span class="meta-item">${statusBadge(taskDisplayStatus(task))}</span>`;
   if (task.project_id)
     html += `<span class="meta-item">${escapeHtml(task.project_id)}</span>`;
+  if (task.datasource_id)
+    html += `<span class="meta-item">ds:${escapeHtml(task.datasource_id)}</span>`;
+  if (task.remote_id)
+    html += `<span class="meta-item">ref:${escapeHtml(task.remote_id)}</span>`;
   return html;
 }
 
 function renderTaskDetailSections(data) {
   let html = "";
+
+  // Runtime info
+  const infoItems = [];
+  if (data.branch) infoItems.push({ label: "Branch", value: data.branch });
+  if (data.dispatch_id) infoItems.push({ label: "Dispatch", value: data.dispatch_id });
+  if (data.session_id) infoItems.push({ label: "Session", value: data.session_id.substring(0, 8) + "..." });
+
+  if (infoItems.length > 0) {
+    html += '<div class="detail-section"><div class="detail-body" style="font-size:12px;">';
+    html += infoItems
+      .map(
+        (item) =>
+          `<span style="margin-right:16px;"><span style="color:var(--text-muted);">${item.label}:</span> ${escapeHtml(item.value)}</span>`
+      )
+      .join("");
+    html += "</div></div>";
+  }
 
   if (data.description) {
     html += `<div class="detail-section"><div class="detail-body">${escapeHtml(data.description)}</div></div>`;
@@ -215,7 +242,9 @@ export async function renderTaskView(taskId) {
     // Render actions with taskData context
     const actionsEl = document.getElementById("task-actions");
     if (actionsEl && task) {
-      actionsEl.innerHTML = `<div class="task-actions">${buildTaskActionsHTML(task, data)}</div>`;
+      let actionsHTML = `<div class="task-actions">${buildTaskActionsHTML(task, data)}</div>`;
+      actionsHTML += buildRelatedJobsWarningHTML(data);
+      actionsEl.innerHTML = actionsHTML;
       bindTaskActions(actionsEl);
     }
 

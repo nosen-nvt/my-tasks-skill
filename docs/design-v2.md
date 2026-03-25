@@ -26,13 +26,17 @@ v1 の運用を通じて以下が判明した:
 
 ### ステータス
 
+> **注意**: 状態遷移モデルは v3 で再設計された。詳細は [design-state-machine.md](design-state-machine.md) を参照。
+
 ```
-pending → in_progress → done
-                      → aborted
+pending → planning → executing → in_review → done
+                                             → aborted
 ```
 
-- `pending`: データソースから取り込まれた状態、または Plan/Dispatch 待ち
-- `in_progress`: ジョブ実行中、Plan 中、Feedback 待ちなど、作業が進行中の状態
+- `pending`: データソースから取り込まれた直後。未着手
+- `planning`: Plan セッションを開始済み。精査・計画中
+- `executing`: ジョブ実行中
+- `in_review`: ジョブ完了。結果確認・レビュー待ち
 - `done`: 完了
 - `aborted`: 中止
 
@@ -46,7 +50,7 @@ pending → in_progress → done
 | `remote_id` | string | No | データソース内での一意識別子 |
 | `datasource_id` | string | Yes | データソースの識別子 |
 | `title` | string | Yes | タスクタイトル |
-| `status` | string | Yes | `pending` / `in_progress` / `done` / `aborted` |
+| `status` | string | Yes | `pending` / `planning` / `executing` / `in_review` / `done` / `aborted` |
 | `project_id` | string | No | 紐づくプロジェクト ID |
 
 v1 からの削除: `lifecycle_id`, `run_count`, `generation`
@@ -392,15 +396,16 @@ v1 と比べ、generation の管理が不要。グループの `collected_at` �
 
 ### タスクに対するアクション
 
-| ボタン | 操作 | 条件 |
-|--------|------|------|
-| Plan | 対話セッション起動 → 計画立案 | status = pending, execute_prompt が空 |
-| Dispatch | `run` ジョブ実行 | execute_prompt が存在 |
-| Resume | セッション再開（`claude --resume`） | session_id が存在、直前のジョブが完了 |
-| Feedback | 収集 → 対応ジョブ実行 | pr_url が存在 |
-| Open | 対話セッション起動 | いつでも |
-| Done | status → done | いつでも |
-| Abort | status → aborted | いつでも |
+> 詳細は [design-state-machine.md](design-state-machine.md) を参照。
+
+| ボタン | 操作 | 遷移 | 条件 |
+|--------|------|------|------|
+| Plan | 対話セッション起動 → 計画立案 | `pending → planning`, `planning → planning` | project_id 存在 |
+| Dispatch | `run` ジョブ実行 | `planning → executing` | execute_prompt 存在, project_id 存在 |
+| Resume | セッション再開（`claude --resume`） | (遷移なし) | `in_review`, session_id 存在 |
+| Feedback | 収集 → 対応ジョブ実行 | `in_review → executing` | pr_url 存在 |
+| Done | 完了 | `in_review → done` | |
+| Abort | 中止 | `any → aborted` | executing からは Job kill も実行 |
 
 ### ジョブ状態表示
 
@@ -429,7 +434,14 @@ Lifecycle 表示を廃止し、ジョブ一覧（running / queued / done / faile
 ## 残課題（スコープ外）
 
 ### レビューエージェント
-PR に対してレビューエージェントを走らせる。GitHub webhook → レビューエージェント → Feedback として my-tasks-skill にフィード。
+PR に対してレビューエージェントを走らせる。GitHub webhook → レビュー Job 起動 → PR にコメント投稿。
+レビュー Job は `related_jobs` で追跡し、タスク状態遷移には影響しない。
+レビューコメントは次回の Feedback サイクルで収集される。
+詳細は [design-state-machine.md](design-state-machine.md) の「関連ジョブ」セクション参照。
+
+### CI 修正エージェント
+GitHub Actions 失敗時に webhook 経由で修正 Job を起動する。
+Feedback と同じパターン (`in_review → executing`) で状態遷移する。
 
 ### 外側のループ
 タスク分解 → my-tasks-skill へフィード → PR レビュー完了検知 → Feedback 指示 → PR マージを制御するエージェント。my-tasks-skill は「タスク → PR」の境界に集中し、上位の制御は外部に委ねる。

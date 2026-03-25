@@ -1,10 +1,8 @@
-"""FastAPI アプリケーション (v2)。"""
+"""FastAPI アプリケーション (v3)。"""
 
 import asyncio
-import importlib.util
 import json
 import os
-import uuid
 from pathlib import Path
 
 import yaml
@@ -13,19 +11,9 @@ from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .watcher import FileWatcher
-from lib.task_store import (
-    IndexEntry, FeedbackItem, FeedbackGroup,
-    load_index, save_index, load_task_yaml, save_task_yaml,
-    update_task_yaml, now_iso,
-)
+from lib.orchestrator import Orchestrator
 
 STATIC_DIR = Path(__file__).parent / "static"
-
-# collect-feedback.py をモジュールとしてインポート
-_script_dir = Path(__file__).resolve().parent.parent
-_cf_spec = importlib.util.spec_from_file_location("collect_feedback", _script_dir / "collect-feedback.py")
-_collect_feedback_mod = importlib.util.module_from_spec(_cf_spec)
-_cf_spec.loader.exec_module(_collect_feedback_mod)
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -70,6 +58,18 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
 
     watcher: FileWatcher | None = None
 
+    async def dispatcher_send(request: dict) -> dict:
+        sock_path = dispatch_dir / "dispatcher.sock"
+        reader, writer = await asyncio.open_unix_connection(str(sock_path))
+        writer.write(json.dumps(request, ensure_ascii=False).encode() + b"\n")
+        await writer.drain()
+        data = await reader.readline()
+        writer.close()
+        await writer.wait_closed()
+        return json.loads(data)
+
+    orchestrator = Orchestrator(repo_dir, dispatcher_send)
+
     @app.on_event("startup")
     async def startup() -> None:
         nonlocal watcher
@@ -82,18 +82,7 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         if watcher:
             watcher.stop()
 
-    index_lock = asyncio.Lock()
     sync_state = {"running": False, "error": None}
-
-    async def dispatcher_send(request: dict) -> dict:
-        sock_path = dispatch_dir / "dispatcher.sock"
-        reader, writer = await asyncio.open_unix_connection(str(sock_path))
-        writer.write(json.dumps(request, ensure_ascii=False).encode() + b"\n")
-        await writer.drain()
-        data = await reader.readline()
-        writer.close()
-        await writer.wait_closed()
-        return json.loads(data)
 
     # --- Read API ---
 
@@ -151,370 +140,41 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
 
     # --- Action API ---
 
-    def _load_datasource(datasource_id: str) -> dict | None:
-        if not datasource_id:
-            return None
-        ds_path = repo_dir / "datasources" / f"{datasource_id}.json"
-        if not ds_path.exists():
-            return None
-        with open(ds_path, encoding="utf-8") as f:
-            return json.load(f)
-
-    def _load_project(project_id: str) -> dict | None:
-        if not project_id:
-            return None
-        p_path = repo_dir / "projects" / f"{project_id}.json"
-        if not p_path.exists():
-            return None
-        with open(p_path, encoding="utf-8") as f:
-            return json.load(f)
-
     @app.post("/api/tasks/{task_id}/plan")
     async def api_plan(task_id: str) -> JSONResponse:
-        """Plan: 対話セッションを起動してタスクを計画する。"""
-        tasks_dir = repo_dir / "tasks"
-        index_entries = load_index(tasks_dir)
-        entry = next((e for e in index_entries if e.id == task_id), None)
-        if entry is None:
-            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-
-        task_data = load_task_yaml(tasks_dir, task_id)
-        if task_data is None:
-            return JSONResponse({"ok": False, "error": "task yaml not found"}, status_code=404)
-
-        datasource = _load_datasource(task_data.datasource_id)
-
-        from dashboard.interactive_prompt import build_plan_session_prompts
-        system_prompt, prompt = build_plan_session_prompts(task_data, datasource, str(repo_dir))
-
-        request_data = {
-            "command": "open",
-            "system_prompt": system_prompt,
-            "prompt": prompt,
-            "window_name": f"plan-{task_id}",
-            "activate": True,
-        }
-        if entry.project_id:
-            request_data["project_id"] = entry.project_id
-
-        try:
-            result = await dispatcher_send(request_data)
-        except (ConnectionRefusedError, FileNotFoundError):
-            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
-        return JSONResponse(result)
+        result = await orchestrator.plan(task_id)
+        status_code = 404 if result.get("error") == "not found" else 200
+        return JSONResponse(result, status_code=status_code)
 
     @app.post("/api/tasks/{task_id}/dispatch")
     async def api_dispatch(task_id: str) -> JSONResponse:
-        """Dispatch: execute_prompt を使ってジョブを実行する。"""
-        tasks_dir = repo_dir / "tasks"
-
-        async with index_lock:
-            index_entries = load_index(tasks_dir)
-        entry = next((e for e in index_entries if e.id == task_id), None)
-        if entry is None:
-            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-
-        task_data = load_task_yaml(tasks_dir, task_id)
-        if task_data is None:
-            return JSONResponse({"ok": False, "error": "task yaml not found"}, status_code=404)
-
-        prompt = task_data.execute_prompt
-        if not prompt:
-            return JSONResponse({"ok": False, "error": "execute_prompt が空です。先に Plan を実行してください"})
-
-        project_id = entry.project_id
-        if not project_id:
-            return JSONResponse({"ok": False, "error": "project_id が未設定です"})
-
-        session_id = str(uuid.uuid4())
-
-        # プロジェクト設定から worktree ブランチを導出
-        branch = None
-        project = _load_project(project_id)
-        if project:
-            worktree_config = project.get("worktree", {})
-            if worktree_config.get("enabled"):
-                from lib.worktree import resolve_branch_name
-                template = worktree_config.get("branch_template", "task/{task_id}")
-                context = {
-                    "task_id": task_id,
-                    "remote_id": task_data.remote_id or task_id,
-                    "project_id": project_id,
-                }
-                branch = resolve_branch_name(template, context)
-
-        run_request: dict = {
-            "command": "run",
-            "project_id": project_id,
-            "prompt": prompt,
-            "session_id": session_id,
-        }
-        if branch:
-            run_request["branch"] = branch
-
-        try:
-            result = await dispatcher_send(run_request)
-        except (ConnectionRefusedError, FileNotFoundError):
-            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
-
-        if result.get("ok"):
-            dispatch_id = result.get("dispatch_id", "")
-            returned_session_id = result.get("session_id", session_id)
-
-            # タスクを in_progress に更新し、dispatch_id と session_id を記録
-            async with index_lock:
-                index_entries = load_index(tasks_dir)
-                for e in index_entries:
-                    if e.id == task_id:
-                        e.status = "in_progress"
-                        break
-                save_index(tasks_dir, index_entries)
-
-            task_data.status = "in_progress"
-            task_data.dispatch_id = dispatch_id
-            task_data.session_id = returned_session_id
-            if branch:
-                task_data.branch = branch
-            save_task_yaml(tasks_dir, task_id, task_data)
-
-        return JSONResponse(result)
+        result = await orchestrator.dispatch(task_id)
+        status_code = 404 if result.get("error") == "not found" else 200
+        return JSONResponse(result, status_code=status_code)
 
     @app.post("/api/tasks/{task_id}/resume")
     async def api_resume(task_id: str) -> JSONResponse:
-        """Resume: 完了済みセッションを再開する。"""
-        tasks_dir = repo_dir / "tasks"
-        task_data = load_task_yaml(tasks_dir, task_id)
-        if task_data is None:
-            return JSONResponse({"ok": False, "error": "task yaml not found"}, status_code=404)
-
-        session_id = task_data.session_id
-        if not session_id:
-            return JSONResponse({"ok": False, "error": "session_id が記録されていません"})
-
-        index_entries = load_index(tasks_dir)
-        entry = next((e for e in index_entries if e.id == task_id), None)
-        project_id = entry.project_id if entry else task_data.project_id
-        if not project_id:
-            return JSONResponse({"ok": False, "error": "project_id が未設定です"})
-
-        resume_request: dict = {
-            "command": "resume",
-            "project_id": project_id,
-            "session_id": session_id,
-            "window_name": f"resume-{task_id}",
-            "activate": True,
-        }
-        # branch が記録されていれば worktree パスを渡す
-        if task_data.branch:
-            from lib.worktree import worktree_path
-            project = _load_project(project_id)
-            if project and project.get("working_directory"):
-                wt = worktree_path(project["working_directory"], task_data.branch)
-                if wt.is_dir():
-                    resume_request["worktree"] = str(wt)
-
-        try:
-            result = await dispatcher_send(resume_request)
-        except (ConnectionRefusedError, FileNotFoundError):
-            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
-        return JSONResponse(result)
-
-    def _collect_feedback_for_task(tasks_dir: Path, datasources_dir: Path, task_id: str) -> int:
-        """タスクに対するフィードバックを外部ソースから収集する。収集件数を返す。"""
-        task_data = load_task_yaml(tasks_dir, task_id)
-        if not task_data:
-            return 0
-
-        collected_items: list[dict] = []
-
-        # Jira コメント収集
-        if task_data.datasource_id:
-            datasource = _collect_feedback_mod.load_datasource(datasources_dir, task_data.datasource_id)
-            if datasource and datasource.get("type") == "jira" and task_data.remote_id:
-                site_mapping = datasource.get("site_mapping", {})
-                site = _collect_feedback_mod.resolve_jira_site(task_data.remote_id, site_mapping)
-                if site:
-                    jira_cursor = task_data.feedback_cursor.get("jira_comment")
-                    new_comments, new_cursor = _collect_feedback_mod.collect_jira_comments(
-                        task_data.remote_id, site, jira_cursor,
-                    )
-                    collected_items.extend(new_comments)
-                    if new_cursor:
-                        task_data.feedback_cursor["jira_comment"] = new_cursor
-
-        # Bitbucket PR コメント収集
-        if task_data.pr_url:
-            bb_cursor = task_data.feedback_cursor.get("bitbucket_pr")
-            new_comments, new_cursor = _collect_feedback_mod.collect_bitbucket_pr_comments(
-                task_data.pr_url, bb_cursor,
-            )
-            collected_items.extend(new_comments)
-            if new_cursor:
-                task_data.feedback_cursor["bitbucket_pr"] = new_cursor
-
-        # GitHub PR コメント収集
-        if task_data.pr_url:
-            gh_cursor = task_data.feedback_cursor.get("github_pr")
-            new_comments, new_cursor = _collect_feedback_mod.collect_github_pr_comments(
-                task_data.pr_url, gh_cursor,
-            )
-            collected_items.extend(new_comments)
-            if new_cursor:
-                task_data.feedback_cursor["github_pr"] = new_cursor
-
-        if collected_items:
-            group = FeedbackGroup(
-                collected_at=now_iso(),
-                items=[FeedbackItem.from_dict(item) for item in collected_items],
-            )
-            task_data.feedback.append(group)
-            save_task_yaml(tasks_dir, task_id, task_data)
-
-        return len(collected_items)
+        result = await orchestrator.resume(task_id)
+        status_code = 404 if result.get("error") == "task yaml not found" else 200
+        return JSONResponse(result, status_code=status_code)
 
     @app.post("/api/tasks/{task_id}/feedback")
     async def api_feedback(task_id: str) -> JSONResponse:
-        """Feedback: フィードバックを収集し、対応ジョブを Dispatch する。"""
-        tasks_dir = repo_dir / "tasks"
-
-        # フィードバック収集
-        collected = await asyncio.to_thread(
-            _collect_feedback_for_task, tasks_dir, repo_dir / "datasources", task_id,
-        )
-
-        if collected == 0:
-            return JSONResponse({"ok": True, "message": "新しいフィードバックはありません", "collected": 0})
-
-        # タスクデータを再読み込み
-        task_data = load_task_yaml(tasks_dir, task_id)
-        if task_data is None:
-            return JSONResponse({"ok": False, "error": "task yaml not found"}, status_code=404)
-
-        index_entries = load_index(tasks_dir)
-        entry = next((e for e in index_entries if e.id == task_id), None)
-        project_id = entry.project_id if entry else task_data.project_id
-        if not project_id:
-            return JSONResponse({"ok": True, "message": f"フィードバック {collected} 件収集（project_id 未設定のため Dispatch はスキップ）", "collected": collected})
-
-        # 最新のフィードバックグループ
-        latest_group = task_data.feedback[-1] if task_data.feedback else None
-        if not latest_group:
-            return JSONResponse({"ok": True, "message": f"フィードバック {collected} 件収集", "collected": collected})
-
-        # フィードバック対応プロンプトの生成
-        fb_lines = []
-        for item in latest_group.items:
-            fb_lines.append(f"- [{item.source}] {item.author}: {item.body}")
-        fb_text = "\n".join(fb_lines)
-
-        base_prompt = task_data.execute_prompt or task_data.description or task_data.title
-        prompt = f"""{base_prompt}
-
-# フィードバック対応 ({latest_group.collected_at})
-
-以下のフィードバックに対応してください:
-
-{fb_text}
-
-変更をコミットし、PR を更新してください。"""
-
-        session_id = str(uuid.uuid4())
-
-        # 既存の branch を再利用（Feedback は同じブランチで作業する）
-        fb_run_request: dict = {
-            "command": "run",
-            "project_id": project_id,
-            "prompt": prompt,
-            "session_id": session_id,
-        }
-        if task_data.branch:
-            fb_run_request["branch"] = task_data.branch
-
-        try:
-            result = await dispatcher_send(fb_run_request)
-        except (ConnectionRefusedError, FileNotFoundError):
-            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
-
-        if result.get("ok"):
-            dispatch_id = result.get("dispatch_id", "")
-            returned_session_id = result.get("session_id", session_id)
-            task_data.dispatch_id = dispatch_id
-            task_data.session_id = returned_session_id
-            save_task_yaml(tasks_dir, task_id, task_data)
-
-        return JSONResponse({**result, "collected": collected})
+        result = await orchestrator.feedback(task_id)
+        status_code = 404 if result.get("error") == "not found" else 200
+        return JSONResponse(result, status_code=status_code)
 
     @app.post("/api/tasks/{task_id}/complete")
     async def api_complete(task_id: str) -> JSONResponse:
-        tasks_dir = repo_dir / "tasks"
-
-        async with index_lock:
-            index_entries = load_index(tasks_dir)
-            entry = next((e for e in index_entries if e.id == task_id), None)
-            if entry is None:
-                return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-
-            entry.status = "done"
-            update_task_yaml(tasks_dir, entry)
-            save_index(tasks_dir, index_entries)
-
-        return JSONResponse({"ok": True})
+        result = await orchestrator.complete(task_id)
+        status_code = 404 if result.get("error") == "not found" else 200
+        return JSONResponse(result, status_code=status_code)
 
     @app.post("/api/tasks/{task_id}/abort")
     async def api_abort(task_id: str) -> JSONResponse:
-        tasks_dir = repo_dir / "tasks"
-
-        async with index_lock:
-            index_entries = load_index(tasks_dir)
-            entry = next((e for e in index_entries if e.id == task_id), None)
-            if entry is None:
-                return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-
-            entry.status = "aborted"
-            update_task_yaml(tasks_dir, entry)
-            save_index(tasks_dir, index_entries)
-
-        return JSONResponse({"ok": True})
-
-    @app.post("/api/tasks/{task_id}/open-session")
-    async def api_task_open_session(task_id: str) -> JSONResponse:
-        tasks_dir = repo_dir / "tasks"
-        index_entries = load_index(tasks_dir)
-        entry = next((e for e in index_entries if e.id == task_id), None)
-        if entry is None:
-            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-
-        task_data = load_task_yaml(tasks_dir, task_id)
-        if task_data is None:
-            from lib.task_store import TaskData
-            task_data = TaskData(id=task_id)
-        if not task_data.datasource_id:
-            task_data.datasource_id = entry.datasource_id
-        if not task_data.project_id:
-            task_data.project_id = entry.project_id
-        if not task_data.remote_id:
-            task_data.remote_id = entry.remote_id
-        datasource = _load_datasource(task_data.datasource_id)
-
-        from dashboard.interactive_prompt import build_task_session_prompts
-        system_prompt, prompt = build_task_session_prompts(task_data, datasource, str(repo_dir))
-
-        request_data = {
-            "command": "open",
-            "system_prompt": system_prompt,
-            "prompt": prompt,
-            "window_name": task_id,
-            "activate": True,
-        }
-        project_id = entry.project_id
-        if project_id:
-            request_data["project_id"] = project_id
-
-        try:
-            result = await dispatcher_send(request_data)
-        except (ConnectionRefusedError, FileNotFoundError):
-            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
-        return JSONResponse(result)
+        result = await orchestrator.abort(task_id)
+        status_code = 404 if result.get("error") == "not found" else 200
+        return JSONResponse(result, status_code=status_code)
 
     # --- Sync ---
 

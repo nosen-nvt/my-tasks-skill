@@ -149,6 +149,7 @@ class TaskData:
     branch: str = ""
     dispatch_id: str = ""
     session_id: str = ""
+    related_jobs: list[str] = field(default_factory=list)
     feedback: list[FeedbackGroup] = field(default_factory=list)
     feedback_cursor: dict[str, str] = field(default_factory=dict)
     history: list[HistoryEntry] = field(default_factory=list)
@@ -170,6 +171,7 @@ class TaskData:
             "branch": self.branch,
             "dispatch_id": self.dispatch_id,
             "session_id": self.session_id,
+            "related_jobs": self.related_jobs,
             "feedback": [g.to_dict() for g in self.feedback],
             "feedback_cursor": self.feedback_cursor,
             "history": [h.to_dict() for h in self.history],
@@ -223,6 +225,7 @@ class TaskData:
             branch=d.get("branch", ""),
             dispatch_id=d.get("dispatch_id", ""),
             session_id=d.get("session_id", ""),
+            related_jobs=d.get("related_jobs") or [],
             feedback=feedback_groups,
             feedback_cursor=d.get("feedback_cursor") or {},
             history=history_entries,

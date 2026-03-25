@@ -52,6 +52,7 @@ class Job:
     host_commands: list[dict] = field(default_factory=list)
     extra_binds: list[dict] = field(default_factory=list)
     session_id: str = ""
+    task_id: str = ""
     status: str = "queued"
     pid: int | None = None
     exit_code: int | None = None
@@ -64,6 +65,7 @@ class Job:
             "dispatch_id": self.dispatch_id,
             "project_id": self.project_id,
             "session_id": self.session_id,
+            "task_id": self.task_id,
             "status": self.status,
             "pid": self.pid,
             "exit_code": self.exit_code,

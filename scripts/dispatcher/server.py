@@ -75,6 +75,7 @@ class DispatchServer(ExecutorMixin):
                     prompt="",
                     working_dir="",
                     session_id=data.get("session_id", ""),
+                    task_id=data.get("task_id", ""),
                     status=data["status"],
                     pid=data.get("pid"),
                     exit_code=data.get("exit_code"),
@@ -157,6 +158,7 @@ class DispatchServer(ExecutorMixin):
         project_id = request.get("project_id", "")
         prompt = request.get("prompt", "")
         session_id = request.get("session_id", "")
+        task_id = request.get("task_id", "")
 
         if not project_id:
             return {"ok": False, "error": "project_id is required"}
@@ -210,6 +212,7 @@ class DispatchServer(ExecutorMixin):
             host_commands=host_commands,
             extra_binds=extra_binds,
             session_id=session_id,
+            task_id=task_id,
             branch=branch,
         )
         self.jobs[dispatch_id] = job

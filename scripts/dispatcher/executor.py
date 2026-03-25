@@ -15,6 +15,7 @@ import sandbox_exec
 from .models import Job, SOCKET_DIR_NAME, log, now_iso, get_host_cmd_broker_socket_path
 from .prompt import build_system_prompt
 from lib.worktree import ensure_worktree
+from lib.orchestrator import on_job_completed
 
 if TYPE_CHECKING:
     from .host_cmd import HostCommandBroker
@@ -155,6 +156,19 @@ class ExecutorMixin:
             self._cleanup_sentinels(job.dispatch_id)
             self._save_jobs()
             log.info(f"Job finished: {job.dispatch_id} status={job.status} exit_code={job.exit_code}")
+
+            # タスク状態遷移: executing → in_review
+            if job.task_id:
+                try:
+                    on_job_completed(
+                        self.repo_dir,
+                        task_id=job.task_id,
+                        dispatch_id=job.dispatch_id,
+                        exit_code=job.exit_code or 0,
+                    )
+                    log.info(f"Task {job.task_id} transitioned to in_review")
+                except Exception as e:
+                    log.error(f"on_job_completed error for task {job.task_id}: {e}")
 
         self._notify_waiters(job)
         await self.drain_queue()
