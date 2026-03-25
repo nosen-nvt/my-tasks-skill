@@ -1,15 +1,15 @@
 # CLAUDE.md
 
-## ディスパッチャー
+## オーケストレーター
 
 再起動:
 ```
-systemctl --user restart my-tasks-dispatcher.service
+systemctl --user restart my-tasks-orchestrator.service
 ```
 
 ステータス確認:
 ```
-systemctl --user status my-tasks-dispatcher.service --no-pager
+systemctl --user status my-tasks-orchestrator.service --no-pager
 ```
 
 ## ダッシュボード

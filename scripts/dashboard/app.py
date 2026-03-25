@@ -11,7 +11,6 @@ from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .watcher import FileWatcher
-from lib.orchestrator import Orchestrator
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -67,8 +66,6 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         writer.close()
         await writer.wait_closed()
         return json.loads(data)
-
-    orchestrator = Orchestrator(repo_dir, dispatcher_send)
 
     @app.on_event("startup")
     async def startup() -> None:
@@ -140,40 +137,28 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
 
     # --- Action API ---
 
-    @app.post("/api/tasks/{task_id}/plan")
-    async def api_plan(task_id: str) -> JSONResponse:
-        result = await orchestrator.plan(task_id)
-        status_code = 404 if result.get("error") == "not found" else 200
-        return JSONResponse(result, status_code=status_code)
+    ACTION_MAP = {
+        "plan": "plan",
+        "dispatch": "dispatch",
+        "resume": "request_resume",
+        "feedback": "request_feedback",
+        "complete": "done",
+        "abort": "abort",
+    }
 
-    @app.post("/api/tasks/{task_id}/dispatch")
-    async def api_dispatch(task_id: str) -> JSONResponse:
-        result = await orchestrator.dispatch(task_id)
-        status_code = 404 if result.get("error") == "not found" else 200
-        return JSONResponse(result, status_code=status_code)
-
-    @app.post("/api/tasks/{task_id}/resume")
-    async def api_resume(task_id: str) -> JSONResponse:
-        result = await orchestrator.resume(task_id)
-        status_code = 404 if result.get("error") == "task yaml not found" else 200
-        return JSONResponse(result, status_code=status_code)
-
-    @app.post("/api/tasks/{task_id}/feedback")
-    async def api_feedback(task_id: str) -> JSONResponse:
-        result = await orchestrator.feedback(task_id)
-        status_code = 404 if result.get("error") == "not found" else 200
-        return JSONResponse(result, status_code=status_code)
-
-    @app.post("/api/tasks/{task_id}/complete")
-    async def api_complete(task_id: str) -> JSONResponse:
-        result = await orchestrator.complete(task_id)
-        status_code = 404 if result.get("error") == "not found" else 200
-        return JSONResponse(result, status_code=status_code)
-
-    @app.post("/api/tasks/{task_id}/abort")
-    async def api_abort(task_id: str) -> JSONResponse:
-        result = await orchestrator.abort(task_id)
-        status_code = 404 if result.get("error") == "not found" else 200
+    @app.post("/api/tasks/{task_id}/action/{action_type}")
+    async def api_action(task_id: str, action_type: str) -> JSONResponse:
+        mapped = ACTION_MAP.get(action_type, action_type)
+        try:
+            result = await dispatcher_send({
+                "command": "dispatch_action",
+                "task_id": task_id,
+                "action": {"type": mapped},
+            })
+        except (ConnectionRefusedError, FileNotFoundError):
+            return JSONResponse({"ok": False, "error": "オーケストレーターが起動していません"})
+        error = result.get("error", "")
+        status_code = 404 if "not found" in error else 200
         return JSONResponse(result, status_code=status_code)
 
     # --- Sync ---
@@ -296,7 +281,7 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
         try:
             result = await dispatcher_send(request_data)
         except (ConnectionRefusedError, FileNotFoundError):
-            return JSONResponse({"ok": False, "error": "ディスパッチャーが起動していません"})
+            return JSONResponse({"ok": False, "error": "オーケストレーターが起動していません"})
         return JSONResponse(result)
 
     # --- Static & Index ---

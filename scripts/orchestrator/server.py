@@ -1,4 +1,4 @@
-"""DispatchServer コア (v2)。"""
+"""OrchestratorServer — Reducer + Hook Evaluator + Job Executor を統合した常駐プロセス。"""
 
 import asyncio
 import json
@@ -14,26 +14,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import sandbox_exec
 
 from .models import (
-    Job, log, now_iso,
+    Job, Action, log, now_iso,
     SOCKET_DIR_NAME,
     get_socket_path, get_host_cmd_broker_socket_path, get_repo_dir,
 )
 from .host_cmd import HostCommandBroker
 from .tmux import detect_tmux_session, ensure_tmux_session
 from .executor import ExecutorMixin
+from .reducer import reduce
+from .hooks import HookEvaluator
+from .builtin_hooks import BUILTIN_HOOKS
 from lib.worktree import ensure_worktree
+from lib.task_store import load_task_yaml, save_task_yaml, update_index_status
 
 
-class DispatchServer(ExecutorMixin):
+class OrchestratorServer(ExecutorMixin):
     def __init__(self, max_slots: int, repo_dir: Path):
         self.max_slots = max_slots
         self.repo_dir = repo_dir
+        self.tasks_dir = repo_dir / "tasks"
+        self.datasources_dir = repo_dir / "datasources"
         self.jobs: dict[str, Job] = {}
         self.queue: list[Job] = []
         self.waiters: dict[str, list[asyncio.Future]] = {}
         self._counter: dict[str, int] = {}
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self.host_cmd_broker = HostCommandBroker()
+
+        # Orchestrator 固有
+        self._dispatch_lock = asyncio.Lock()
+        self._hook_evaluator = HookEvaluator(BUILTIN_HOOKS)
+        self._hook_depth = 0
+        self._MAX_HOOK_DEPTH = 5
 
     # --- パス ---
 
@@ -64,7 +76,6 @@ class DispatchServer(ExecutorMixin):
                     continue
                 data = json.loads(line)
                 dispatch_id = data["dispatch_id"]
-                # running/queued ジョブは再起動時に failed にフォールバック
                 if data.get("status") in ("running", "queued"):
                     data["status"] = "failed"
                     if not data.get("finished_at"):
@@ -84,7 +95,6 @@ class DispatchServer(ExecutorMixin):
                     finished_at=data.get("finished_at"),
                 )
                 self.jobs[dispatch_id] = job
-                # _counter 復元: dispatch_id = "{project_id}-{seq}"
                 parts = dispatch_id.rsplit("-", 1)
                 if len(parts) == 2:
                     try:
@@ -109,6 +119,112 @@ class DispatchServer(ExecutorMixin):
     def running_working_dirs(self) -> set[str]:
         return {j.working_dir for j in self.jobs.values() if j.status == "running"}
 
+    # --- dispatch_action (コアエントリポイント) ---
+
+    async def dispatch_action(self, task_id: str, action: Action) -> dict:
+        """Reducer → 永続化 → フック評価。"""
+        async with self._dispatch_lock:
+            task_data = load_task_yaml(self.tasks_dir, task_id)
+            if task_data is None:
+                return {"ok": False, "error": "task not found"}
+
+            new_data = reduce(task_data, action)
+            if isinstance(new_data, str):
+                return {"ok": False, "error": new_data}
+
+            # 永続化
+            save_task_yaml(self.tasks_dir, task_id, new_data)
+            if new_data.status != task_data.status:
+                update_index_status(self.tasks_dir, task_id, new_data.status)
+
+        # フック評価（ロック外で実行 — フックが dispatch_action を呼ぶため）
+        self._hook_depth += 1
+        try:
+            if self._hook_depth <= self._MAX_HOOK_DEPTH:
+                await self._evaluate_and_fire_hooks(task_id, new_data)
+            else:
+                log.warning(f"Hook depth limit reached ({self._MAX_HOOK_DEPTH}) for task {task_id}")
+        finally:
+            self._hook_depth -= 1
+
+        return {"ok": True}
+
+    async def _evaluate_and_fire_hooks(self, task_id: str, task_data) -> None:
+        """条件一致するフックを起動する。"""
+        matched = self._hook_evaluator.evaluate(task_data, self.repo_dir)
+        for hook in matched:
+            if hook.type == "builtin" and hook.handler:
+                log.info(f"Firing builtin hook: {hook.id} for task {task_id}")
+                asyncio.create_task(self._run_builtin_hook(hook, task_id, task_data))
+            elif hook.type == "script":
+                log.info(f"Firing script hook: {hook.id} for task {task_id}")
+                asyncio.create_task(self._run_script_hook(hook, task_id, task_data))
+            elif hook.type == "dispatch":
+                log.info(f"Firing dispatch hook: {hook.id} for task {task_id}")
+                asyncio.create_task(self._run_dispatch_hook(hook, task_id, task_data))
+
+    async def _run_builtin_hook(self, hook, task_id: str, task_data) -> None:
+        try:
+            await hook.handler(self, task_id, task_data)
+        except Exception as e:
+            log.error(f"Builtin hook {hook.id} error: {e}")
+
+    async def _run_script_hook(self, hook, task_id: str, task_data) -> None:
+        """ホスト側でシェルスクリプトを実行する。"""
+        try:
+            cmd = hook.command.replace("{task_id}", task_id)
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            log.info(f"Script hook {hook.id} exited with {proc.returncode}")
+            if proc.returncode != 0:
+                log.error(f"Script hook {hook.id} stderr: {stderr.decode(errors='replace')[:500]}")
+        except Exception as e:
+            log.error(f"Script hook {hook.id} error: {e}")
+
+    async def _run_dispatch_hook(self, hook, task_id: str, task_data) -> None:
+        """AI ジョブをサンドボックスで実行する。"""
+        try:
+            # プロンプトファイル読み込み + テンプレート展開
+            prompt_path = self.repo_dir / hook.prompt_file
+            if not prompt_path.exists():
+                log.error(f"Dispatch hook {hook.id}: prompt file not found: {hook.prompt_file}")
+                return
+            prompt_template = prompt_path.read_text(encoding="utf-8")
+            prompt = prompt_template
+            for attr in ("pr_url", "branch", "actions_error", "dispatch_id", "session_id"):
+                prompt = prompt.replace(f"{{{attr}}}", str(getattr(task_data, attr, "")))
+
+            if not task_data.project_id:
+                log.error(f"Dispatch hook {hook.id}: no project_id for task {task_id}")
+                return
+
+            run_request = {
+                "project_id": task_data.project_id,
+                "prompt": prompt,
+                "session_id": str(__import__("uuid").uuid4()),
+                "task_id": task_id,
+            }
+            if task_data.branch:
+                run_request["branch"] = task_data.branch
+
+            result = await self.cmd_run(run_request)
+            if result.get("ok"):
+                dispatch_id = result.get("dispatch_id", "")
+                # related_jobs に追加
+                td = load_task_yaml(self.tasks_dir, task_id)
+                if td and dispatch_id not in td.related_jobs:
+                    td.related_jobs.append(dispatch_id)
+                    save_task_yaml(self.tasks_dir, task_id, td)
+                log.info(f"Dispatch hook {hook.id}: dispatched {dispatch_id}")
+            else:
+                log.error(f"Dispatch hook {hook.id}: failed: {result.get('error')}")
+        except Exception as e:
+            log.error(f"Dispatch hook {hook.id} error: {e}")
+
     # --- コマンドハンドラ ---
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -120,6 +236,7 @@ class DispatchServer(ExecutorMixin):
             command = request.get("command", "")
 
             handler = {
+                "dispatch_action": self.cmd_dispatch_action,
                 "run": self.cmd_run,
                 "resume": self.cmd_resume,
                 "open": self.cmd_open,
@@ -154,6 +271,17 @@ class DispatchServer(ExecutorMixin):
             except Exception:
                 pass
 
+    async def cmd_dispatch_action(self, request: dict) -> dict:
+        task_id = request.get("task_id", "")
+        action_data = request.get("action", {})
+        action = Action(
+            type=action_data.get("type", ""),
+            field=action_data.get("field", ""),
+            value=action_data.get("value", ""),
+            payload=action_data.get("payload", {}),
+        )
+        return await self.dispatch_action(task_id, action)
+
     async def cmd_run(self, request: dict) -> dict:
         project_id = request.get("project_id", "")
         prompt = request.get("prompt", "")
@@ -185,12 +313,10 @@ class DispatchServer(ExecutorMixin):
 
         dispatch_id = self.generate_dispatch_id(project_id)
 
-        # session_id が未指定なら生成
         if not session_id:
             import uuid
             session_id = str(uuid.uuid4())
 
-        # worktree
         branch = request.get("branch")
         if branch:
             try:
@@ -253,7 +379,6 @@ class DispatchServer(ExecutorMixin):
         else:
             return {"ok": False, "error": "project_id is required"}
 
-        # worktree 指定がある場合はそのパスを使う
         worktree = request.get("worktree")
         if worktree and Path(worktree).is_dir():
             working_dir = worktree
@@ -311,7 +436,6 @@ class DispatchServer(ExecutorMixin):
             sandbox_profile_id = request.get("sandbox_profile") or "default"
             env_files = []
 
-        # worktree 指定がある場合はそのパスを使う
         worktree = request.get("worktree")
         if worktree and Path(worktree).is_dir():
             working_dir = worktree
@@ -415,7 +539,6 @@ class DispatchServer(ExecutorMixin):
                         p.unlink()
                         log.info(f"Cleaned up old file: {p.name}")
 
-                # 完了済みジョブのプルーニング (24時間経過)
                 pruned = []
                 for dispatch_id, job in list(self.jobs.items()):
                     if job.status in ("done", "failed") and job.finished_at:
@@ -473,7 +596,7 @@ async def run_server(max_slots: int, repo: str):
     if os.path.exists(broker_path):
         os.unlink(broker_path)
 
-    server = DispatchServer(max_slots=max_slots, repo_dir=repo_dir)
+    server = OrchestratorServer(max_slots=max_slots, repo_dir=repo_dir)
     server._load_jobs()
 
     loop = asyncio.get_event_loop()
@@ -486,7 +609,7 @@ async def run_server(max_slots: int, repo: str):
     broker_srv = await asyncio.start_unix_server(server.host_cmd_broker.handle_client, path=broker_path)
     os.chmod(broker_path, 0o600)
 
-    log.info(f"Dispatch server started: socket={socket_path} host_cmd_broker={broker_path} max_slots={max_slots} repo={repo_dir}")
+    log.info(f"Orchestrator server started: socket={socket_path} host_cmd_broker={broker_path} max_slots={max_slots} repo={repo_dir}")
 
     asyncio.create_task(server.cleanup_old_logs())
 
@@ -494,7 +617,7 @@ async def run_server(max_slots: int, repo: str):
         await srv.serve_forever()
 
 
-async def _shutdown(server: DispatchServer, srv, broker_srv):
+async def _shutdown(server: OrchestratorServer, srv, broker_srv):
     await server.shutdown()
     srv.close()
     broker_srv.close()

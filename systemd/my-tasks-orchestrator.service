@@ -1,10 +1,10 @@
 [Unit]
-Description=My Tasks Dispatcher Server
+Description=My Tasks Orchestrator Server
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 %h/src/github.com/nosen-nvt/my-tasks-skill/scripts/dispatcher server
+ExecStart=/usr/bin/python3 %h/src/github.com/nosen-nvt/my-tasks-skill/scripts/orchestrator server
 Restart=on-failure
 RestartSec=5
 Environment=XDG_RUNTIME_DIR=/run/user/%U

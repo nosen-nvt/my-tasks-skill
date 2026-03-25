@@ -2,7 +2,7 @@
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone, timedelta
 
 JST = timezone(timedelta(hours=9))
@@ -15,7 +15,7 @@ SOCKET_DIR_NAME = "my-tasks-dispatch"
 SOCKET_FILE_NAME = "dispatcher.sock"
 HOST_CMD_BROKER_SOCK_NAME = "host-cmd-broker.sock"
 
-log = logging.getLogger("dispatcher")
+log = logging.getLogger("orchestrator")
 
 
 def now_iso() -> str:
@@ -48,9 +48,9 @@ class Job:
     prompt: str
     working_dir: str
     sandbox_profile_id: str = "default"
-    env_files: list[str] = field(default_factory=list)
-    host_commands: list[dict] = field(default_factory=list)
-    extra_binds: list[dict] = field(default_factory=list)
+    env_files: list[str] = dataclass_field(default_factory=list)
+    host_commands: list[dict] = dataclass_field(default_factory=list)
+    extra_binds: list[dict] = dataclass_field(default_factory=list)
     session_id: str = ""
     task_id: str = ""
     status: str = "queued"
@@ -73,3 +73,12 @@ class Job:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
         }
+
+
+@dataclass
+class Action:
+    """Reducer が受け取るアクション。"""
+    type: str
+    field: str = ""
+    value: str = ""
+    payload: dict = dataclass_field(default_factory=dict)

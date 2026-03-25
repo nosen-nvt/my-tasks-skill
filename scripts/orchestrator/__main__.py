@@ -1,7 +1,9 @@
 """CLI エントリポイント + クライアント。
 
-python3 scripts/dispatcher server   — パッケージ実行
-python3 -m dispatcher server        — PYTHONPATH=scripts 経由
+python3 scripts/orchestrator server      — サーバ起動
+python3 scripts/orchestrator dispatch    — タスクアクション送信
+python3 scripts/orchestrator run ...     — ジョブ投入 (互換)
+python3 -m orchestrator server           — PYTHONPATH=scripts 経由
 """
 
 import argparse
@@ -14,13 +16,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# python3 scripts/dispatcher で直接実行した場合に相対 import を有効にする
+# python3 scripts/orchestrator で直接実行した場合に相対 import を有効にする
 if __package__ is None or __package__ == "":
     import warnings
     _pkg_dir = Path(__file__).resolve().parent
     sys.path.insert(0, str(_pkg_dir.parent))
-    __package__ = "dispatcher"
-    importlib.import_module("dispatcher")
+    __package__ = "orchestrator"
+    importlib.import_module("orchestrator")
     warnings.filterwarnings("ignore", message="__package__ != __spec__.parent")
 
 from .models import (
@@ -40,8 +42,8 @@ async def client_send(request: dict, wait_response: bool = False) -> dict:
     except (ConnectionRefusedError, FileNotFoundError):
         if is_inside_sandbox():
             print(
-                "エラー: ディスパッチサーバが起動していません。\n"
-                "ホスト側で起動してください: systemctl --user start my-tasks-dispatcher",
+                "エラー: オーケストレーターが起動していません。\n"
+                "ホスト側で起動してください: systemctl --user start my-tasks-orchestrator",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -91,8 +93,30 @@ def _start_server_background():
 # CLI コマンド
 # ---------------------------------------------------------------------------
 
+def cmd_dispatch(args: argparse.Namespace) -> None:
+    """タスクアクションを送信する。"""
+    action: dict[str, Any] = {"type": args.action_type}
+    if args.action_type == "update_field":
+        if not args.field or args.value is None:
+            print("エラー: update_field には --field と --value が必要です", file=sys.stderr)
+            sys.exit(1)
+        action["field"] = args.field
+        action["value"] = args.value
+
+    request = {
+        "command": "dispatch_action",
+        "task_id": args.task_id,
+        "action": action,
+    }
+    response = asyncio.run(client_send(request))
+    if response.get("ok"):
+        print("OK", file=sys.stderr)
+    else:
+        print(f"エラー: {response.get('error', 'Unknown error')}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_run(args: argparse.Namespace) -> None:
-    # プロンプトの読み込み: --prompt-file > stdin
     if args.prompt_file:
         prompt = Path(args.prompt_file).read_text(encoding="utf-8").strip()
     else:
@@ -256,12 +280,12 @@ def cmd_server(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Unix ドメインソケット C/S ジョブランナー"
+        description="Orchestrator — タスク管理 + ジョブ実行"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # server
-    p_server = subparsers.add_parser("server", help="ディスパッチサーバを起動する")
+    p_server = subparsers.add_parser("server", help="オーケストレーターサーバを起動する")
     p_server.add_argument(
         "--max-slots", type=int, default=DEFAULT_MAX_SLOTS,
         help=f"最大並列スロット数（デフォルト: {DEFAULT_MAX_SLOTS}）",
@@ -271,6 +295,14 @@ def main() -> None:
         help=f"タスク管理リポジトリのパス（デフォルト: {DEFAULT_REPO}）",
     )
     p_server.set_defaults(func=cmd_server)
+
+    # dispatch (NEW: タスクアクション)
+    p_dispatch = subparsers.add_parser("dispatch", help="タスクアクションを送信する")
+    p_dispatch.add_argument("task_id", help="タスク ID")
+    p_dispatch.add_argument("action_type", help="アクション種別 (plan, dispatch, request_resume, request_feedback, done, abort, update_field)")
+    p_dispatch.add_argument("--field", default="", help="update_field 用のフィールド名")
+    p_dispatch.add_argument("--value", default="", help="update_field 用の値")
+    p_dispatch.set_defaults(func=cmd_dispatch)
 
     # run
     p_run = subparsers.add_parser("run", help="ジョブを投入する（プロンプトは stdin or --prompt-file）")

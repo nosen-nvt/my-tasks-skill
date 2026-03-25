@@ -153,6 +153,11 @@ class TaskData:
     feedback: list[FeedbackGroup] = field(default_factory=list)
     feedback_cursor: dict[str, str] = field(default_factory=dict)
     history: list[HistoryEntry] = field(default_factory=list)
+    plan_session_id: str = ""
+    resume_requested: bool = False
+    feedback_requested: bool = False
+    actions_status: str = ""
+    actions_error: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -175,6 +180,11 @@ class TaskData:
             "feedback": [g.to_dict() for g in self.feedback],
             "feedback_cursor": self.feedback_cursor,
             "history": [h.to_dict() for h in self.history],
+            "plan_session_id": self.plan_session_id,
+            "resume_requested": self.resume_requested,
+            "feedback_requested": self.feedback_requested,
+            "actions_status": self.actions_status,
+            "actions_error": self.actions_error,
         }
 
     @classmethod
@@ -229,6 +239,11 @@ class TaskData:
             feedback=feedback_groups,
             feedback_cursor=d.get("feedback_cursor") or {},
             history=history_entries,
+            plan_session_id=d.get("plan_session_id", ""),
+            resume_requested=bool(d.get("resume_requested", False)),
+            feedback_requested=bool(d.get("feedback_requested", False)),
+            actions_status=d.get("actions_status", ""),
+            actions_error=d.get("actions_error", ""),
         )
 
     def to_index_entry(self) -> "IndexEntry":

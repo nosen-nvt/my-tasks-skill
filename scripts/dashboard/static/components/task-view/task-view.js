@@ -101,7 +101,7 @@ function bindTaskActions(root) {
         e.stopPropagation();
         handleAction(
           btn,
-          `${BASE}/api/tasks/${btn.dataset.taskId}/${config.endpoint}`,
+          `${BASE}/api/tasks/${btn.dataset.taskId}/action/${config.endpoint}`,
           config.text
         );
       });

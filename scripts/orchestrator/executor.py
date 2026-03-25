@@ -12,17 +12,15 @@ from typing import TYPE_CHECKING
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import sandbox_exec
 
-from .models import Job, SOCKET_DIR_NAME, log, now_iso, get_host_cmd_broker_socket_path
+from .models import Job, Action, SOCKET_DIR_NAME, log, now_iso, get_host_cmd_broker_socket_path
 from .prompt import build_system_prompt
-from lib.worktree import ensure_worktree
-from lib.orchestrator import on_job_completed
 
 if TYPE_CHECKING:
     from .host_cmd import HostCommandBroker
 
 
 class ExecutorMixin:
-    """DispatchServer にジョブ実行機能を提供する Mixin。"""
+    """OrchestratorServer にジョブ実行機能を提供する Mixin。"""
 
     # ホストクラスが提供する属性
     jobs: dict[str, Job]
@@ -38,6 +36,10 @@ class ExecutorMixin:
     def count_running(self) -> int: raise NotImplementedError
     def running_working_dirs(self) -> set[str]: raise NotImplementedError
     def _save_jobs(self) -> None: raise NotImplementedError
+
+    # OrchestratorServer が提供する dispatch_action
+    async def dispatch_action(self, task_id: str, action: Action) -> dict:
+        raise NotImplementedError
 
     def _dispatch_dir(self) -> Path:
         runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}")
@@ -157,18 +159,15 @@ class ExecutorMixin:
             self._save_jobs()
             log.info(f"Job finished: {job.dispatch_id} status={job.status} exit_code={job.exit_code}")
 
-            # タスク状態遷移: executing → in_review
+            # タスク状態遷移: dispatch_action で job_completed を発行
             if job.task_id:
                 try:
-                    on_job_completed(
-                        self.repo_dir,
-                        task_id=job.task_id,
-                        dispatch_id=job.dispatch_id,
-                        exit_code=job.exit_code or 0,
+                    asyncio.create_task(
+                        self.dispatch_action(job.task_id, Action(type="job_completed"))
                     )
-                    log.info(f"Task {job.task_id} transitioned to in_review")
+                    log.info(f"Task {job.task_id}: job_completed action dispatched")
                 except Exception as e:
-                    log.error(f"on_job_completed error for task {job.task_id}: {e}")
+                    log.error(f"dispatch_action error for task {job.task_id}: {e}")
 
         self._notify_waiters(job)
         await self.drain_queue()

@@ -56,3 +56,12 @@ def ensure_tmux_session(session_name: str, is_caller_session: bool) -> bool:
         )
         return result.returncode == 0
     return True
+
+
+def has_tmux_window(session_name: str, window_name: str) -> bool:
+    """指定した tmux ウィンドウが存在するか確認する。"""
+    result = subprocess.run(
+        ["tmux", "has-session", "-t", f"{session_name}:{window_name}"],
+        capture_output=True,
+    )
+    return result.returncode == 0
