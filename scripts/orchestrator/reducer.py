@@ -69,6 +69,10 @@ def reduce(task: TaskData, action: Action) -> TaskData | str:
             new.status = "executing"
             new.feedback_requested = False
 
+        case ("in_review", "ci_failed"):
+            new.status = "executing"
+            new.pr.ci_status = ""
+
         case (_, "clear_resume"):
             new.resume_requested = False
 
