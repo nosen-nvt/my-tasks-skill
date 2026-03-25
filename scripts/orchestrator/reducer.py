@@ -7,11 +7,27 @@ from .models import Action
 
 
 # update_field で更新可能なフィールドのホワイトリスト
+# ドット区切りでネストフィールドに対応 (例: "pr.url")
 UPDATABLE_FIELDS = frozenset({
-    "pr_url", "branch", "dispatch_id", "session_id",
-    "plan_session_id", "actions_status", "actions_error",
-    "related_jobs",
+    "pr.url", "pr.ci_status",
+    "branch", "dispatch_id", "session_id",
+    "plan_session_id", "related_jobs",
 })
+
+
+def _set_nested(obj, field_path: str, value) -> str | None:
+    """ドット区切りフィールドパスで値を設定する。エラー時はメッセージを返す。"""
+    parts = field_path.split(".")
+    target = obj
+    for part in parts[:-1]:
+        if not hasattr(target, part):
+            return f"update_field: '{field_path}' は存在しません"
+        target = getattr(target, part)
+    leaf = parts[-1]
+    if not hasattr(target, leaf):
+        return f"update_field: '{field_path}' は存在しません"
+    setattr(target, leaf, value)
+    return None
 
 
 def reduce(task: TaskData, action: Action) -> TaskData | str:
@@ -61,9 +77,9 @@ def reduce(task: TaskData, action: Action) -> TaskData | str:
                 return "update_field: field が未指定です"
             if action.field not in UPDATABLE_FIELDS:
                 return f"update_field: '{action.field}' は更新不可です"
-            if not hasattr(new, action.field):
-                return f"update_field: '{action.field}' は存在しません"
-            setattr(new, action.field, action.value)
+            err = _set_nested(new, action.field, action.value)
+            if err:
+                return err
 
         case _:
             return f"無効なアクション: {action.type} (現在: {task.status})"

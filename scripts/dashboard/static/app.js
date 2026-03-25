@@ -4,7 +4,7 @@ import { updateElapsedTimes } from "./utils.js";
 import { currentView, setRenderer, popView } from "./navigation.js";
 import { postAction, showNotification } from "./actions.js";
 import { renderTaskList } from "./components/task-list/task-list.js";
-import { renderTaskView, updateTaskSummary } from "./components/task-view/task-view.js";
+import { renderTaskView } from "./components/task-view/task-view.js";
 import { renderJobView, clearLogRefresh } from "./components/job-view/job-view.js";
 
 // --- Main render (router) ---
@@ -49,7 +49,7 @@ function handleSSEUpdate(dataType) {
       if (dataType === "tasks") renderTaskList();
       break;
     case "task":
-      if (dataType === "tasks") updateTaskSummary(view.taskId);
+      if (dataType === "tasks") renderTaskView(view.taskId);
       break;
     case "job":
       if (dataType === "jobs") {

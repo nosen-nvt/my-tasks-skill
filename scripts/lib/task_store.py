@@ -132,6 +132,34 @@ class HistoryEntry:
 
 
 @dataclass
+class PullRequest:
+    """PR 関連データ。"""
+    url: str = ""
+    ci_status: str = ""     # pending|running|success|failure
+
+    def to_dict(self) -> dict:
+        return {"url": self.url, "ci_status": self.ci_status}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PullRequest":
+        if isinstance(d, str):
+            # 後方互換: 旧 pr_url 文字列からの変換
+            return cls(url=d)
+        return cls(
+            url=d.get("url", ""),
+            ci_status=d.get("ci_status", ""),
+        )
+
+
+def _parse_pr(d: dict) -> PullRequest:
+    """pr の後方互換パース: 旧 pr_url 文字列 → PullRequest に変換。"""
+    pr_raw = d.get("pr")
+    if pr_raw is not None:
+        return PullRequest.from_dict(pr_raw)
+    return PullRequest(url=d.get("pr_url", ""))
+
+
+@dataclass
 class TaskData:
     """タスク YAML の全フィールドを保持するデータクラス。"""
     id: str
@@ -145,7 +173,7 @@ class TaskData:
     acceptance_criteria: list[str] = field(default_factory=list)
     completion_actions: list = field(default_factory=list)
     execute_prompt: str = ""
-    pr_url: str = ""
+    pr: PullRequest = field(default_factory=PullRequest)
     branch: str = ""
     dispatch_id: str = ""
     session_id: str = ""
@@ -156,8 +184,6 @@ class TaskData:
     plan_session_id: str = ""
     resume_requested: bool = False
     feedback_requested: bool = False
-    actions_status: str = ""
-    actions_error: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -172,7 +198,7 @@ class TaskData:
             "acceptance_criteria": self.acceptance_criteria,
             "completion_actions": self.completion_actions,
             "execute_prompt": self.execute_prompt,
-            "pr_url": self.pr_url,
+            "pr": self.pr.to_dict(),
             "branch": self.branch,
             "dispatch_id": self.dispatch_id,
             "session_id": self.session_id,
@@ -183,8 +209,6 @@ class TaskData:
             "plan_session_id": self.plan_session_id,
             "resume_requested": self.resume_requested,
             "feedback_requested": self.feedback_requested,
-            "actions_status": self.actions_status,
-            "actions_error": self.actions_error,
         }
 
     @classmethod
@@ -231,7 +255,7 @@ class TaskData:
             acceptance_criteria=d.get("acceptance_criteria") or [],
             completion_actions=d.get("completion_actions") or [],
             execute_prompt=d.get("execute_prompt", ""),
-            pr_url=d.get("pr_url", ""),
+            pr=_parse_pr(d),
             branch=d.get("branch", ""),
             dispatch_id=d.get("dispatch_id", ""),
             session_id=d.get("session_id", ""),
@@ -242,8 +266,6 @@ class TaskData:
             plan_session_id=d.get("plan_session_id", ""),
             resume_requested=bool(d.get("resume_requested", False)),
             feedback_requested=bool(d.get("feedback_requested", False)),
-            actions_status=d.get("actions_status", ""),
-            actions_error=d.get("actions_error", ""),
         )
 
     def to_index_entry(self) -> "IndexEntry":

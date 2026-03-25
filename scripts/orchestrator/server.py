@@ -7,6 +7,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -195,8 +196,10 @@ class OrchestratorServer(ExecutorMixin):
                 return
             prompt_template = prompt_path.read_text(encoding="utf-8")
             prompt = prompt_template
-            for attr in ("pr_url", "branch", "actions_error", "dispatch_id", "session_id"):
+            for attr in ("branch", "dispatch_id", "session_id"):
                 prompt = prompt.replace(f"{{{attr}}}", str(getattr(task_data, attr, "")))
+            prompt = prompt.replace("{pr.url}", task_data.pr.url)
+            prompt = prompt.replace("{pr.ci_status}", task_data.pr.ci_status)
 
             if not task_data.project_id:
                 log.error(f"Dispatch hook {hook.id}: no project_id for task {task_id}")
@@ -354,6 +357,18 @@ class OrchestratorServer(ExecutorMixin):
             log.info(f"Job queued ({reason}): {dispatch_id}")
             return {"ok": True, "dispatch_id": dispatch_id, "session_id": session_id, "message": f"Job queued ({reason})"}
 
+    def _register_broker_for_tmux(self, host_cmds: list[dict]) -> str:
+        """host_commands をブローカーに登録し、tmux コマンド用の export 文字列を返す。
+
+        コマンドが無い場合は空文字列を返す。
+        """
+        if not host_cmds:
+            return ""
+        broker_token = uuid.uuid4().hex
+        self.host_cmd_broker.register(broker_token, host_cmds)
+        broker_sock = get_host_cmd_broker_socket_path()
+        return f"export HOST_CMD_TOKEN={broker_token} HOST_CMD_BROKER_SOCK={broker_sock}; "
+
     async def cmd_resume(self, request: dict) -> dict:
         """完了済みセッションを tmux で再開する。"""
         project_id = request.get("project_id", "")
@@ -370,7 +385,7 @@ class OrchestratorServer(ExecutorMixin):
             candidate = project.get("working_directory", "")
             working_dir = candidate if candidate and Path(candidate).is_dir() else home_dir
             try:
-                sandbox_profile_id, env_files, _host_cmds, _extra_binds = \
+                sandbox_profile_id, env_files, host_cmds, _extra_binds = \
                     sandbox_exec.resolve_project_sandbox_params(
                         project, sandbox_profile_override=request.get("sandbox_profile"),
                     )
@@ -391,8 +406,9 @@ class OrchestratorServer(ExecutorMixin):
         if not ensure_tmux_session(session_name, is_caller):
             return {"ok": False, "error": f"tmux session '{session_name}' not available"}
 
+        broker_env_str = self._register_broker_for_tmux(host_cmds)
         env_file_args = "".join(f" --env-file '{ef}'" for ef in env_files)
-        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_id}'{env_file_args} -- claude --dangerously-skip-permissions --resume {shlex.quote(session_id)}"
+        cmd = f"{broker_env_str}cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_id}'{env_file_args} -- claude --dangerously-skip-permissions --resume {shlex.quote(session_id)}"
         log.info(f"Resume command: {cmd}")
 
         result = subprocess.run(
@@ -416,6 +432,7 @@ class OrchestratorServer(ExecutorMixin):
         project_id = request.get("project_id", "")
         system_prompt = request.get("system_prompt")
         session = request.get("session")
+        host_cmds: list[dict] = []
 
         if project_id:
             project = sandbox_exec.load_project(project_id, self.repo_dir)
@@ -425,7 +442,7 @@ class OrchestratorServer(ExecutorMixin):
             candidate = project.get("working_directory", "")
             working_dir = candidate if candidate and Path(candidate).is_dir() else home_dir
             try:
-                sandbox_profile_id, env_files, _host_cmds, _extra_binds = \
+                sandbox_profile_id, env_files, host_cmds, _extra_binds = \
                     sandbox_exec.resolve_project_sandbox_params(
                         project, sandbox_profile_override=request.get("sandbox_profile"),
                     )
@@ -448,11 +465,12 @@ class OrchestratorServer(ExecutorMixin):
         if not ensure_tmux_session(session_name, is_caller):
             return {"ok": False, "error": f"tmux session '{session_name}' not available"}
 
+        broker_env_str = self._register_broker_for_tmux(host_cmds)
         env_file_args = "".join(f" --env-file '{ef}'" for ef in env_files)
         prompt = request.get("prompt")
         prompt_arg = f" {shlex.quote(prompt)}" if prompt else ""
         system_prompt_arg = f" --append-system-prompt {shlex.quote(system_prompt)}" if system_prompt else ""
-        cmd = f"cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_id}'{env_file_args} -- claude --dangerously-skip-permissions{system_prompt_arg}{prompt_arg}"
+        cmd = f"{broker_env_str}cd '{working_dir}' && sandbox --sandbox-profile '{sandbox_profile_id}'{env_file_args} -- claude --dangerously-skip-permissions{system_prompt_arg}{prompt_arg}"
 
         result = subprocess.run(
             ["tmux", "new-window", "-d", "-t", session_name, "-n", window_name, cmd],

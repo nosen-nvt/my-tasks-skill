@@ -54,7 +54,7 @@ function buildTaskActionsHTML(task, taskData) {
   const hasPrompt = !!taskData?.execute_prompt;
   const hasSession = !!taskData?.session_id;
   const hasProject = !!task.project_id;
-  const hasPrUrl = !!taskData?.pr_url;
+  const hasPrUrl = !!taskData?.pr?.url;
 
   if (status === "pending") {
     if (hasProject)
@@ -165,8 +165,8 @@ function renderTaskDetailSections(data) {
     html += `<div class="detail-section"><div class="detail-heading">\u5b9f\u884c\u30d7\u30ed\u30f3\u30d7\u30c8</div><pre class="preview-text">${escapeHtml(data.execute_prompt)}</pre></div>`;
   }
 
-  if (data.pr_url) {
-    html += `<div class="detail-section"><div class="detail-heading">PR</div><div class="detail-body"><a href="${escapeHtml(data.pr_url)}" target="_blank">${escapeHtml(data.pr_url)}</a></div></div>`;
+  if (data.pr?.url) {
+    html += `<div class="detail-section"><div class="detail-heading">PR</div><div class="detail-body"><a href="${escapeHtml(data.pr.url)}" target="_blank">${escapeHtml(data.pr.url)}</a></div></div>`;
   }
 
   // History

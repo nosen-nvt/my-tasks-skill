@@ -300,20 +300,20 @@ def _collect_feedback_sync(server: OrchestratorServer, task_id: str) -> int:
                     task_data.feedback_cursor["jira_comment"] = new_cursor
 
     # Bitbucket PR コメント収集
-    if task_data.pr_url:
+    if task_data.pr.url:
         bb_cursor = task_data.feedback_cursor.get("bitbucket_pr")
         new_comments, new_cursor = _collect_feedback_mod.collect_bitbucket_pr_comments(
-            task_data.pr_url, bb_cursor,
+            task_data.pr.url, bb_cursor,
         )
         collected_items.extend(new_comments)
         if new_cursor:
             task_data.feedback_cursor["bitbucket_pr"] = new_cursor
 
     # GitHub PR コメント収集
-    if task_data.pr_url:
+    if task_data.pr.url:
         gh_cursor = task_data.feedback_cursor.get("github_pr")
         new_comments, new_cursor = _collect_feedback_mod.collect_github_pr_comments(
-            task_data.pr_url, gh_cursor,
+            task_data.pr.url, gh_cursor,
         )
         collected_items.extend(new_comments)
         if new_cursor:

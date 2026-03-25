@@ -297,17 +297,17 @@ def main() -> None:
                 )
 
     # Bitbucket PR コメント収集
-    if args.source in ("bitbucket", "all") and task_data.pr_url:
+    if args.source in ("bitbucket", "all") and task_data.pr.url:
         bb_cursor = task_data.feedback_cursor.get("bitbucket_pr")
-        new_comments, new_cursor = collect_bitbucket_pr_comments(task_data.pr_url, bb_cursor)
+        new_comments, new_cursor = collect_bitbucket_pr_comments(task_data.pr.url, bb_cursor)
         collected_items.extend(new_comments)
         if new_cursor:
             task_data.feedback_cursor["bitbucket_pr"] = new_cursor
 
     # GitHub PR コメント収集
-    if args.source in ("github", "all") and task_data.pr_url:
+    if args.source in ("github", "all") and task_data.pr.url:
         gh_cursor = task_data.feedback_cursor.get("github_pr")
-        new_comments, new_cursor = collect_github_pr_comments(task_data.pr_url, gh_cursor)
+        new_comments, new_cursor = collect_github_pr_comments(task_data.pr.url, gh_cursor)
         collected_items.extend(new_comments)
         if new_cursor:
             task_data.feedback_cursor["github_pr"] = new_cursor

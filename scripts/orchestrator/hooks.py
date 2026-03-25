@@ -21,28 +21,45 @@ class Hook:
     prompt_file: str = ""   # dispatch 用
 
 
+def _resolve_value(obj, field_name: str):
+    """ドット区切りフィールドパスで値を取得する。"""
+    parts = field_name.split(".")
+    value = obj
+    for part in parts:
+        value = getattr(value, part, None)
+        if value is None:
+            return None
+    return value
+
+
+def _match_condition(value, condition) -> bool:
+    """単一の値と条件を比較する。"""
+    if isinstance(condition, dict):
+        if condition.get("not_empty"):
+            if not value:
+                return False
+        if "eq" in condition:
+            if str(value) != str(condition["eq"]):
+                return False
+        if "not_eq" in condition:
+            if str(value) == str(condition["not_eq"]):
+                return False
+        return True
+    elif isinstance(condition, bool):
+        return bool(value) == condition
+    else:
+        return str(value) == str(condition)
+
+
 def matches(when: dict, task: TaskData) -> bool:
-    """全条件がタスクデータに一致するか判定する。"""
+    """全条件がタスクデータに一致するか判定する。
+
+    ドット区切りでネストフィールドに対応 (例: {"pr.url": {"not_empty": true}})。
+    """
     for field_name, condition in when.items():
-        value = getattr(task, field_name, None)
-
-        if isinstance(condition, dict):
-            if condition.get("not_empty"):
-                if not value:
-                    return False
-            if "eq" in condition:
-                if str(value) != str(condition["eq"]):
-                    return False
-            if "not_eq" in condition:
-                if str(value) == str(condition["not_eq"]):
-                    return False
-        elif isinstance(condition, bool):
-            if bool(value) != condition:
-                return False
-        else:
-            if str(value) != str(condition):
-                return False
-
+        value = _resolve_value(task, field_name)
+        if not _match_condition(value, condition):
+            return False
     return True
 
 
