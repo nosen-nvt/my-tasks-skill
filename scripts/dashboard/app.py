@@ -116,8 +116,12 @@ def create_app(repo: str, base_path: str = "") -> FastAPI:
                 if isinstance(data, dict):
                     data["id"] = task_id
                     return JSONResponse(data)
-            except Exception:
-                pass
+            except Exception as e:
+                return JSONResponse({
+                    "id": task_id,
+                    "content": content,
+                    "yaml_error": str(e),
+                })
             return JSONResponse({"id": task_id, "content": content})
         return JSONResponse({"error": "not found"}, status_code=404)
 

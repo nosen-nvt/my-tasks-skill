@@ -53,6 +53,7 @@ def build_plan_session_prompts(
 
     task_id = task.id
     yaml_path = f"{Path(repo_dir) / 'tasks' / f'{task_id}.yaml'}"
+    update_script = f"{Path(repo_dir) / 'scripts' / 'update-task-field.py'}"
 
     system_prompt = f"""あなたはタスク計画セッションで実行されています。
 
@@ -66,6 +67,28 @@ def build_plan_session_prompts(
 - preconditions: 事前条件リスト
 - acceptance_criteria: 達成条件リスト（AIエージェントがローカルで検証可能な内容）
 - execute_prompt: 実行プロンプト（別のAIエージェントがこのタスクを実行するための自己完結した指示書）
+
+## タスク YAML の更新方法（重要）
+タスク YAML を直接テキスト編集してはいけません。
+必ず以下のヘルパースクリプト経由で更新してください。
+YAML 特殊文字（: " * {{ }} など）を含む値を安全にシリアライズします。
+
+```bash
+# JSON パッチを stdin で渡して複数フィールドを一括更新
+python3 {update_script} {task_id} <<'PATCH'
+{{
+  "description": "タスクの説明",
+  "preconditions": ["条件1", "条件2"],
+  "acceptance_criteria": ["基準1", "基準2"],
+  "execute_prompt": "## 背景\\n\\n手順..."
+}}
+PATCH
+
+# 単一フィールドを更新
+python3 {update_script} {task_id} --field execute_prompt --json-value '"プロンプト内容"'
+```
+
+タスク YAML の内容を確認する際は Read ツールで {yaml_path} を読んでください。
 
 ## 達成条件のルール
 - タスクは AI エージェントが実装・実行する前提

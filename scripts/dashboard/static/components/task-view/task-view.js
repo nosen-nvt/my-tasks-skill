@@ -233,7 +233,9 @@ export async function renderTaskView(taskId) {
     const detailEl = document.getElementById("task-detail-content");
     if (!detailEl || currentView().type !== "task" || currentView().taskId !== taskId) return;
 
-    if (data.content) {
+    if (data.yaml_error) {
+      detailEl.innerHTML = `<div class="related-jobs-warning">\u26a0 YAML \u30d1\u30fc\u30b9\u30a8\u30e9\u30fc: ${escapeHtml(data.yaml_error)}</div><pre class="preview-text">${escapeHtml(data.content)}</pre>`;
+    } else if (data.content) {
       detailEl.innerHTML = `<pre class="preview-text">${escapeHtml(data.content)}</pre>`;
     } else {
       detailEl.innerHTML = renderTaskDetailSections(data);
