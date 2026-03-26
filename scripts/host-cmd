@@ -9,10 +9,34 @@ busybox パターン: symlink/bind 名でコマンドを判別し、
   HOST_CMD_BROKER_SOCK  - Host Command Broker の Unix socket パス
 """
 
+import fcntl
 import json
 import os
 import socket
 import sys
+
+
+def _read_stdin_nonblocking() -> str | None:
+    """stdin が tty でない場合に非ブロッキングで読み取る。
+
+    パイプに接続されている場合でも、データがなければすぐに返る。
+    O_NONBLOCK + os.read() で EOF 待ちを回避する。
+    """
+    if sys.stdin.isatty():
+        return None
+    fd = sys.stdin.fileno()
+    old_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    try:
+        fcntl.fcntl(fd, fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
+        try:
+            data = os.read(fd, 1048576)
+            if data:
+                return data.decode()
+        except BlockingIOError:
+            pass
+        return None
+    finally:
+        fcntl.fcntl(fd, fcntl.F_SETFL, old_flags)
 
 
 def main():
@@ -29,9 +53,7 @@ def main():
         print("Error: HOST_CMD_BROKER_SOCK is not set", file=sys.stderr)
         sys.exit(127)
 
-    stdin_data = None
-    if not sys.stdin.isatty():
-        stdin_data = sys.stdin.read()
+    stdin_data = _read_stdin_nonblocking()
 
     request = {"token": token, "command": command, "args": args}
     if stdin_data:

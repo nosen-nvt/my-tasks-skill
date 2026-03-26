@@ -123,6 +123,7 @@ BUILTIN_PROFILES: dict[str, dict] = {
         "profile_id": "default",
         "proxy_profile": "full",
         "host_commands": [
+            {"name": "git", "builtin": True},
             {"name": "pass", "path": "/usr/bin/pass", "allowed_patterns": "*", "allow_stdin": True},
         ],
         "extra_binds": [
@@ -136,6 +137,7 @@ BUILTIN_PROFILES: dict[str, dict] = {
         "profile_id": "unrestricted",
         "proxy_profile": None,
         "host_commands": [
+            {"name": "git", "builtin": True},
             {"name": "pass", "path": "/usr/bin/pass", "allowed_patterns": "*", "allow_stdin": True},
         ],
         "extra_binds": [
@@ -527,7 +529,6 @@ def build_netns_args(
         "--dir", f"{HOME}/.local/state",
         "--dir", f"{HOME}/.cache",
         "--ro-bind-try", f"{HOME}/.gitconfig", f"{HOME}/.gitconfig",
-        "--ro-bind-try", f"{HOME}/.ssh", f"{HOME}/.ssh",
         "--ro-bind", f"{HOME}/src", f"{HOME}/src",
         "--bind", f"{HOME}/.claude", f"{HOME}/.claude",
         "--ro-bind-try", f"{HOME}/.local/bin", f"{HOME}/.local/bin",

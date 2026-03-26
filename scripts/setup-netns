@@ -100,13 +100,3 @@ done
 
 # HOST_GATEWAY 宛の全通信を許可 (ホスト localhost へのアクセス)
 ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "$HOST_GATEWAY" accept
-
-# SSH 許可 (GitHub / Bitbucket)
-for domain in github.com bitbucket.org; do
-  ips=$(dig +short "$domain" A 2>/dev/null || true)
-  if [[ -n "$ips" ]]; then
-    while IFS= read -r ip; do
-      ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "$ip" tcp dport 22 accept
-    done <<< "$ips"
-  fi
-done
