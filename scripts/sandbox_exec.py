@@ -121,10 +121,9 @@ def ensure_netns() -> None:
 BUILTIN_PROFILES: dict[str, dict] = {
     "default": {
         "profile_id": "default",
-        "proxy_profile": "full",
+        "proxy_profile": "default",
         "host_commands": [
             {"name": "git", "builtin": True},
-            {"name": "pass", "path": "/usr/bin/pass", "allowed_patterns": "*", "allow_stdin": True},
         ],
         "extra_binds": [
             {"source": "$HOME/.nuget",  "target": "$HOME/.nuget",  "mode": "rw"},
@@ -138,7 +137,6 @@ BUILTIN_PROFILES: dict[str, dict] = {
         "proxy_profile": None,
         "host_commands": [
             {"name": "git", "builtin": True},
-            {"name": "pass", "path": "/usr/bin/pass", "allowed_patterns": "*", "allow_stdin": True},
         ],
         "extra_binds": [
             {"source": "$HOME/.local",       "target": "$HOME/.local",       "mode": "rw"},
@@ -166,15 +164,18 @@ def resolve_host_commands(profile: dict) -> list[dict]:
 
 
 def _host_cmd_binds(host_commands: list[dict]) -> list[str]:
-    """host_commands リストに基づく bwrap bind 引数を生成する。"""
+    """host_commands リストに基づく bwrap bind 引数を生成する。
+
+    シムを実体ファイルのパスに直接バインドする。
+    """
     shim = str(SCRIPT_DIR / "host-cmd")
     args: list[str] = []
     seen: set[str] = set()
     for cmd in host_commands:
-        name = cmd["name"]
-        if name not in seen:
-            seen.add(name)
-            args += ["--ro-bind", shim, f"/usr/bin/{name}"]
+        path = cmd["path"]
+        if path not in seen:
+            seen.add(path)
+            args += ["--ro-bind", shim, path]
     return args
 
 
@@ -518,7 +519,6 @@ def build_netns_args(
         "bwrap",
         "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--die-with-parent",
         *_base_binds(),
-        *(host_cmd_binds or []),
         "--ro-bind", "/opt/microsoft/powershell", "/opt/microsoft/powershell",
         "--ro-bind", "/opt/google/chrome", "/opt/google/chrome",
         "--ro-bind", resolv.name, "/run/systemd/resolve/stub-resolv.conf",
@@ -554,6 +554,7 @@ def build_netns_args(
         "--ro-bind-try", f"{HOME}/.config/go", f"{HOME}/.config/go",
         "--ro-bind-try", f"{HOME}/.config/uv", f"{HOME}/.config/uv",
         *profile_binds,
+        *(host_cmd_binds or []),
         *(["--bind", work, work] if work != str(HOME) else []),
         *_worktree_git_binds(work),
         *_my_tasks_binds(),
@@ -584,13 +585,13 @@ def build_host_network_args(
         "bwrap",
         "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--die-with-parent",
         *_base_binds(),
-        *(host_cmd_binds or []),
         "--ro-bind", "/run/systemd/resolve", "/run/systemd/resolve",
         *_socket_binds(),
         "--bind", f"{HOME}/.claude", f"{HOME}/.claude",
         "--ro-bind", f"{HOME}/src/github.com/nosen-nvt/my-tasks-skill",
                      f"{HOME}/src/github.com/nosen-nvt/my-tasks-skill",
         *profile_binds,
+        *(host_cmd_binds or []),
         *(["--bind", work, work] if work != str(HOME) else []),
         *_worktree_git_binds(work),
         "--chdir", work,

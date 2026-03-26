@@ -9,28 +9,16 @@ VETH_AI=veth-ai
 HOST_IP=10.200.1.1/24
 AI_IP=10.200.1.2/24
 HOST_GATEWAY=10.200.1.100
-if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
-  _HOME="/home/$SUDO_USER"
-else
-  _HOME="$HOME"
-fi
-PROFILES_DIR="${PROFILES_DIR:-$_HOME/.local/share/my-tasks/proxy-profiles}"
+PROXY_PORT=3128
 
-# proxy-profiles からポート番号を収集
-PROXY_PORTS=()
-if [[ -d "$PROFILES_DIR" ]]; then
-  for profile_json in "$PROFILES_DIR"/*.json; do
-    [[ -f "$profile_json" ]] || continue
-    port=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['port'])" "$profile_json" 2>/dev/null || true)
-    if [[ -n "$port" ]]; then
-      PROXY_PORTS+=("$port")
-    fi
-  done
+# 0. 残存状態のクリーンアップ (冪等性確保)
+if ip netns list 2>/dev/null | grep -qw "$NS_NAME"; then
+  ip netns del "$NS_NAME"
+  # veth ペアは netns 削除時に自動削除されるが、念のため待機
+  sleep 0.2
 fi
-
-# フォールバック: プロファイルが読めない場合はデフォルトポート 3128
-if [[ ${#PROXY_PORTS[@]} -eq 0 ]]; then
-  PROXY_PORTS=(3128)
+if ip link show "$VETH_HOST" &>/dev/null; then
+  ip link del "$VETH_HOST"
 fi
 
 # 1. netns 作成
@@ -94,9 +82,7 @@ ip netns exec "$NS_NAME" nft 'add chain inet filter output { type filter hook ou
 ip netns exec "$NS_NAME" nft add rule inet filter output oifname "lo" accept
 ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "${HOST_IP%/*}" udp dport 53 accept
 ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "${HOST_IP%/*}" tcp dport 53 accept
-for proxy_port in "${PROXY_PORTS[@]}"; do
-  ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "${HOST_IP%/*}" tcp dport "$proxy_port" accept
-done
+ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "${HOST_IP%/*}" tcp dport "$PROXY_PORT" accept
 
 # HOST_GATEWAY 宛の全通信を許可 (ホスト localhost へのアクセス)
 ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "$HOST_GATEWAY" accept
