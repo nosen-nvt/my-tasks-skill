@@ -133,22 +133,27 @@ JSONL の `project_key` 値（完全一致）から `projects/` 配下のプロ�
 ### ステータス定義
 
 ```
-pending → in_progress → done
-                      → aborted
+pending → planning → executing → in_review → done
+                                            → aborted
 ```
 
 | ステータス | 意味 |
 |-----------|------|
-| `pending` | データソースから取り込まれた初期状態、または Plan/Dispatch 待ち |
-| `in_progress` | ジョブ実行中、Plan 中、Feedback 待ちなど、作業が進行中の状態 |
+| `pending` | データソースから取り込まれた初期状態、Plan 待ち |
+| `planning` | Plan セッションで精査・計画中 |
+| `executing` | ジョブ実行中 |
+| `in_review` | ジョブ完了後のレビュー待ち |
 | `done` | 完了 |
-| `aborted` | 中止 |
+| `aborted` | 中止（任意の状態から遷移可能） |
 
 ### 遷移ルール
 
-- Dispatch 時: `pending` → `in_progress`
-- ジョブ完了・手動完了: `in_progress` → `done`
-- 中止: `in_progress` → `aborted`
+- Plan: `pending` → `planning`
+- Dispatch: `planning` → `executing`
+- ジョブ完了: `executing` → `in_review`
+- Feedback 対応再 Dispatch: `in_review` → `executing`
+- 完了: `in_review` → `done`
+- 中止: 任意 → `aborted`
 - 再オープン: done タスクと同じ `remote_id` が再出現 → 新規タスクとして作成
 
 ### ID 生成規則
@@ -161,7 +166,7 @@ pending → in_progress → done
 
 ```jsonl
 {"id":"20260301-001","remote_id":"UBS-101","datasource_id":"jira","title":"API実装","status":"pending","project_id":"ubs-mgmt-tool"}
-{"id":"20260301-002","remote_id":"abc123","datasource_id":"ms-todo","title":"書類提出","status":"in_progress","project_id":""}
+{"id":"20260301-002","remote_id":"abc123","datasource_id":"ms-todo","title":"書類提出","status":"executing","project_id":""}
 ```
 
 ---
@@ -186,13 +191,26 @@ pending → in_progress → done
 | `acceptance_criteria` | array | No | タスクの達成条件リスト |
 | `completion_actions` | array | No | タスク完了後に実行するアクションリスト |
 | `execute_prompt` | string | No | 実行プロンプト（Plan で生成） |
-| `pr_url` | string | No | PR の URL |
+| `pr` | object | No | PR 情報（`{url, ci_status}`、下記参照） |
 | `branch` | string | No | 作業ブランチ名 |
 | `dispatch_id` | string | No | 現在のジョブの dispatch_id |
 | `session_id` | string | No | Claude Code セッション ID（UUID 形式。Resume で再開に使用） |
+| `related_jobs` | array | No | 関連ジョブの dispatch_id リスト |
 | `feedback` | array | No | フィードバック（グループ化、下記参照） |
 | `feedback_cursor` | object | No | ソースごとの最終取得タイムスタンプ（重複取得を防ぐ） |
 | `history` | array | No | 実行履歴 |
+| `plan_session_id` | string | No | Plan セッションの Claude Code セッション ID |
+| `resume_requested` | boolean | No | Resume 要求フラグ |
+| `feedback_requested` | boolean | No | Feedback 要求フラグ |
+
+### `pr` 構造（PullRequest）
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `url` | string | PR の URL |
+| `ci_status` | string | CI/CD の状態: `""` \| `pending` \| `running` \| `success` \| `failure` |
+
+後方互換: 旧 `pr_url` (文字列) が存在する場合、`pr: {url: <pr_url>, ci_status: ""}` として読み込む。
 
 ### `feedback` 構造（FeedbackGroup）
 
@@ -244,13 +262,19 @@ preconditions: []
 acceptance_criteria: []
 completion_actions: []
 execute_prompt: ""
-pr_url: ""
+pr:
+  url: ""
+  ci_status: ""
 branch: ""
 dispatch_id: ""
 session_id: ""
+related_jobs: []
 feedback: []
 feedback_cursor: {}
 history: []
+plan_session_id: ""
+resume_requested: false
+feedback_requested: false
 ```
 
 ### Plan 後の例
@@ -261,7 +285,7 @@ remote_id: "UBS-101"
 datasource_id: jira
 project_id: ubs-mgmt-tool
 title: API実装
-status: pending
+status: planning
 description: |
   API エンドポイントの実装。CRUD 操作を提供する。
 preconditions:
@@ -274,13 +298,19 @@ completion_actions:
 execute_prompt: |
   UBS管理ツールの API エンドポイントを実装してください。
   ...
-pr_url: ""
+pr:
+  url: ""
+  ci_status: ""
 branch: ""
 dispatch_id: ""
 session_id: ""
+related_jobs: []
 feedback: []
 feedback_cursor: {}
 history: []
+plan_session_id: "b2c3d4e5-f6a7-8901-bcde-f23456789012"
+resume_requested: false
+feedback_requested: false
 ```
 
 ### Dispatch 後（Feedback 収集済み）の例
@@ -291,7 +321,7 @@ remote_id: "UBS-101"
 datasource_id: jira
 project_id: ubs-mgmt-tool
 title: API実装
-status: in_progress
+status: in_review
 description: |
   API エンドポイントの実装。CRUD 操作を提供する。
 preconditions:
@@ -304,10 +334,13 @@ completion_actions:
 execute_prompt: |
   UBS管理ツールの API エンドポイントを実装してください。
   ...
-pr_url: "https://github.com/example/ubs-mgmt-tool/pull/42"
+pr:
+  url: "https://github.com/example/ubs-mgmt-tool/pull/42"
+  ci_status: "success"
 branch: "task/20260301-001"
 dispatch_id: "ubs-mgmt-tool-3"
 session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+related_jobs: []
 feedback:
   - collected_at: "2026-03-24T10:30:00+09:00"
     items:
@@ -338,12 +371,15 @@ history:
     finished_at: "2026-03-24T16:10:00+09:00"
     exit_code: 0
     summary: "レビュー指摘対応（fb-20260324T1500）"
+plan_session_id: "b2c3d4e5-f6a7-8901-bcde-f23456789012"
+resume_requested: false
+feedback_requested: false
 ```
 
 ### 規約
 
 - 全フィールドはプログラムから読み書きする（`yaml.safe_load` / `yaml.dump`）
-- `execute_prompt` は Plan（対話セッション）で生成し、Dispatch 時にディスパッチャーに渡される
+- `execute_prompt` は Plan（対話セッション）で生成し、Dispatch 時にオーケストレーターに渡される
 - `history` はジョブ完了後に結果を追記する
 
 ---
@@ -360,11 +396,40 @@ history:
 | `name` | string | Yes | プロジェクト名 |
 | `description` | string | No | プロジェクトの説明 |
 | `repositories` | array | No | 関連するリポジトリURLの配列 |
-| `working_directory` | string | No | ディスパッチャーが使用する作業ディレクトリ（未設定の場合 manual プロジェクト扱い） |
+| `working_directory` | string | No | オーケストレーターが使用する作業ディレクトリ（未設定の場合 manual プロジェクト扱い） |
 | `sandbox_profile` | string | No | サンドボックスプロファイル ID（デフォルト: `"default"`）。ファイルベース（`sandbox-profiles/{id}.json`）または組み込みプロファイル（`default`, `unrestricted`）を参照 |
 | `env` | object | No | サンドボックス内で設定する環境変数。値は plain string または `{"pass": "entry"}` 形式（後者は `pass show` で解決）。`.env` ファイルより低優先度 |
+| `env_files` | array | No | 環境ファイルパスのリスト（作業ディレクトリからの相対パス） |
+| `worktree` | object | No | worktree 設定（下記参照） |
+| `hooks` | array | No | プロジェクト定義フック（下記参照） |
 | `extra_binds` | array | No | プロジェクト固有の追加 bind mount。サンドボックスプロファイルの `extra_binds` に追加される |
 | `host_commands` | array | No | プロジェクト固有の追加ホストコマンド。サンドボックスプロファイルの `host_commands` に追加される |
+
+### `worktree`
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `enabled` | boolean | No | worktree を有効にするか（デフォルト: `false`） |
+| `branch_template` | string | No | ブランチ名テンプレート（例: `"task/{task_id}"`） |
+| `base_branch` | string | No | worktree の起点ブランチ（デフォルト: `"main"`） |
+
+### `hooks` 要素
+
+プロジェクト固有のフック定義。タスクデータの変更後に条件を評価し、一致すれば起動される。
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `id` | string | Yes | フック識別子（一意） |
+| `type` | string | Yes | `"script"` \| `"dispatch"`。script はホスト側でシェルコマンド実行、dispatch は AI ジョブ実行 |
+| `command` | string | No | type=script の場合のコマンド。`{task_id}`, `{pr.url}` 等のテンプレート変数を使用可能 |
+| `prompt_file` | string | No | type=dispatch の場合のプロンプトファイルパス |
+| `when` | object | Yes | 起動条件（タスクデータに対する条件式） |
+
+`when` 条件:
+- 完全一致: `{"status": "in_review"}`
+- 値比較: `{"pr.ci_status": {"eq": "failure"}}`, `{"pr.ci_status": {"not_eq": "success"}}`
+- 非空チェック: `{"pr.url": {"not_empty": true}}`
+- ドット区切りでネストフィールドを参照可能
 
 ### 例
 
@@ -382,6 +447,23 @@ history:
     "ATL_SITE": "ubs",
     "GITHUB_TOKEN": {"pass": "github/fine-grained-pat"}
   },
+  "env_files": ["./env.example"],
+  "worktree": {
+    "enabled": true,
+    "branch_template": "task/{task_id}",
+    "base_branch": "main"
+  },
+  "hooks": [
+    {
+      "id": "ci_monitor",
+      "type": "script",
+      "command": "scripts/hooks/ci-monitor.py --task-id {task_id} --pr-url {pr.url} --branch {branch}",
+      "when": {
+        "status": "in_review",
+        "pr.url": {"not_empty": true}
+      }
+    }
+  ],
   "extra_binds": [
     {"source": "$HOME/.project-cache", "target": "$HOME/.project-cache", "mode": "rw"}
   ],
@@ -401,7 +483,7 @@ history:
 | `{"pass": "entry/path"}` | `pass show entry/path` で解決し、出力の1行目を使用 |
 
 **優先順位**: project env < `.env` ファイル（`.env` がオーバーライド）。
-ディスパッチャーは project env を先に `--env-file` で渡し、`.env` を後に渡す。
+オーケストレーターは project env を先に `--env-file` で渡し、`.env` を後に渡す。
 bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 
 ### `extra_binds`
@@ -527,10 +609,10 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 
 ---
 
-## 6. ディスパッチャージョブ状態（インメモリ）
+## 6. オーケストレータージョブ状態
 
-ディスパッチャーサーバがインメモリで管理するジョブ状態。
-ファイルへの永続化は行わない（サーバ再起動時にリセット）。
+オーケストレーターサーバが管理するジョブ状態。
+`$XDG_RUNTIME_DIR/my-tasks-dispatch/jobs.jsonl` に永続化される。
 ソケット: `$XDG_RUNTIME_DIR/my-tasks-dispatch/dispatcher.sock`
 
 ### ジョブフィールド
@@ -539,11 +621,18 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 |---|---|---|
 | `dispatch_id` | string | 識別子（`{project_id}-{連番}` 形式、例: `bo-1`） |
 | `project_id` | string | プロジェクト ID |
+| `task_id` | string | 紐づくタスク ID |
 | `status` | string | `queued` \| `running` \| `done` \| `failed` |
+| `session_id` | string | Claude Code セッション ID |
 | `pid` | integer\|null | 子プロセスの PID |
 | `exit_code` | integer\|null | 終了コード |
 | `working_dir` | string | 作業ディレクトリ（worktree パス） |
 | `branch` | string\|null | worktree のブランチ名 |
+| `prompt` | string | 実行プロンプト |
+| `sandbox_profile_id` | string | 使用したサンドボックスプロファイル ID |
+| `env_files` | array | 環境ファイルパスのリスト |
+| `host_commands` | array | ホストコマンド定義のリスト |
+| `extra_binds` | array | 追加 bind mount のリスト |
 | `started_at` | string\|null | 開始日時（ISO 8601形式） |
 | `finished_at` | string\|null | 終了日時（ISO 8601形式） |
 
@@ -551,7 +640,7 @@ bwrap の `--setenv` は後勝ちのため、`.env` の値が優先される。
 
 ```json
 {"ok": true, "jobs": [
-  {"dispatch_id": "bo-1", "project_id": "bo", "status": "running", "pid": 12345, "exit_code": null, "working_dir": "/tmp/wt/bo-1", "branch": "task/20260301-001", "started_at": "2026-03-01T10:00:00+09:00", "finished_at": null},
-  {"dispatch_id": "bo-2", "project_id": "bo", "status": "queued", "pid": null, "exit_code": null, "working_dir": "", "branch": null, "started_at": null, "finished_at": null}
+  {"dispatch_id": "bo-1", "project_id": "bo", "task_id": "20260301-001", "status": "running", "pid": 12345, "exit_code": null, "working_dir": "/tmp/wt/bo-1", "branch": "task/20260301-001", "started_at": "2026-03-01T10:00:00+09:00", "finished_at": null},
+  {"dispatch_id": "bo-2", "project_id": "bo", "task_id": "20260301-002", "status": "queued", "pid": null, "exit_code": null, "working_dir": "", "branch": null, "started_at": null, "finished_at": null}
 ]}
 ```

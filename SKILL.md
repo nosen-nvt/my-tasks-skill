@@ -24,7 +24,7 @@ Plan（対話的精査）→ Dispatch（ジョブ実行）→ Resume / Feedback 
 - **タスク収集** - 全データソースからタスクを取得し、index.jsonl + YAML を更新
 - **メールトリアージ** - メールデータソースからアクションアイテムを収集
 - **Plan** - 対話セッションでタスクを精査・計画し、execute_prompt を生成
-- **Dispatch** - execute_prompt をディスパッチャーの run に渡してジョブ実行
+- **Dispatch** - execute_prompt をオーケストレーターの run に渡してジョブ実行
 - **Resume** - 完了済みセッションを再開し、軽微な修正を対話的に実施
 - **Feedback** - フィードバック収集（PR コメント等）→ 対応ジョブ Dispatch
 - **ステータス確認** - ジョブの状況表示、タスク一覧
@@ -39,7 +39,7 @@ Plan（対話的精査）→ Dispatch（ジョブ実行）→ Resume / Feedback 
 - **アーキテクチャ・リポジトリ構成**: `references/architecture.md`
 - **全スキーマと記述例**: `references/schemas.md`
 - **各操作の詳細手順**: `references/operations.md`
-- **ディスパッチャー設計**: `references/dispatcher-design.md`
+- **オーケストレーター設計**: `references/orchestrator-design.md`
 
 各オペレーションの具体的なコマンドや手順は `references/operations.md` を参照。
 スクリプトの引数・出力形式の詳細は `references/operations.md` 内の各セクションに記載。

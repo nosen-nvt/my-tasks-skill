@@ -96,19 +96,22 @@
 
 ## 3. Plan（対話的タスク精査）
 
-ダッシュボードから対話セッションを起動し、タスクを精査・計画する。
+オーケストレーターにアクションを送信し、Plan セッションを起動する。
 成果物はタスク YAML の `execute_prompt` フィールド。
 
 ### 手順
 
 1. タスク情報を読み込む（`tasks/index.jsonl` + `tasks/{id}.yaml`）
 
-2. ディスパッチャーの `open` コマンドで対話セッションを起動:
+2. オーケストレーターに `plan` アクションを送信:
    ```bash
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher open --project bo
+   python3 ~/.claude/skills/my-tasks/scripts/orchestrator dispatch {task_id} plan
    ```
+   - Reducer がステータスを `pending` → `planning` に遷移
+   - `plan_session` ビルトインフックが自動起動し、tmux ウィンドウ `plan-{task_id}` を開く
+   - 既存の Plan ウィンドウがあればそのウィンドウをアクティブにする
 
-3. 対話セッション内で:
+3. Plan セッション内で:
    - タスク YAML を読み込み
    - 作業ディレクトリのソースコードを調査
    - ユーザーと対話しながら計画を立案
@@ -137,7 +140,7 @@
 
 ## 4. Dispatch（ジョブ実行）
 
-タスク YAML の `execute_prompt` をディスパッチャーの `run` に渡してジョブを実行する。
+オーケストレーターにアクションを送信し、タスク YAML の `execute_prompt` でジョブを実行する。
 
 ### 手順
 
@@ -145,58 +148,48 @@
 
 2. `execute_prompt` が存在することを確認（空なら先に Plan を実行）
 
-3. タスクステータスを `in_progress` に更新（`tasks/index.jsonl` と `tasks/{id}.yaml`）
-
-4. UUID 形式の `session_id` を生成
-
-5. ディスパッチャーの `run` コマンドでジョブを実行:
+3. オーケストレーターに `dispatch` アクションを送信:
    ```bash
-   # プロンプトファイル渡し
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher run \
-     --project bo --prompt-file /tmp/prompt-20260301-001.md \
-     --session-id "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+   python3 ~/.claude/skills/my-tasks/scripts/orchestrator dispatch {task_id} dispatch
+   ```
+   - Reducer がステータスを `planning` → `executing` に遷移
+   - `dispatch_job` ビルトインフックが自動起動:
+     - 同一タスクの running/queued ジョブがなければジョブを実行
+     - `dispatch_id`, `session_id`, `branch` をタスク YAML に自動記録
+     - ジョブ完了を polling し、完了時に `job_completed` アクションを自動 dispatch
+   - `job_completed` で `executing` → `in_review` に自動遷移
 
-   # 標準入力渡し
-   echo "{execute_prompt}" | python3 ~/.claude/skills/my-tasks/scripts/dispatcher run \
-     --project bo --session-id "a1b2c3d4-..."
+4. ジョブ状況の確認:
+   ```bash
+   python3 ~/.claude/skills/my-tasks/scripts/orchestrator status
    ```
 
-6. 返却された `dispatch_id` と `session_id` をタスク YAML に記録:
-   - `dispatch_id`: ジョブの識別に使用
-   - `session_id`: Resume でのセッション再開に使用
-
-7. ステータスを確認:
-   ```bash
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher status
-   ```
-
-8. ジョブ完了後、結果に応じてタスクステータスを更新:
-   - 成功 → `done`（完了時アクション実行）
-   - 失敗・中止 → `aborted`
-   - 軽微な修正が必要 → Resume（操作5）へ
-   - レビュー指摘あり → Feedback（操作6）へ
+5. `in_review` 状態で、ユーザーが次のアクションを選択:
+   - 完了 → `done` アクション
+   - 中止 → `abort` アクション
+   - 軽微な修正が必要 → Resume（操作5）
+   - レビュー指摘あり → Feedback（操作6）
 
 ---
 
 ## 5. Resume（セッション再開）
 
-Dispatch したジョブの Claude Code セッションを再開し、同一コンテキスト上で軽微な修正を行う。
+オーケストレーターにアクションを送信し、Dispatch したジョブの Claude Code セッションを再開する。
 
 ### 手順
 
-1. タスク YAML から `session_id` を取得
-
-2. ディスパッチャーの `resume` コマンドでセッションを再開:
+1. オーケストレーターに `request_resume` アクションを送信:
    ```bash
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher resume \
-     --project bo --session-id "a1b2c3d4-..."
+   python3 ~/.claude/skills/my-tasks/scripts/orchestrator dispatch {task_id} request_resume
    ```
+   - Reducer が `resume_requested = true` に設定（ステータスは `in_review` のまま）
+   - `resume_session` ビルトインフックが自動起動し、tmux ウィンドウ `resume-{task_id}` を開く
 
-3. tmux ウィンドウで `claude --resume "{session_id}"` が対話モードで起動される
+2. tmux ウィンドウで `claude --resume "{session_id}"` が対話モードで起動される
 
-4. 同一コンテキスト（会話履歴・ファイル状態）を引き継いだ状態で対話的に修正
+3. 同一コンテキスト（会話履歴・ファイル状態）を引き継いだ状態で対話的に修正
 
-5. セッション終了
+4. セッション終了 → フックがウィンドウ閉鎖を検知し `clear_resume` を自動 dispatch
 
 ### 用途
 
@@ -211,29 +204,23 @@ Dispatch したジョブの Claude Code セッションを再開し、同一コ�
 
 ## 6. Feedback（フィードバック収集・対応）
 
-フィードバックを収集し、対応ジョブを Dispatch する。
+オーケストレーターにアクションを送信し、フィードバック収集から対応ジョブ実行までを自動化する。
 
-### フィードバック収集
+### 自動フィードバック収集
 
 ```bash
-# 全ソースから収集
-python3 ~/.claude/skills/my-tasks/scripts/collect-feedback.py \
-  --repo ~/.local/share/my-tasks --id 20260301-001
-
-# 特定ソースのみ
-python3 ~/.claude/skills/my-tasks/scripts/collect-feedback.py \
-  --repo ~/.local/share/my-tasks --id 20260301-001 --source github
-
-python3 ~/.claude/skills/my-tasks/scripts/collect-feedback.py \
-  --repo ~/.local/share/my-tasks --id 20260301-001 --source jira
+python3 ~/.claude/skills/my-tasks/scripts/orchestrator dispatch {task_id} request_feedback
 ```
 
-スクリプトは以下を実行する:
-1. タスク YAML から `remote_id`, `datasource_id`, `pr_url`, `feedback_cursor` を取得
-2. 各ソースから `feedback_cursor` 以降の新規コメントを収集
-3. 収集結果をタスク YAML の `feedback` に新しいグループ（`collected_at` + `items[]`）として追加
-4. `feedback_cursor` を更新
-5. JSON レポートを stdout に出力
+- Reducer が `feedback_requested = true` に設定（ステータスは `in_review` のまま）
+- `feedback_collector` ビルトインフックが自動起動:
+  1. タスク YAML から `remote_id`, `datasource_id`, `pr.url`, `feedback_cursor` を取得
+  2. 各ソース（GitHub PR, Jira, Bitbucket）から `feedback_cursor` 以降の新規コメントを収集
+  3. 収集結果をタスク YAML の `feedback` に新しいグループ（`collected_at` + `items[]`）として追加
+  4. `feedback_cursor` を更新
+  5. `feedback_collected` アクションを自動 dispatch
+- `feedback_collected` で `in_review` → `executing` に遷移、`feedback_requested = false` にリセット
+- `dispatch_job` フックが再起動し、フィードバック対応プロンプト付きでジョブを自動実行
 
 ### 手動フィードバック追加
 
@@ -243,12 +230,6 @@ python3 ~/.claude/skills/my-tasks/scripts/add-feedback.py \
   --body "ログレベルも変更してください"
 ```
 
-### フィードバック対応ジョブの実行
-
-1. フィードバック収集後、最新のグループ（最新の `collected_at`）を特定
-2. 元の `execute_prompt` + フィードバック内容から対応プロンプトを構築
-3. Dispatch（操作4）と同じ手順でジョブを実行
-
 ### 繰り返し
 
 Feedback は複数回実行可能。毎回新しいグループが追加され、ジョブには最新グループの `collected_at` を渡すことで「今回対応すべきフィードバック」を識別できる。
@@ -256,7 +237,7 @@ Feedback は複数回実行可能。毎回新しいグループが追加され�
 ### 前提条件
 
 - Jira フィードバック: datasource JSON に `site_mapping`（プロジェクトキー → サイト名）が設定されていること
-- PR フィードバック: タスク YAML に `pr_url` が設定されていること
+- PR フィードバック: タスク YAML に `pr.url` が設定されていること
 
 ---
 
@@ -272,10 +253,10 @@ Feedback は複数回実行可能。毎回新しいグループが追加され�
 
 ### ジョブ状況
 
-1. ディスパッチャーにステータスを問い合わせ:
+1. オーケストレーターにステータスを問い合わせ:
    ```bash
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher status
-   python3 ~/.claude/skills/my-tasks/scripts/dispatcher status --json
+   python3 ~/.claude/skills/my-tasks/scripts/orchestrator status
+   python3 ~/.claude/skills/my-tasks/scripts/orchestrator status --json
    ```
 
 ### タスク検索
@@ -381,8 +362,8 @@ Feedback は複数回実行可能。毎回新しいグループが追加され�
 
 ```bash
 # 通常の対話セッション
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher open --project bo [--session main]
+python3 ~/.claude/skills/my-tasks/scripts/orchestrator open --project bo [--session main]
 
 # worktree を指定して対話セッションを起動（Resume 対応）
-python3 ~/.claude/skills/my-tasks/scripts/dispatcher open --project bo --worktree /path/to/worktree
+python3 ~/.claude/skills/my-tasks/scripts/orchestrator open --project bo --worktree /path/to/worktree
 ```

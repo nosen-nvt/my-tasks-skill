@@ -1,13 +1,14 @@
-# ディスパッチャー設計ドキュメント
+# オーケストレーター設計ドキュメント
 
 ## 概要
 
-Unix ドメインソケット C/S アーキテクチャの汎用ジョブランナー。
+Reducer + Hook Evaluator + Job Executor を統合した常駐プロセス。
+Unix ドメインソケット C/S アーキテクチャで、ダッシュボード・CLI・フックスクリプトからアクションを受け付ける。
 サーバは systemd user service として常駐し、asyncio でジョブキューと子プロセスを管理する。
-クライアントはソケット経由でジョブ投入・状態確認・制御コマンドを送信する。
 
 ### 責務
 
+- アクション受信 → Reducer による状態遷移 → フック評価・起動
 - ジョブの実行管理（queued → running → done/failed）
 - sandbox 環境の構築（プロファイル解決、bwrap 引数構築）
 - worktree の管理（作成・クリーンアップ）
@@ -18,8 +19,6 @@ Unix ドメインソケット C/S アーキテクチャの汎用ジョブラン�
 ### 責務外
 
 - プロンプトの構築（スキル側）
-- タスクのステータス管理（スキル側）
-- 実行結果の評価（廃止。hooks または外部エージェントで対応）
 
 ## アーキテクチャ
 
@@ -27,7 +26,10 @@ Unix ドメインソケット C/S アーキテクチャの汎用ジョブラン�
 ┌─ ホスト ──────────────────────────────────────────────┐
 │                                                        │
 │  systemd user service                                  │
-│  └─ dispatcher server                               │
+│  └─ orchestrator server                             │
+│       ├─ Reducer (状態遷移の一元管理)                  │
+│       ├─ Hook Evaluator (条件評価 → フック起動)        │
+│       ├─ Job Executor (sandbox 実行、tmux 管理)        │
 │       ├─ asyncio.start_unix_server(SOCKET_PATH)        │
 │       ├─ ジョブキュー管理（max_slots）                  │
 │       ├─ fork: sandbox claude -p "..." (job 1)         │
@@ -41,7 +43,7 @@ Unix ドメインソケット C/S アーキテクチャの汎用ジョブラン�
 │  ┌─ サンドボックス ──────────────────────────────────┐ │
 │  │    │                                              │ │
 │  │  Claude Code (スキル実行中)                       │ │
-│  │    └─ dispatcher run --project bo             │ │
+│  │    └─ orchestrator run --project bo           │ │
 │  │        └─ connect(SOCKET_PATH) → ホストへ到達     │ │
 │  └───────────────────────────────────────────────────┘ │
 └────────────────────────────────────────────────────────┘
@@ -55,7 +57,8 @@ JSON over Unix ドメインソケット。改行区切り（1行1メッセージ
 
 | コマンド | フィールド | 説明 |
 |---------|-----------|------|
-| `run` | `project_id`, `prompt`(stdin/file), `session_id?`, `branch?` | ジョブを実行 |
+| `dispatch_action` | `task_id`, `action` (`{type, field?, value?}`) | タスクにアクションを送信 |
+| `run` | `project_id`, `prompt`(stdin/file), `task_id?`, `session_id?`, `branch?` | ジョブを実行 |
 | `resume` | `project_id`, `session_id` | 完了済みセッションを tmux で再開 |
 | `open` | `project_id`, `session?`, `worktree?` | 対話セッションを tmux で開く |
 | `status` | | 全ジョブのステータスを返す |
@@ -66,7 +69,9 @@ JSON over Unix ドメインソケット。改行区切り（1行1メッセージ
 | `log` | (CLI のみ) | ジョブの stdout/stderr ログを表示（ファイル直接読み取り） |
 
 ```json
-{"command": "run", "project_id": "bo", "prompt": "バグを修正してください", "session_id": "a1b2c3d4-..."}
+{"command": "dispatch_action", "task_id": "20260301-001", "action": {"type": "plan"}}
+{"command": "dispatch_action", "task_id": "20260301-001", "action": {"type": "update_field", "field": "pr.ci_status", "value": "success"}}
+{"command": "run", "project_id": "bo", "prompt": "バグを修正してください", "task_id": "20260301-001"}
 {"command": "run", "project_id": "bo", "prompt_file": "/path/to/prompt.md"}
 {"command": "resume", "project_id": "bo", "session_id": "a1b2c3d4-..."}
 {"command": "open", "project_id": "ubs-mgmt-tool", "session": "main"}
@@ -84,13 +89,13 @@ JSON over Unix ドメインソケット。改行区切り（1行1メッセージ
 {"ok": true, "dispatch_id": "bo-1", "session_id": "a1b2c3d4-...", "message": "Job started"}
 {"ok": true, "dispatch_id": "bo-2", "message": "Job queued (slot full)"}
 {"ok": true, "jobs": [
-  {"dispatch_id": "bo-1", "project_id": "bo", "status": "running", "pid": 12345, "working_dir": "/tmp/wt/bo-1", "branch": "task/20260301-001"},
-  {"dispatch_id": "bo-2", "project_id": "bo", "status": "queued", "pid": null}
+  {"dispatch_id": "bo-1", "project_id": "bo", "task_id": "20260301-001", "status": "running", "pid": 12345, "working_dir": "/tmp/wt/bo-1", "branch": "task/20260301-001"},
+  {"dispatch_id": "bo-2", "project_id": "bo", "task_id": "20260301-002", "status": "queued", "pid": null}
 ]}
 {"ok": false, "error": "Unknown dispatch_id: xyz"}
 ```
 
-## サーバ (`DispatchServer`)
+## サーバ (`OrchestratorServer`)
 
 ### ジョブステータス
 
@@ -99,14 +104,10 @@ queued → running → done
                  → failed
 ```
 
-### インメモリ状態管理
+### ジョブ状態の永続化
 
-サーバはジョブ状態をインメモリで管理する。永続化は行わない。
-サーバ再起動時にジョブ状態は失われるが、以下の理由で許容可能:
-
-- 実行中のジョブ（子プロセス）はサーバ再起動時に SIGTERM で終了する
-- 過去のジョブ履歴は不要（完了したタスクは index.jsonl の status で管理）
-- systemd の `Restart=on-failure` で自動復旧
+サーバはジョブ状態を `$XDG_RUNTIME_DIR/my-tasks-dispatch/jobs.jsonl` に永続化する。
+サーバ再起動時にジョブ状態を復元し、実行中だったジョブは `failed` としてマークする。
 
 ### Job データモデル
 
@@ -114,22 +115,38 @@ queued → running → done
 |---|---|---|
 | `dispatch_id` | string | `{project_id}-{連番}` |
 | `project_id` | string | プロジェクト ID |
+| `task_id` | string | 紐づくタスク ID |
 | `status` | string | `queued` / `running` / `done` / `failed` |
+| `session_id` | string | Claude Code セッション ID |
 | `pid` | int? | 子プロセス PID |
 | `exit_code` | int? | 終了コード |
 | `working_dir` | string | 作業ディレクトリ（worktree パス） |
 | `branch` | string? | worktree のブランチ名 |
+| `prompt` | string | 実行プロンプト |
+| `sandbox_profile_id` | string | サンドボックスプロファイル ID |
+| `env_files` | array | 環境ファイルパスのリスト |
+| `host_commands` | array | ホストコマンド定義のリスト |
+| `extra_binds` | array | 追加 bind mount のリスト |
 | `started_at` | string? | 開始日時 |
 | `finished_at` | string? | 終了日時 |
 
+### `dispatch_action` の実行フロー
+
+1. リクエスト受信（task_id + action）
+2. タスク YAML を読み込み
+3. Reducer で状態遷移を適用（無効なアクションは reject）
+4. タスク YAML を永続化
+5. Hook Evaluator で条件一致するフックを評価・起動（非同期）
+6. 再帰深度制限（5 レベル）でループ防止
+
 ### `run` の実行フロー
 
-1. リクエスト受信（project_id + prompt + session_id?）
+1. リクエスト受信（project_id + prompt + task_id? + session_id?）
 2. プロジェクト設定から `sandbox_profile`、`working_directory`、`host_commands` 等を解決
 3. `dispatch_id` を生成（`{project_id}-{連番}`）
 4. `session_id` が未指定の場合は UUID を生成
-5. スロットに空きがあり、かつ同一プロジェクトのジョブが実行中でなければ即実行、そうでなければ queue に追加
-6. worktree を作成（git リポジトリの場合）
+5. スロットに空きがあり、かつ同一ディレクトリのジョブが実行中でなければ即実行、そうでなければ queue に追加
+6. worktree を作成（プロジェクトの `worktree.enabled` が true の場合）
 7. `host_commands` が設定されている場合、`uuid4().hex` でトークン生成 → `HostCommandBroker.register(token, host_commands)`
 8. 環境情報の system prompt を構築（sandbox 制約、認証情報、ホストコマンド等）
 9. `$XDG_RUNTIME_DIR/my-tasks-dispatch/{dispatch_id}.log` にログファイルを作成
@@ -145,16 +162,16 @@ queued → running → done
 
 ```bash
 # 標準入力
-echo "{prompt}" | dispatcher run --project bo
+echo "{prompt}" | orchestrator run --project bo
 
 # ファイル
-dispatcher run --project bo --prompt-file /path/to/prompt.md
+orchestrator run --project bo --prompt-file /path/to/prompt.md
 
 # session_id を指定（Resume 用のセッション追跡）
-echo "{prompt}" | dispatcher run --project bo --session-id "a1b2c3d4-..."
+echo "{prompt}" | orchestrator run --project bo --session-id "a1b2c3d4-..."
 
 # branch を指定
-echo "{prompt}" | dispatcher run --project bo --branch "task/20260301-001"
+echo "{prompt}" | orchestrator run --project bo --branch "task/20260301-001"
 ```
 
 ### `resume` の実行フロー
@@ -209,6 +226,7 @@ echo "{prompt}" | dispatcher run --project bo --branch "task/20260301-001"
 | ファイル | パス | 説明 |
 |---|---|---|
 | ジョブログ | `$XDG_RUNTIME_DIR/my-tasks-dispatch/{dispatch_id}.log` | stdout/stderr 出力 |
+| ジョブ状態 | `$XDG_RUNTIME_DIR/my-tasks-dispatch/jobs.jsonl` | ジョブの永続化データ |
 
 ## 追加システムプロンプト
 
@@ -250,7 +268,7 @@ async def client_send(request: dict) -> dict:
         reader, writer = await asyncio.open_unix_connection(SOCKET_PATH)
     except (ConnectionRefusedError, FileNotFoundError):
         if is_inside_sandbox():
-            raise RuntimeError("Dispatch server is not running on the host.")
+            raise RuntimeError("Orchestrator server is not running on the host.")
         else:
             start_server_background()
             reader, writer = await retry_connect()
@@ -263,39 +281,48 @@ async def client_send(request: dict) -> dict:
 ### CLI コマンド
 
 ```bash
+# アクション送信
+orchestrator dispatch 20260301-001 plan
+orchestrator dispatch 20260301-001 dispatch
+orchestrator dispatch 20260301-001 request_resume
+orchestrator dispatch 20260301-001 request_feedback
+orchestrator dispatch 20260301-001 done
+orchestrator dispatch 20260301-001 abort
+orchestrator dispatch 20260301-001 update_field --field pr.ci_status --value success
+
 # ジョブ実行（プロンプトは stdin）
-echo "バグを修正して" | dispatcher run --project bo
-echo "バグを修正して" | dispatcher run --project bo --session-id "a1b2c3d4-..."
+echo "バグを修正して" | orchestrator run --project bo
+echo "バグを修正して" | orchestrator run --project bo --session-id "a1b2c3d4-..."
 
 # ジョブ実行（プロンプトはファイル）
-dispatcher run --project bo --prompt-file /path/to/prompt.md
+orchestrator run --project bo --prompt-file /path/to/prompt.md
 
 # ジョブ実行（ブランチ指定）
-echo "バグを修正して" | dispatcher run --project bo --branch "task/20260301-001"
+echo "バグを修正して" | orchestrator run --project bo --branch "task/20260301-001"
 
 # セッション再開（tmux で対話モード）
-dispatcher resume --project bo --session-id "a1b2c3d4-..."
+orchestrator resume --project bo --session-id "a1b2c3d4-..."
 
 # 対話的セッション
-dispatcher open --project ubs-mgmt-tool [--session main]
-dispatcher open --project bo --worktree /path/to/worktree
+orchestrator open --project ubs-mgmt-tool [--session main]
+orchestrator open --project bo --worktree /path/to/worktree
 
 # ステータス確認
-dispatcher status [--json]
+orchestrator status [--json]
 
 # ジョブ制御
-dispatcher cancel --id bo-1
-dispatcher kill --id bo-1
-dispatcher kill --all
+orchestrator cancel --id bo-1
+orchestrator kill --id bo-1
+orchestrator kill --all
 
 # ジョブ完了待機
-dispatcher wait --id bo-1
+orchestrator wait --id bo-1
 
 # ジョブの stdout/stderr ログを表示
-dispatcher log --id bo-1
+orchestrator log --id bo-1
 
 # サーバ起動（通常は systemd 経由）
-dispatcher server [--max-slots 8] [--repo ~/.local/share/my-tasks]
+orchestrator server [--max-slots 8] [--repo ~/.local/share/my-tasks]
 ```
 
 ## tmux セッション決定
@@ -316,6 +343,7 @@ dispatcher server [--max-slots 8] [--repo ~/.local/share/my-tasks]
 | working_directory がファイルシステムに存在しない | エラーレスポンス |
 | プロンプトが空 | エラーレスポンス |
 | 不明な dispatch_id | エラーレスポンス |
+| 無効なアクション（Reducer reject） | エラーレスポンス |
 | サーバ未起動（サンドボックス内） | エラー終了 |
 | サーバ未起動（ホスト） | バックグラウンド起動してリトライ |
 
@@ -331,8 +359,8 @@ dispatcher server [--max-slots 8] [--repo ~/.local/share/my-tasks]
 ```
 ┌─ ホスト ──────────────────────────────────────────────┐
 │                                                        │
-│  dispatcher server                                     │
-│    ├─ DispatchServer       (dispatcher.sock)           │
+│  orchestrator server                                   │
+│    ├─ OrchestratorServer   (dispatcher.sock)           │
 │    └─ HostCommandBroker    (host-cmd-broker.sock)      │
 │         ├─ token registry: {token → [host_commands]}   │
 │         └─ ホワイトリスト + パターンマッチで実行       │
@@ -431,7 +459,7 @@ dispatcher.sock と同じディレクトリに配置。sandbox で既に bind-mo
 
 ### 組み込み Host Command Broker
 
-`sandbox` CLI から直接実行する場合（dispatcher 経由でない場合）、`HOST_CMD_TOKEN` 環境変数が未設定なら
+`sandbox` CLI から直接実行する場合（orchestrator 経由でない場合）、`HOST_CMD_TOKEN` 環境変数が未設定なら
 `EmbeddedHostCommandBroker` が自動起動し、同一プロセス内でブローカーを提供する。
 
 ### セキュリティ特性

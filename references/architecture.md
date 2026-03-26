@@ -66,22 +66,24 @@ Claude Code（エージェント）が読み書きする前提で設計されて
 ### タスクステータス
 
 ```
-pending → in_progress → done
-                      → aborted
+pending → planning → executing → in_review → done
+                                            → aborted
 ```
 
-- `pending`: データソースから取り込まれた初期状態、または Plan/Dispatch 待ち
-- `in_progress`: ジョブ実行中、Plan 中、Feedback 待ちなど、作業が進行中の状態
+- `pending`: データソースから取り込まれた初期状態、Plan 待ち
+- `planning`: Plan セッションで精査・計画中
+- `executing`: ジョブ実行中
+- `in_review`: ジョブ完了後のレビュー待ち（Resume / Feedback / Done / Abort を受付）
 - `done`: 完了
-- `aborted`: 中止
+- `aborted`: 中止（任意の状態から遷移可能）
 
 ### 再オープン
 
 done タスクと同じ `remote_id` がデータソースから再出現した場合、新規タスクとして作成する。
 
-### ジョブステータス（ディスパッチャー側）
+### ジョブステータス（オーケストレーター側）
 
-ディスパッチャーはジョブの実行状態をインメモリで管理する。タスク管理の知識を持たない。
+オーケストレーターはジョブの実行状態を `jobs.jsonl` に永続化して管理する。
 
 ```
 queued → running → done
@@ -90,12 +92,17 @@ queued → running → done
 
 ### タスクとジョブの連携
 
-| イベント | タスクステータス遷移 |
-|---|---|
-| Dispatch 時（スキル側） | `pending` → `in_progress` |
-| ジョブ完了後（スキル側が判断） | `in_progress` → `done` or `aborted` |
+全ての状態遷移はオーケストレーターの Reducer が管理する。ダッシュボードや CLI は `dispatch_action` でアクションを送信し、Reducer が状態を遷移させ、条件に合致するフックが自動起動する。
 
-タスクステータスの管理は全てスキル側が行う。ディスパッチャーはジョブの実行と完了通知のみを担う。
+| アクション | タスクステータス遷移 |
+|---|---|
+| `plan` | `pending` → `planning` |
+| `dispatch` | `planning` → `executing` |
+| `job_completed`（フック） | `executing` → `in_review` |
+| `feedback_collected`（フック） | `in_review` → `executing` |
+| `ci_failed`（フック） | `in_review` → `executing` |
+| `done` | `in_review` → `done` |
+| `abort` | 任意 → `aborted` |
 
 ## git 操作ポリシー
 
@@ -136,21 +143,22 @@ bash "$SCRIPT_DIR/fetch-ms-todo.sh"
 
 新しいデータソースを追加した際はこのファイルに呼び出しを追記する。
 
-## ディスパッチャー
+## オーケストレーター
 
-Unix ドメインソケット C/S アーキテクチャの汎用ジョブランナー。
+Reducer + Hook Evaluator + Job Executor を統合した常駐プロセス。
+Unix ドメインソケット C/S アーキテクチャで、ダッシュボード・CLI・フックスクリプトからアクションを受け付ける。
 サーバは systemd user service として常駐し、asyncio でジョブキューと子プロセスを管理する。
-プロンプト構築はスキル側が行い、ディスパッチャーは実行環境（sandbox / worktree）の構築とジョブ実行を担う。
 
 ### ソケットパス
 
-- `$XDG_RUNTIME_DIR/my-tasks-dispatch/dispatcher.sock` — ジョブ管理
+- `$XDG_RUNTIME_DIR/my-tasks-dispatch/dispatcher.sock` — ジョブ管理・アクション送信
 - `$XDG_RUNTIME_DIR/my-tasks-dispatch/host-cmd-broker.sock` — ホストコマンドブローカー（認証情報取得含む）
 
 ### コマンド
 
 | コマンド | 説明 |
 |---------|------|
+| `dispatch_action` | タスクにアクションを送信（plan / dispatch / done / abort 等） |
 | `run` | プロンプトを受け取りジョブを実行（session_id 指定可） |
 | `resume` | 完了済みセッションを tmux で再開（session_id 指定） |
 | `open` | 対話的セッションを tmux で開く（worktree 指定可） |
@@ -161,7 +169,7 @@ Unix ドメインソケット C/S アーキテクチャの汎用ジョブラン�
 | `wait` | ジョブ完了まで接続を保持 |
 | `log` | ジョブログを表示（CLI のみ） |
 
-詳細は `dispatcher-design.md` を参照。
+詳細は `orchestrator-design.md` を参照。
 
 ## サンドボックス
 
@@ -195,13 +203,3 @@ sandbox --sandbox-profile restricted-default --working-dir /path/to/repo -- bash
 python3 ~/.claude/skills/my-tasks/scripts/sync-tasks.py --repo ~/.local/share/my-tasks --input /tmp/tasks.jsonl
 ```
 
-## オーケストレーション
-
-タスクに対する操作は以下の4つで構成される。全てスキル側（対話セッション or ダッシュボード）が起点。
-
-| 操作 | 説明 | 起点 |
-|------|------|------|
-| Plan | 対話セッションでタスクを精査・計画 | ダッシュボード → `open` |
-| Dispatch | `execute_prompt` をディスパッチャーの `run` に渡す | ダッシュボード or スキル |
-| Resume | 完了済みセッションを再開し軽微な修正 | ダッシュボード → `resume` |
-| Feedback | フィードバック収集 → 対応ジョブ Dispatch | ダッシュボード or スキル |
