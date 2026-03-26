@@ -8,6 +8,7 @@ VETH_HOST=veth-host
 VETH_AI=veth-ai
 HOST_IP=10.200.1.1/24
 AI_IP=10.200.1.2/24
+HOST_GATEWAY=10.200.1.100
 if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
   _HOME="/home/$SUDO_USER"
 else
@@ -58,7 +59,10 @@ sysctl -w net.ipv4.ip_forward=1 >/dev/null
 sysctl -w net.ipv4.conf."$VETH_HOST".route_localnet=1 >/dev/null
 ip netns exec "$NS_NAME" sysctl -w net.ipv4.conf."$VETH_AI".route_localnet=1 >/dev/null
 
-# 5. NAT (nftables masquerade)
+# 5. HOST_GATEWAY: ホスト localhost へのゲートウェイ IP
+ip addr add "${HOST_GATEWAY}/32" dev "$VETH_HOST"
+
+# 6. NAT (nftables masquerade)
 DEFAULT_IF=$(ip route | awk '/^default/{print $5; exit}')
 if [[ -z "$DEFAULT_IF" ]]; then
   echo "error: デフォルトインターフェースが見つかりません" >&2
@@ -69,7 +73,10 @@ nft 'add chain ip nat postrouting { type nat hook postrouting priority 100 ; }' 
 nft add rule ip nat postrouting oifname "$DEFAULT_IF" masquerade
 nft 'add chain ip nat prerouting { type nat hook prerouting priority -100 ; }' 2>/dev/null || true
 
-# 5b. DNS リスナー (systemd-resolved を 10.200.1.1 でも待ち受け)
+# HOST_GATEWAY → 127.0.0.1 一括 DNAT (全ポート)
+nft add rule ip nat prerouting iifname "$VETH_HOST" ip daddr "$HOST_GATEWAY" dnat to 127.0.0.1
+
+# 7. DNS リスナー (systemd-resolved を 10.200.1.1 でも待ち受け)
 RESOLVED_DROPIN_DIR=/etc/systemd/resolved.conf.d
 RESOLVED_DROPIN="$RESOLVED_DROPIN_DIR/ai-sandbox.conf"
 if [[ ! -f "$RESOLVED_DROPIN" ]]; then
@@ -81,7 +88,7 @@ EOF
   systemctl restart systemd-resolved
 fi
 
-# 6. ai-ns 内 outbound 制限
+# 8. ai-ns 内 outbound 制限
 ip netns exec "$NS_NAME" nft add table inet filter
 ip netns exec "$NS_NAME" nft 'add chain inet filter output { type filter hook output priority 0 ; policy drop ; }'
 ip netns exec "$NS_NAME" nft add rule inet filter output oifname "lo" accept
@@ -90,6 +97,9 @@ ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "${HOST_IP%/*}
 for proxy_port in "${PROXY_PORTS[@]}"; do
   ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "${HOST_IP%/*}" tcp dport "$proxy_port" accept
 done
+
+# HOST_GATEWAY 宛の全通信を許可 (ホスト localhost へのアクセス)
+ip netns exec "$NS_NAME" nft add rule inet filter output ip daddr "$HOST_GATEWAY" accept
 
 # SSH 許可 (GitHub / Bitbucket)
 for domain in github.com bitbucket.org; do

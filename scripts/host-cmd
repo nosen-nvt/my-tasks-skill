@@ -36,6 +36,7 @@ def main():
     request = {"token": token, "command": command, "args": args}
     if stdin_data:
         request["stdin"] = stdin_data
+    request["cwd"] = os.getcwd()
 
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

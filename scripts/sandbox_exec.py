@@ -1,7 +1,6 @@
 """sandbox_exec - bwrap + netns によるサンドボックス実行ロジック."""
 
 import fcntl
-import fnmatch
 import json
 import os
 import signal
@@ -13,10 +12,19 @@ import threading
 import uuid
 from pathlib import Path
 
+from host_cmd_common import (
+    check_command_args,
+    merge_command_defs,
+    resolve_builtin,
+    resolve_cmd_env_sync,
+    validate_cwd,
+)
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 NS_NAME = "ai-ns"
 LOCK_FILE = "/tmp/sandbox-netns.lock"
 LISTEN_ADDR = "10.200.1.1"
+HOST_GATEWAY = "10.200.1.100"
 HOME = Path.home()
 UID = os.getuid()
 CACHE_DIR = Path("~/.local/share/my-tasks/.cache").expanduser()
@@ -148,8 +156,11 @@ SANDBOX_PROFILES_DIR = Path("~/.local/share/my-tasks/sandbox-profiles").expandus
 # --- ホストコマンド解決 -------------------------------------------------------
 
 def resolve_host_commands(profile: dict) -> list[dict]:
-    """サンドボックスプロファイルから host_commands を解決する。"""
-    return profile.get("host_commands", [])
+    """サンドボックスプロファイルから host_commands を解決する。
+
+    builtin: true のコマンドはビルトイン定義で解決する。
+    """
+    return [resolve_builtin(cmd) for cmd in profile.get("host_commands", [])]
 
 
 def _host_cmd_binds(host_commands: list[dict]) -> list[str]:
@@ -202,11 +213,6 @@ def resolve_proxy_port(profile: dict) -> int | None:
         with open(pp, encoding="utf-8") as f:
             return json.load(f).get("port")
     return None
-
-
-def resolve_host_forward_ports(profile: dict) -> list[int]:
-    """プロファイルから host_forward_ports を取得する。"""
-    return [int(p) for p in profile.get("host_forward_ports", [])]
 
 
 def resolve_extra_binds(binds: list[dict]) -> list[str]:
@@ -283,102 +289,6 @@ def load_env_files(paths: list[str]) -> list[str]:
     return args
 
 
-# --- ホストポートフォワーディング -----------------------------------------------
-
-def _ensure_prerouting_chain() -> None:
-    """nat テーブルに prerouting チェーンが無ければ作成する。"""
-    result = subprocess.run(
-        ["sudo", "nft", "list", "chain", "ip", "nat", "prerouting"],
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        subprocess.run([
-            "sudo", "nft", "add", "chain", "ip", "nat", "prerouting",
-            "{ type nat hook prerouting priority -100 ; }",
-        ], check=True)
-
-
-def _ensure_ns_nat_chains() -> None:
-    """ai-ns 内の nat テーブルと output/postrouting チェーンが無ければ作成する。"""
-    result = subprocess.run(
-        ["sudo", "ip", "netns", "exec", NS_NAME,
-         "nft", "list", "table", "ip", "nat"],
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        subprocess.run([
-            "sudo", "ip", "netns", "exec", NS_NAME,
-            "nft", "add", "table", "ip", "nat",
-        ], check=True)
-    for chain, hook, prio in [
-        ("output", "output", "-100"),
-        ("postrouting", "postrouting", "100"),
-    ]:
-        res = subprocess.run(
-            ["sudo", "ip", "netns", "exec", NS_NAME,
-             "nft", "list", "chain", "ip", "nat", chain],
-            capture_output=True,
-        )
-        if res.returncode != 0:
-            subprocess.run([
-                "sudo", "ip", "netns", "exec", NS_NAME,
-                "nft", "add", "chain", "ip", "nat", chain,
-                f"{{ type nat hook {hook} priority {prio} ; }}",
-            ], check=True)
-
-
-def setup_host_port_forwarding(ports: list[int]) -> None:
-    """ai-ns 内の 127.0.0.1:port をホスト側 localhost に透過転送する。
-
-    3 段階の NAT で実現:
-      ① ai-ns nat OUTPUT:      dst 127.0.0.1 → 10.200.1.1 (DNAT)
-      ② ai-ns nat POSTROUTING: src 127.0.0.1 → 10.200.1.2 (masquerade)
-      ③ ホスト nat PREROUTING:  dst 10.200.1.1 → 127.0.0.1 (DNAT)
-    応答は conntrack が自動逆変換する。
-    """
-    _ensure_prerouting_chain()
-    _ensure_ns_nat_chains()
-    # route_localnet: veth 経由の 127.0.0.0/8 パケットを許可
-    subprocess.run([
-        "sudo", "sysctl", "-w", "net.ipv4.conf.veth-host.route_localnet=1",
-    ], check=True, capture_output=True)
-    subprocess.run([
-        "sudo", "ip", "netns", "exec", NS_NAME,
-        "sysctl", "-w", "net.ipv4.conf.veth-ai.route_localnet=1",
-    ], check=True, capture_output=True)
-    # ② ai-ns postrouting masquerade (src=127.0.0.1 → veth-ai IP)
-    subprocess.run([
-        "sudo", "ip", "netns", "exec", NS_NAME,
-        "nft", "add", "rule", "ip", "nat", "postrouting",
-        "ip", "saddr", "127.0.0.1", "oifname", "veth-ai",
-        "masquerade",
-    ], check=True)
-    for port in ports:
-        # ① ai-ns output DNAT (dst 127.0.0.1:port → LISTEN_ADDR:port)
-        subprocess.run([
-            "sudo", "ip", "netns", "exec", NS_NAME,
-            "nft", "add", "rule", "ip", "nat", "output",
-            "ip", "daddr", "127.0.0.1",
-            "tcp", "dport", str(port),
-            "dnat", "to", LISTEN_ADDR,
-        ], check=True)
-        # ai-ns filter output 許可
-        subprocess.run([
-            "sudo", "ip", "netns", "exec", NS_NAME,
-            "nft", "add", "rule", "inet", "filter", "output",
-            "ip", "daddr", LISTEN_ADDR,
-            "tcp", "dport", str(port),
-            "accept",
-        ], check=True)
-        # ③ ホスト側 prerouting DNAT (dst LISTEN_ADDR:port → 127.0.0.1)
-        subprocess.run([
-            "sudo", "nft", "add", "rule", "ip", "nat", "prerouting",
-            "iifname", "veth-host",
-            "tcp", "dport", str(port),
-            "dnat", "to", "127.0.0.1",
-        ], check=True)
-
-
 # --- bwrap 引数構築 -----------------------------------------------------------
 
 def _base_binds() -> list[str]:
@@ -414,6 +324,32 @@ def _socket_binds() -> list[str]:
     return ["--bind", d, d]
 
 
+def _worktree_git_binds(work: str) -> list[str]:
+    """worktree の場合、親リポジトリの .git ディレクトリを rw バインドする引数を返す。
+
+    git worktree では .git がファイルで、"gitdir: <parent>/.git/worktrees/<name>" を含む。
+    commit 時に親の .git/ (objects, refs 等) への書き込みが必要なため rw で追加バインドする。
+    """
+    git_file = Path(work) / ".git"
+    if not git_file.is_file():
+        return []
+    try:
+        content = git_file.read_text().strip()
+        if not content.startswith("gitdir: "):
+            return []
+        gitdir = content[len("gitdir: "):]
+        gitdir_path = Path(gitdir)
+        if not gitdir_path.is_absolute():
+            gitdir_path = (git_file.parent / gitdir_path).resolve()
+        # .git/worktrees/<name> → .git
+        parent_git = gitdir_path.parent.parent
+        if parent_git.is_dir() and parent_git.name == ".git":
+            return ["--bind", str(parent_git), str(parent_git)]
+    except OSError:
+        pass
+    return []
+
+
 def _env_args(env_file_args: list[str], broker_args: list[str]) -> list[str]:
     return [
         "--clearenv",
@@ -435,7 +371,14 @@ class EmbeddedHostCommandBroker:
     def __init__(self, sock_path: str, token: str, host_commands: list[dict]):
         self._sock_path = sock_path
         self._token = token
-        self._host_commands = host_commands
+        # env を事前解決して _resolved_env に格納
+        resolved: list[dict] = []
+        for cmd in host_commands:
+            cmd = dict(cmd)
+            if cmd.get("env"):
+                cmd["_resolved_env"] = resolve_cmd_env_sync(cmd["env"])
+            resolved.append(cmd)
+        self._host_commands = resolved
         self._running = False
         self._server_sock: socket.socket | None = None
 
@@ -478,7 +421,8 @@ class EmbeddedHostCommandBroker:
             command = request.get("command", "")
             args = request.get("args", [])
             stdin = request.get("stdin")
-            response = self._process(token, command, args, stdin)
+            cwd = request.get("cwd")
+            response = self._process(token, command, args, stdin, cwd)
             conn.sendall(json.dumps(response, ensure_ascii=False).encode() + b"\n")
         except Exception:
             try:
@@ -488,7 +432,8 @@ class EmbeddedHostCommandBroker:
         finally:
             conn.close()
 
-    def _process(self, token: str, command: str, args: list[str], stdin: str | None) -> dict:
+    def _process(self, token: str, command: str, args: list[str],
+                 stdin: str | None, cwd: str | None) -> dict:
         if not token or token != self._token:
             return {"ok": False, "error": "invalid token"}
 
@@ -496,32 +441,38 @@ class EmbeddedHostCommandBroker:
         if not matching_defs:
             return {"ok": False, "error": f"command not allowed: {command}"}
 
-        # 同名コマンドの allowed_patterns をマージ
-        cmd_def = matching_defs[0]
-        all_patterns: list | str = []
-        allow_stdin = False
-        for d in matching_defs:
-            allow_stdin = allow_stdin or d.get("allow_stdin", False)
-            p = d.get("allowed_patterns", [])
-            if p == "*":
-                all_patterns = "*"
-                break
-            if isinstance(all_patterns, list):
-                all_patterns.extend(p)
+        merged = merge_command_defs(matching_defs)
 
-        if all_patterns != "*":
-            args_str = " ".join(args)
-            if not any(fnmatch.fnmatch(args_str, pat) for pat in all_patterns):
-                return {"ok": False, "error": f"args not allowed: {command} {args_str}"}
+        # cwd 検証
+        cwd_error = validate_cwd(cwd, merged)
+        if cwd_error:
+            return {"ok": False, "error": cwd_error}
 
-        if stdin is not None and not allow_stdin:
+        # 引数検証 (denied_patterns → allowed_subcommands → allowed_patterns)
+        args_error = check_command_args(merged, args)
+        if args_error:
+            return {"ok": False, "error": args_error}
+
+        # stdin 検証
+        if stdin is not None and not merged.get("allow_stdin", False):
             return {"ok": False, "error": f"stdin not allowed for {command}"}
+
+        # 実行環境の構築
+        exec_env = None
+        resolved_env = merged.get("_resolved_env", {})
+        if resolved_env:
+            exec_env = os.environ.copy()
+            exec_env.update(resolved_env)
+
+        exec_cwd = cwd if cwd else None
 
         try:
             proc = subprocess.run(
-                [cmd_def["path"], *args],
+                [merged["path"], *args],
                 input=stdin.encode() if stdin is not None else None,
                 capture_output=True,
+                env=exec_env,
+                cwd=exec_cwd,
             )
             return {
                 "ok": True,
@@ -551,7 +502,6 @@ def build_netns_args(
     env_file_args: list[str],
     broker_args: list[str],
     command: list[str],
-    host_forward_ports: list[int] | None = None,
     host_cmd_binds: list[str] | None = None,
 ) -> list[str]:
     resolv = tempfile.NamedTemporaryFile(
@@ -604,13 +554,15 @@ def build_netns_args(
         "--ro-bind-try", f"{HOME}/.config/uv", f"{HOME}/.config/uv",
         *profile_binds,
         *(["--bind", work, work] if work != str(HOME) else []),
+        *_worktree_git_binds(work),
         *_my_tasks_binds(),
         "--chdir", work,
         *_env_args(env_file_args, broker_args),
         "--setenv", "PATH", f"/usr/bin:{HOME}/.local/bin:{HOME}/go/bin:{HOME}/.bun/bin:{HOME}/.volta/bin",
         "--setenv", "http_proxy", f"http://{LISTEN_ADDR}:{proxy_port}",
         "--setenv", "https_proxy", f"http://{LISTEN_ADDR}:{proxy_port}",
-        *(["--setenv", "no_proxy", f"{LISTEN_ADDR},localhost,127.0.0.1"] if host_forward_ports else []),
+        "--setenv", "no_proxy", f"{HOST_GATEWAY},{LISTEN_ADDR},localhost,127.0.0.1",
+        "--setenv", "HOST_GATEWAY", HOST_GATEWAY,
         "--setenv", "SANDBOX_HOST", LISTEN_ADDR,
         "--setenv", "WORKDIR", work,
         "--setenv", "GOOGLE_CHAT_WEBHOOK_URL", os.environ.get("GOOGLE_CHAT_WEBHOOK_URL", ""),
@@ -639,6 +591,7 @@ def build_host_network_args(
                      f"{HOME}/src/github.com/nosen-nvt/my-tasks-skill",
         *profile_binds,
         *(["--bind", work, work] if work != str(HOME) else []),
+        *_worktree_git_binds(work),
         "--chdir", work,
         *_env_args(env_file_args, broker_args),
         "--setenv", "PATH", f"/usr/bin:{HOME}/.local/bin:{HOME}/.volta/bin:{HOME}/go/bin",
@@ -722,13 +675,9 @@ def build_exec_args(
     if proxy_port is None:
         proxy_port = resolve_proxy_port(profile) or 3128
 
-    host_forward_ports = resolve_host_forward_ports(profile)
-
     if network_protected:
         ensure_netns()
-        if host_forward_ports:
-            setup_host_port_forwarding(host_forward_ports)
-        return build_netns_args(work, proxy_port, profile_binds, env_file_args, broker_args, command, host_forward_ports, hc_binds)
+        return build_netns_args(work, proxy_port, profile_binds, env_file_args, broker_args, command, hc_binds)
     else:
         return build_host_network_args(work, profile_binds, env_file_args, broker_args, command, hc_binds)
 
