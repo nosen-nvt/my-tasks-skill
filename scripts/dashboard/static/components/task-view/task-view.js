@@ -58,7 +58,9 @@ function buildTaskActionsHTML(task, taskData) {
 
   if (status === "pending") {
     if (hasProject)
-      html += `<button class="action-btn primary" data-action="plan" data-task-id="${task.id}">Plan</button>`;
+      html += `<button class="action-btn" data-action="plan" data-task-id="${task.id}">Plan</button>`;
+    if (hasPrompt && hasProject)
+      html += `<button class="action-btn primary" data-action="dispatch" data-task-id="${task.id}">Dispatch</button>`;
     html += `<button class="action-btn danger" data-action="abort" data-task-id="${task.id}">Abort</button>`;
   }
 

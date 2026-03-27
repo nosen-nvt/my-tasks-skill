@@ -159,13 +159,14 @@ class ExecutorMixin:
             self._save_jobs()
             log.info(f"Job finished: {job.dispatch_id} status={job.status} exit_code={job.exit_code}")
 
-            # タスク状態遷移: dispatch_action で job_completed を発行
+            # タスク状態遷移: 成功時は job_completed、失敗時は job_failed を発行
             if job.task_id:
+                action_type = "job_completed" if job.status == "done" else "job_failed"
                 try:
                     asyncio.create_task(
-                        self.dispatch_action(job.task_id, Action(type="job_completed"))
+                        self.dispatch_action(job.task_id, Action(type=action_type))
                     )
-                    log.info(f"Task {job.task_id}: job_completed action dispatched")
+                    log.info(f"Task {job.task_id}: {action_type} action dispatched")
                 except Exception as e:
                     log.error(f"dispatch_action error for task {job.task_id}: {e}")
 

@@ -46,7 +46,7 @@ def reduce(task: TaskData, action: Action) -> TaskData | str:
         case ("planning", "plan"):
             pass  # planning のまま（再精査）
 
-        case ("planning", "dispatch"):
+        case ("pending" | "planning", "dispatch"):
             new.status = "executing"
 
         case ("in_review", "request_resume"):
@@ -64,6 +64,9 @@ def reduce(task: TaskData, action: Action) -> TaskData | str:
         # --- フックからのアクション ---
         case ("executing", "job_completed"):
             new.status = "in_review"
+
+        case ("executing", "job_failed"):
+            new.status = "pending"
 
         case ("in_review", "feedback_collected"):
             new.status = "executing"
